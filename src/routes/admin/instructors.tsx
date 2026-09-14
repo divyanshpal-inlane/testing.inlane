@@ -60,9 +60,10 @@ import {
   useRef,
   useState,
 } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { SearchInstructorScheduleInfo } from "@/components/admin/InstructorScheduleInfo";
+import { ReviewInstructorCard } from "@/components/admin/ReviewInstructorCard";
 import { CalendarImport } from "@/components/instructor/CalendarImport";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -99,6 +100,8 @@ import { useToast } from "@/components/ui/use-toast";
 import { useAdminImportedCalendar } from "@/hooks/useAdminImportedCalendar";
 import { supabase } from "@/lib/supabaseClient";
 import { cn } from "@/lib/utils";
+import { useReviewInstructors } from "@/queries/instructorReview";
+
 import { checkInstructorAvailability } from "@/queries/instructor";
 import {
   INSTRUCTOR_STATUSES,
@@ -643,6 +646,24 @@ const AddressAutocomplete = memo(
 
 export default function InstructorsManagement() {
   const navigate = useNavigate();
+  const { data: reviewInstructors = [] } = useReviewInstructors();
+  const reviewCount = reviewInstructors.length;
+  
+  // Review stage filter state - must be defined before useMemo
+  const [reviewStageFilter, setReviewStageFilter] = useState<"all" | "stage1_documents" | "stage2_pedal_video">("all");
+
+  // Get filtered review instructors based on stage
+  const filteredReviewInstructors = useMemo(() => {
+    if (reviewStageFilter === "all") {
+      return reviewInstructors;
+    }
+    return reviewInstructors.filter((instructor) => instructor.stage === reviewStageFilter);
+  }, [reviewInstructors, reviewStageFilter]);
+
+  // Count instructors by stage for the sub-tabs
+  const stage1Count = reviewInstructors.filter((i) => i.stage === "stage1_documents").length;
+  const stage2Count = reviewInstructors.filter((i) => i.stage === "stage2_pedal_video").length;
+
   const { data: currentAdmin } = useCurrentAdmin();
   const { data: currentUser } = useCurrentUser();
   const canViewUnmaskedPhoneNumbers =
@@ -772,6 +793,29 @@ export default function InstructorsManagement() {
         ? prev.filter((s) => s !== status)
         : [...prev, status],
     );
+  };
+
+  // Review filter toggle
+  const [showReviewFilter, setShowReviewFilter] = useState(false);
+  const [searchParams] = useSearchParams();
+
+  // Check URL for tab=review parameter on component mount
+  useEffect(() => {
+    const tabParam = searchParams.get("tab");
+    if (tabParam === "review") {
+      setShowReviewFilter(true);
+      setStatusFilter([]);
+      setReviewStageFilter("all");
+    }
+  }, [searchParams]);
+
+  const toggleReviewFilter = () => {
+    setShowReviewFilter((prev) => !prev);
+    // Clear status filter when switching to review view
+    if (!showReviewFilter) {
+      setStatusFilter([]);
+      setReviewStageFilter("all");
+    }
   };
 
   // Add tentative schedule info
@@ -1333,6 +1377,22 @@ export default function InstructorsManagement() {
             </button>
           );
         })}
+        <button
+          type="button"
+          onClick={toggleReviewFilter}
+          className={cn(
+            "flex items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors",
+            showReviewFilter
+              ? "border-purple-500 bg-purple-50 text-purple-700 font-semibold"
+              : "border-input bg-white text-muted-foreground hover:bg-muted"
+          )}
+        >
+          <span className={cn("h-2 w-2 rounded-full", showReviewFilter ? "bg-purple-500" : "bg-purple-500")} />
+          Review
+          <span className={cn("rounded-full px-1.5 text-xs font-semibold", showReviewFilter ? "bg-white text-purple-700" : "bg-muted text-muted-foreground")}>
+            {reviewCount}
+          </span>
+        </button>
         {statusFilter.length > 0 && (
           <button
             type="button"
@@ -1344,7 +1404,75 @@ export default function InstructorsManagement() {
           </button>
         )}
       </div>
-      {isLoading ? (
+
+      {/* Review stage filter tabs - Show when Review tab is selected */}
+      {showReviewFilter && (
+        <div className="flex flex-wrap gap-2 px-6 py-4 border-t bg-white">
+          <button
+            type="button"
+            onClick={() => setReviewStageFilter("all")}
+            className={cn(
+              "flex items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors font-medium",
+              reviewStageFilter === "all"
+                ? "border-purple-500 bg-white text-gray-900"
+                : "border-gray-300 bg-gray-100 text-gray-600 hover:bg-gray-150"
+            )}
+          >
+            All
+            <span className={cn("rounded-full px-1.5 text-xs font-semibold", reviewStageFilter === "all" ? "bg-gray-200 text-gray-700" : "bg-gray-200 text-gray-700")}>
+              {reviewCount}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setReviewStageFilter("stage1_documents")}
+            className={cn(
+              "flex items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors font-medium",
+              reviewStageFilter === "stage1_documents"
+                ? "border-purple-500 bg-white text-gray-900"
+                : "border-gray-300 bg-gray-100 text-gray-600 hover:bg-gray-150"
+            )}
+          >
+            Stage 1 · Documents
+            <span className={cn("rounded-full px-1.5 text-xs font-semibold", reviewStageFilter === "stage1_documents" ? "bg-gray-200 text-gray-700" : "bg-gray-200 text-gray-700")}>
+              {stage1Count}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setReviewStageFilter("stage2_pedal_video")}
+            className={cn(
+              "flex items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors font-medium",
+              reviewStageFilter === "stage2_pedal_video"
+                ? "border-purple-500 bg-white text-gray-900"
+                : "border-gray-300 bg-gray-100 text-gray-600 hover:bg-gray-150"
+            )}
+          >
+            Stage 2 · Pedal video
+            <span className={cn("rounded-full px-1.5 text-xs font-semibold", reviewStageFilter === "stage2_pedal_video" ? "bg-gray-200 text-gray-700" : "bg-gray-200 text-gray-700")}>
+              {stage2Count}
+            </span>
+          </button>
+        </div>
+      )}
+
+      {/* Show review instructors when Review tab is selected, otherwise show status-filtered instructors */}
+      {showReviewFilter ? (
+        // Review tab selected - show review instructor cards
+        filteredReviewInstructors && filteredReviewInstructors.length > 0 ? (
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3 px-6 py-4">
+            {filteredReviewInstructors.map((reviewInstructor) => (
+              <ReviewInstructorCard key={reviewInstructor.id} instructor={reviewInstructor} />
+            ))}
+          </div>
+        ) : (
+          <div className="flex h-64 items-center justify-center">
+            <p className="text-gray-500">No instructors in review</p>
+          </div>
+        )
+      ) : isLoading ? (
         <div className="flex h-64 items-center justify-center">
           <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent">
             <ChevronsUpDown> </ChevronsUpDown>

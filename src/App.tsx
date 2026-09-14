@@ -49,6 +49,7 @@ import DLTestSlots from "@/routes/admin/DLTestSlots";
 import UserManagement from "@/routes/admin/UserManagement";
 import InstructorEarnings from "@/routes/admin/InstructorEarnings";
 import InstructorOnboardingPage from "@/routes/admin/instructor-onboarding";
+import InstructorApprovalPage from "@/routes/admin/instructor-approval";
 import InstructorMatrix from "@/routes/admin/InstructorMatrix";
 import InstructorsManagement, {
   InstructorSchedulePage,
@@ -348,6 +349,10 @@ export default function App() {
                 <Route
                   path="instructors/:id"
                   element={<InstructorSchedulePage />}
+                />
+                <Route
+                  path="instructor-approval/:id"
+                  element={<InstructorApprovalPage />}
                 />
 
                 <Route
