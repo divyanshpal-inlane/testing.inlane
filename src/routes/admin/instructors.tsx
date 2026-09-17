@@ -1,10 +1,12 @@
 import { describe } from "node:test";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { maskCarNumber, maskPhoneNumber } from "@/utils/phoneMasking";
-import { useCurrentAdmin } from "@/queries/adminPermissions";
-import { useCurrentUser } from "@/queries/userManagement";
-import { usePhoneVisibility } from "@/context/phone-visibility-context";
+import {
+  InfiniteData,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   addDays,
   addHours,
@@ -56,11 +58,17 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import {
+  useLocation,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
 
 import { SearchInstructorScheduleInfo } from "@/components/admin/InstructorScheduleInfo";
 import { CalendarImport } from "@/components/instructor/CalendarImport";
@@ -96,10 +104,6 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useToast } from "@/components/ui/use-toast";
-import { useAdminImportedCalendar } from "@/hooks/useAdminImportedCalendar";
-import { supabase } from "@/lib/supabaseClient";
-import { cn } from "@/lib/utils";
-import { checkInstructorAvailability } from "@/queries/instructor";
 import {
   INSTRUCTOR_STATUSES,
   InstructorStatus,
@@ -107,7 +111,15 @@ import {
   instructorStatusToEnabled,
   resolveInstructorStatus,
 } from "@/constants/instructorStatus";
+import { usePhoneVisibility } from "@/context/phone-visibility-context";
+import { useAdminImportedCalendar } from "@/hooks/useAdminImportedCalendar";
+import { supabase } from "@/lib/supabaseClient";
+import { cn } from "@/lib/utils";
+import { useCurrentAdmin } from "@/queries/adminPermissions";
+import { checkInstructorAvailability } from "@/queries/instructor";
+import { useCurrentUser } from "@/queries/userManagement";
 import { SlotConfig } from "@/types/schedule";
+import { maskCarNumber, maskPhoneNumber } from "@/utils/phoneMasking";
 
 import { Schedule } from "./schedules";
 
@@ -172,6 +184,59 @@ interface ServiceableArea {
   name: string;
   postal_code?: string;
 }
+
+const INSTRUCTOR_PAGE_SIZE = 6;
+type InstructorStatusFilter = "all" | InstructorStatus;
+
+interface InstructorListPage {
+  instructors: (InstructorFromDB & { schedules: Schedule[] })[];
+  hasMore: boolean;
+  nextOffset: number;
+}
+
+interface InstructorListReturnState {
+  statusFilter: InstructorStatusFilter;
+  searchTerm: string;
+  debouncedSearchTerm: string;
+  listSession: number;
+  scrollY: number;
+  data: InfiniteData<InstructorListPage, number>;
+  dataUpdatedAt: number;
+}
+
+// One pending return from View Schedule; retain pages even if the query expires.
+let instructorListReturnState: InstructorListReturnState | undefined;
+
+const INSTRUCTOR_STATUS_FILTERS = [
+  {
+    value: "all" as const,
+    label: "All",
+    badgeClass: "bg-primary/10 text-primary",
+    dotClass: "bg-primary",
+  },
+  ...INSTRUCTOR_STATUSES,
+];
+
+// Supabase's `.or()` accepts raw PostgREST filter syntax, so strip the
+// characters that can break an individual filter expression before using a
+// user-entered search term in it.
+const instructorSearchFilter = (searchTerm: string) => {
+  const safeTerm = searchTerm
+    .trim()
+    .replace(/[(),"\\]/g, " ")
+    .replace(/\s+/g, " ");
+
+  if (!safeTerm) return "";
+
+  return [
+    `name.ilike.*${safeTerm}*`,
+    `phone.ilike.*${safeTerm}*`,
+    `car_make.ilike.*${safeTerm}*`,
+    `car_mode.ilike.*${safeTerm}*`,
+    `car_number.ilike.*${safeTerm}*`,
+    `areas.cs.{"${safeTerm}"}`,
+  ].join(",");
+};
 
 // Three-way status setter (Active / On Break / Inactive) shared by the list
 // cards and the instructor profile header. Updates Instructor.status, keeps
@@ -643,6 +708,27 @@ const AddressAutocomplete = memo(
 
 export default function InstructorsManagement() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Keep list filters in the route so returning from a schedule restores them.
+  const searchTerm = searchParams.get("search") ?? "";
+  const statusFilter: InstructorStatusFilter =
+    INSTRUCTOR_STATUS_FILTERS.find(
+      ({ value }) => value === searchParams.get("status"),
+    )?.value ?? "all";
+
+  const updateListFilter = (key: "search" | "status", value: string) => {
+    setSearchParams(
+      (previous) => {
+        const next = new URLSearchParams(previous);
+        if (value) next.set(key, value);
+        else next.delete(key);
+        return next;
+      },
+      { replace: true },
+    );
+  };
+
   const { data: currentAdmin } = useCurrentAdmin();
   const { data: currentUser } = useCurrentUser();
   const canViewUnmaskedPhoneNumbers =
@@ -679,9 +765,6 @@ export default function InstructorsManagement() {
   const [unavailabilityData, setUnavailabilityData] = useState<
     Partial<Unavailability>
   >({});
-
-  // instructor search bar
-  const [searchTerm, setSearchTerm] = useState("");
 
   // Delete instructor
   const [deleteConfirmInstructorId, setDeleteConfirmInstructorId] = useState<
@@ -760,19 +843,35 @@ export default function InstructorsManagement() {
     },
   });
 
-  // Multi-select status filter (Active / On Break / Inactive). Empty
-  // selection = no filter = full list. Selections combine with OR logic.
-  // State is per-visit: it survives interactions on this tab but resets on
-  // navigation away, per the PRD.
-  const [statusFilter, setStatusFilter] = useState<InstructorStatus[]>([]);
+  const [returnState] = useState(() =>
+    instructorListReturnState?.statusFilter === statusFilter &&
+    instructorListReturnState.searchTerm === searchTerm
+      ? instructorListReturnState
+      : undefined,
+  );
+  const [listSession, setListSession] = useState(returnState?.listSession ?? 0);
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(
+    returnState?.debouncedSearchTerm ?? searchTerm,
+  );
+  const pendingScrollRestorationRef = useRef(returnState);
 
-  const toggleStatusFilter = (status: InstructorStatus) => {
-    setStatusFilter((prev) =>
-      prev.includes(status)
-        ? prev.filter((s) => s !== status)
-        : [...prev, status],
-    );
+  const selectStatusFilter = (status: InstructorStatusFilter) => {
+    queryClient.cancelQueries({ queryKey: ["instructors", "list"] });
+    updateListFilter("status", status === "all" ? "" : status);
+    setListSession((session) => session + 1);
   };
+
+  const clearStatusFilter = () => {
+    selectStatusFilter("all");
+  };
+
+  useEffect(() => {
+    const timeout = window.setTimeout(
+      () => setDebouncedSearchTerm(searchTerm),
+      300,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [searchTerm]);
 
   // Add tentative schedule info
   // Fetch all servicable areas for suggestions
@@ -865,145 +964,149 @@ export default function InstructorsManagement() {
     [],
   );
 
-  // Fetch all instructors along with their schedules
-  // const { data: instructors, isLoading } = useQuery({
-  //   queryKey: ["instructors"],
-  //   queryFn: async () => {
-  //     const { data, error } = await supabase
-  //       .from("Instructor")
-  //       .select(
-  //         `
-  //         *,
-  //         schedules:Schedule (
-  //           id,
-  //           date,
-  //           start_time,
-  //           end_time,
-  //           learner:learner_id ( name )
-  //         )
-  //       `,
-  //       )
-  //       .order("name");
+  const searchFilter = useMemo(
+    () => instructorSearchFilter(debouncedSearchTerm),
+    [debouncedSearchTerm],
+  );
 
-  //     if (error) throw error;
-  //     return data as (InstructorFromDB & { schedules: Schedule[] })[];
-  //   },
-  // });
-
-  const { data: instructors, isLoading } = useQuery({
-    queryKey: ["instructors"],
+  // Counts are independent HEAD requests: Postgres returns only each exact
+  // count, never the instructor rows used by the card list.
+  const {
+    data: statusCounts = { all: 0, active: 0, on_break: 0, inactive: 0 },
+    isLoading: areStatusCountsLoading,
+    isError: areStatusCountsError,
+  } = useQuery({
+    queryKey: ["instructors", "status-counts"],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("Instructor")
-        .select(
-          `
-          *,
-          schedules:Schedule (
-            id,
-            date,
-            status,
-            pause_reason,
-            pause_notes,
-            start_time,
-            end_time,
-            course_id,
-            isTentative,
-            tentative_details,
-            learner:learner_id ( name, phone, pick_up_location, address_lat, address_lng),
-            lesson:lesson_id (number)
-          )
-        `,
-          {
-            // This is the options object, placed outside the string
-            count: "exact",
-            head: false,
-            foreignTableJoins: "schedules(left)",
-          },
-        )
-        .order("name");
+      const entries = await Promise.all(
+        INSTRUCTOR_STATUS_FILTERS.map(async ({ value }) => {
+          let query = supabase
+            .from("Instructor")
+            .select("id_instructor", { count: "exact", head: true });
 
-      if (error) throw error;
-      return data as (InstructorFromDB & { schedules: Schedule[] })[];
+          if (value !== "all") query = query.eq("status", value);
+
+          const { count, error } = await query;
+          if (error) throw error;
+          return [value, count ?? 0] as const;
+        }),
+      );
+
+      return Object.fromEntries(entries) as Record<
+        InstructorStatusFilter,
+        number
+      >;
     },
   });
 
-  // Memoized to avoid re-rendering full calender when filling calender events input fields
-  const memoizedInstructors = useMemo(() => instructors, [instructors]);
+  const isReturningToList =
+    returnState?.statusFilter === statusFilter &&
+    returnState.debouncedSearchTerm === debouncedSearchTerm &&
+    returnState.listSession === listSession;
 
-  const searchedInstructors = useMemo(() => {
-    if (!memoizedInstructors) return [];
+  const {
+    data: instructorPages,
+    dataUpdatedAt,
+    isLoading: isInstructorListLoading,
+    isError: isInstructorListError,
+    error: instructorListError,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery<
+    InstructorListPage,
+    Error,
+    InfiniteData<InstructorListPage, number>,
+    (string | number)[],
+    number
+  >({
+    queryKey: [
+      "instructors",
+      "list",
+      statusFilter,
+      debouncedSearchTerm,
+      listSession,
+    ],
+    initialData: isReturningToList ? returnState.data : undefined,
+    initialDataUpdatedAt: isReturningToList
+      ? returnState.dataUpdatedAt
+      : undefined,
+    // Reuse the loaded pages on return, but still refresh explicitly invalidated data.
+    refetchOnMount: (query) => !isReturningToList || query.state.isInvalidated,
+    initialPageParam: 0,
+    queryFn: async ({ pageParam, signal }) => {
+      // Fetch one extra row so we can detect another page without running an
+      // additional count query for the card list.
+      let query = supabase
+        .from("Instructor")
+        .select("*")
+        .order("name")
+        .order("id_instructor")
+        .range(pageParam, pageParam + INSTRUCTOR_PAGE_SIZE)
+        .abortSignal(signal);
 
-    const query = searchTerm.toLowerCase();
+      if (statusFilter !== "all") query = query.eq("status", statusFilter);
+      if (searchFilter) query = query.or(searchFilter);
 
-    return memoizedInstructors.filter((instructor) => {
-      const nameMatch = instructor.name?.toLowerCase().includes(query);
-      const phoneMatch = instructor.phone?.toLowerCase().includes(query);
-      const carMatch = `${instructor.car_mode ?? ''}${instructor.car_number ?? ''}`
-        .toLowerCase()
-        .includes(query);
-      const areaMatch = instructor.areas?.some((area) =>
-        area.toLowerCase().includes(query),
-      );
+      const { data, error } = await query;
+      if (error) throw error;
 
-      return nameMatch || phoneMatch || carMatch || areaMatch;
-    });
-  }, [searchTerm, memoizedInstructors]);
+      // Schedule-heavy detail views fetch their own data. Keeping schedules
+      // out of the card query prevents one instructor page from expanding
+      // into an unbounded schedule download.
+      const rows = (data ?? []).map((instructor) => ({
+        ...instructor,
+        schedules: [] as Schedule[],
+      })) as unknown as (InstructorFromDB & { schedules: Schedule[] })[];
 
-  // Per-status counts shown beside the filter chips, computed on the
-  // search-filtered list so they always describe what's on screen.
-  const statusCounts = useMemo(() => {
-    const counts: Record<InstructorStatus, number> = {
-      active: 0,
-      on_break: 0,
-      inactive: 0,
-    };
-    for (const instructor of searchedInstructors) {
-      counts[resolveInstructorStatus(instructor)] += 1;
-    }
-    return counts;
-  }, [searchedInstructors]);
-
-  const filteredInstructors = useMemo(() => {
-    if (statusFilter.length === 0) return searchedInstructors;
-    return searchedInstructors.filter((instructor) =>
-      statusFilter.includes(resolveInstructorStatus(instructor)),
-    );
-  }, [searchedInstructors, statusFilter]);
-
-  // Fixes mutation refresh lag
-  // Define a stable function to update the schedule cache
-  const updateScheduleCache = useCallback(
-    (instructorId: string, updatedSchedule: Schedule) => {
-      queryClient.setQueryData(
-        ["instructors"],
-        (
-          oldInstructors:
-            | (InstructorFromDB & { schedules: Schedule[] })[]
-            | undefined,
-        ) => {
-          if (!oldInstructors) return oldInstructors;
-
-          return oldInstructors.map((instructor) => {
-            if (instructor.id_instructor !== instructorId) {
-              return instructor;
-            }
-
-            // Update the schedules array for the matching instructor: replace or add
-            const newSchedules = instructor.schedules.some(
-              (sch) => sch.id === updatedSchedule.id,
-            )
-              ? instructor.schedules.map((sch) =>
-                  sch.id === updatedSchedule.id ? updatedSchedule : sch,
-                )
-              : [...instructor.schedules, updatedSchedule]; // Add if new
-
-            return { ...instructor, schedules: newSchedules };
-          });
-        },
-      );
+      return {
+        instructors: rows.slice(0, INSTRUCTOR_PAGE_SIZE),
+        hasMore: rows.length > INSTRUCTOR_PAGE_SIZE,
+        nextOffset: pageParam + INSTRUCTOR_PAGE_SIZE,
+      };
     },
-    [queryClient],
+    getNextPageParam: (lastPage) =>
+      lastPage.hasMore ? lastPage.nextOffset : undefined,
+  });
+
+  const instructors = useMemo(
+    () => instructorPages?.pages.flatMap((page) => page.instructors) ?? [],
+    [instructorPages],
   );
+
+  useLayoutEffect(() => {
+    const saved = pendingScrollRestorationRef.current;
+    if (!saved || !instructorPages || isInstructorListLoading) return;
+
+    if (
+      saved.statusFilter === statusFilter &&
+      saved.searchTerm === searchTerm
+    ) {
+      window.scrollTo({ top: saved.scrollY, behavior: "instant" });
+    }
+    pendingScrollRestorationRef.current = undefined;
+    if (instructorListReturnState === saved)
+      instructorListReturnState = undefined;
+  }, [instructorPages, isInstructorListLoading, searchTerm, statusFilter]);
+
+  const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const sentinel = loadMoreSentinelRef.current;
+    if (!sentinel || !hasNextPage) return;
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting && !isFetchingNextPage) {
+          fetchNextPage();
+        }
+      },
+      { rootMargin: "0px 0px 200px" },
+    );
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
 
   // Add or update an instructor
   const mutation = useMutation({
@@ -1238,7 +1341,18 @@ export default function InstructorsManagement() {
 
   const handleOpenScheduleDialog = (id: string) => {
     console.log("Open schedule fo id`", id);
-    navigate(id);
+    if (instructorPages) {
+      instructorListReturnState = {
+        statusFilter,
+        searchTerm,
+        debouncedSearchTerm,
+        listSession,
+        scrollY: window.scrollY,
+        data: instructorPages,
+        dataUpdatedAt,
+      };
+    }
+    navigate({ pathname: id, search: searchParams.toString() });
     // setOpenScheduleDialogId(id); // Set the ID of the instructor whose dialog is open
   };
 
@@ -1293,281 +1407,314 @@ export default function InstructorsManagement() {
           <Input
             placeholder="Search instructors by name, phone, car, or area..."
             value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
+            onChange={(e) => updateListFilter("search", e.target.value)}
             className="pl-10"
           />
         </div>
       </div>
 
-      {/* Status Filter — multi-select chips with OR logic; none selected
-          shows everyone. Counts reflect the current search results. */}
+      {/* Each status opens its own paginated instructor list. */}
       <div className="mb-6 flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium text-muted-foreground">
           Status:
         </span>
-        {INSTRUCTOR_STATUSES.map((s) => {
-          const selected = statusFilter.includes(s.value);
+        {INSTRUCTOR_STATUS_FILTERS.map((s) => {
+          const selected = statusFilter === s.value;
+          const displayedCount = areStatusCountsLoading
+            ? "…"
+            : areStatusCountsError
+              ? "—"
+              : statusCounts[s.value];
+
           return (
-            <button
+            <div
               key={s.value}
-              type="button"
-              onClick={() => toggleStatusFilter(s.value)}
               className={cn(
-                "flex items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors",
+                "inline-flex items-center overflow-hidden rounded-full border text-sm transition-colors",
                 selected
                   ? cn(s.badgeClass, "border-transparent font-semibold")
-                  : "border-input bg-white text-muted-foreground hover:bg-muted",
+                  : "border-input bg-white text-muted-foreground",
               )}
             >
-              {selected && <Check className="h-3.5 w-3.5" />}
-              <span className={cn("h-2 w-2 rounded-full", s.dotClass)} />
-              {s.label}
-              <span
+              <button
+                type="button"
+                aria-pressed={selected}
+                onClick={() => selectStatusFilter(s.value)}
                 className={cn(
-                  "rounded-full px-1.5 text-xs font-semibold",
-                  selected ? "bg-white/60" : "bg-muted",
+                  "flex items-center gap-2 py-1 pl-3 pr-2 transition-colors",
+                  !selected && "hover:bg-muted",
                 )}
               >
-                {statusCounts[s.value]}
-              </span>
-            </button>
+                {selected && <Check className="h-3.5 w-3.5" />}
+                <span className={cn("h-2 w-2 rounded-full", s.dotClass)} />
+                {s.label}
+              </button>
+              <button
+                type="button"
+                disabled={areStatusCountsLoading}
+                onClick={() => selectStatusFilter(s.value)}
+                aria-label={`Load ${s.label} instructors (${displayedCount})`}
+                title={`Load ${s.label} instructors`}
+                className="hover:ring-current/20 mr-1 cursor-pointer rounded-full bg-white/60 px-1.5 text-xs font-semibold transition-shadow hover:ring-2 disabled:cursor-wait"
+              >
+                {displayedCount}
+              </button>
+            </div>
           );
         })}
-        {statusFilter.length > 0 && (
-          <button
-            type="button"
-            onClick={() => setStatusFilter([])}
-            className="flex items-center gap-1 text-sm text-muted-foreground underline-offset-2 hover:underline"
-          >
-            <X className="h-3.5 w-3.5" />
-            Clear filter
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={clearStatusFilter}
+          className="flex items-center gap-1 text-sm text-muted-foreground underline-offset-2 hover:underline"
+        >
+          <X className="h-3.5 w-3.5" />
+          Clear filter
+        </button>
       </div>
-      {isLoading ? (
+      {isInstructorListLoading ? (
         <div className="flex h-64 items-center justify-center">
           <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent">
             <ChevronsUpDown> </ChevronsUpDown>
           </div>
         </div>
+      ) : isInstructorListError ? (
+        <div className="flex h-48 items-center justify-center rounded-lg border border-destructive/30 bg-destructive/5 px-6 text-center text-sm text-destructive">
+          {instructorListError instanceof Error
+            ? instructorListError.message
+            : "Unable to load instructors."}
+        </div>
+      ) : instructors.length === 0 ? (
+        <div className="flex h-48 items-center justify-center rounded-lg border border-dashed bg-white/70 px-6 text-center text-sm text-muted-foreground">
+          No instructors match the selected status and search.
+        </div>
       ) : (
-        <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-          {filteredInstructors?.map((instructor) => (
-            <Card
-              key={instructor.id_instructor}
-              className="flex h-full flex-col overflow-hidden rounded-lg shadow-lg"
-            >
-              <CardHeader className="bg-primary p-4 text-white">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <CardTitle className="text-lg font-bold">
-                      {instructor.name}
-                    </CardTitle>
-                    <p className="text-sm">
-                      {instructor.email || "No email provided"}
-                    </p>
+        <>
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+            {instructors.map((instructor) => (
+              <Card
+                key={instructor.id_instructor}
+                className="flex h-full flex-col overflow-hidden rounded-lg shadow-lg"
+              >
+                <CardHeader className="bg-primary p-4 text-white">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <CardTitle className="text-lg font-bold">
+                        {instructor.name}
+                      </CardTitle>
+                      <p className="text-sm">
+                        {instructor.email || "No email provided"}
+                      </p>
+                    </div>
+                    <span
+                      className={cn(
+                        "shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold",
+                        instructorStatusMeta(
+                          resolveInstructorStatus(instructor),
+                        ).badgeClass,
+                      )}
+                    >
+                      {
+                        instructorStatusMeta(
+                          resolveInstructorStatus(instructor),
+                        ).label
+                      }
+                    </span>
                   </div>
-                  <span
-                    className={cn(
-                      "shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold",
-                      instructorStatusMeta(resolveInstructorStatus(instructor))
-                        .badgeClass,
-                    )}
-                  >
-                    {
-                      instructorStatusMeta(resolveInstructorStatus(instructor))
-                        .label
+                </CardHeader>
+                <CardContent className="space-y-4 p-4">
+                  <div className="space-y-2">
+                    <div>
+                      <span className="text-sm font-medium text-muted-foreground">
+                        Phone:
+                      </span>
+                      <p>
+                        {canViewUnmaskedPhoneNumbers
+                          ? instructor.phone
+                          : maskPhoneNumber(instructor.phone)}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-muted-foreground">
+                        Address:
+                      </span>
+                      <p>{instructor.address || "No address provided"}</p>
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-muted-foreground">
+                        Radius:
+                      </span>
+                      <p>
+                        {instructor.radius
+                          ? `${instructor.radius} km`
+                          : "No radius provided"}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-muted-foreground">
+                        DL Number:
+                      </span>
+                      <p>{instructor.DL_number || "Not provided"}</p>
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-muted-foreground">
+                        Car Details:
+                      </span>
+                      <p>
+                        {instructor.car_make || "N/A"} -{" "}
+                        {instructor.car_mode || "N/A"} (
+                        {instructor.car_number
+                          ? canViewUnmaskedCarNumbers
+                            ? instructor.car_number
+                            : maskCarNumber(instructor.car_number)
+                          : "N/A"}
+                        )
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-muted-foreground">
+                        Experience:
+                      </span>
+                      <p>{instructor.experience || "Not provided"}</p>
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-muted-foreground">
+                        Areas:
+                      </span>
+                      <div className="mt-1 flex flex-wrap gap-2">
+                        {instructor.areas?.map((area: string) => (
+                          <span
+                            key={area}
+                            className="inline-block rounded bg-muted px-2 py-1 text-xs"
+                          >
+                            {area}
+                          </span>
+                        )) || "No areas assigned"}
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+                {/* View Schedule Button */}
+                <div className="mt-auto flex flex-col gap-2 p-4">
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    onClick={() =>
+                      handleOpenScheduleDialog(instructor.id_instructor)
                     }
-                  </span>
+                  >
+                    View Schedule
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    onClick={() =>
+                      handleOpenSearchScheduleDialog(instructor.id_instructor)
+                    }
+                  >
+                    Search Schedule
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => handleEditInstructor(instructor)}
+                  >
+                    Edit Details
+                  </Button>
+                  <div className="flex w-full items-center justify-between gap-2 rounded-md border px-3 py-1.5">
+                    <span className="text-sm text-muted-foreground">
+                      Status
+                    </span>
+                    <InstructorStatusControl
+                      instructorId={instructor.id_instructor}
+                      status={resolveInstructorStatus(instructor)}
+                      size="compact"
+                    />
+                  </div>
+                  <Button
+                    variant="destructive"
+                    className="w-full"
+                    onClick={() =>
+                      setDeleteConfirmInstructorId(instructor.id_instructor)
+                    }
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    Delete Instructor
+                  </Button>
                 </div>
-              </CardHeader>
-              <CardContent className="space-y-4 p-4">
-                <div className="space-y-2">
-                  <div>
-                    <span className="text-sm font-medium text-muted-foreground">
-                      Phone:
-                    </span>
-                    <p>{canViewUnmaskedPhoneNumbers ? instructor.phone : maskPhoneNumber(instructor.phone)}</p>
-                  </div>
-                  <div>
-                    <span className="text-sm font-medium text-muted-foreground">
-                      Address:
-                    </span>
-                    <p>{instructor.address || "No address provided"}</p>
-                  </div>
-                  <div>
-                    <span className="text-sm font-medium text-muted-foreground">
-                      Radius:
-                    </span>
-                    <p>
-                      {instructor.radius
-                        ? `${instructor.radius} km`
-                        : "No radius provided"}
-                    </p>
-                  </div>
-                  <div>
-                    <span className="text-sm font-medium text-muted-foreground">
-                      DL Number:
-                    </span>
-                    <p>{instructor.DL_number || "Not provided"}</p>
-                  </div>
-                  <div>
-                    <span className="text-sm font-medium text-muted-foreground">
-                      Car Details:
-                    </span>
-                    <p>
-                      {instructor.car_make || "N/A"} -{" "}
-                      {instructor.car_mode || "N/A"} (
-                      {instructor.car_number
-                        ? canViewUnmaskedCarNumbers
-                          ? instructor.car_number
-                          : maskCarNumber(instructor.car_number)
-                        : "N/A"})
-                    </p>
-                  </div>
-                  <div>
-                    <span className="text-sm font-medium text-muted-foreground">
-                      Experience:
-                    </span>
-                    <p>{instructor.experience || "Not provided"}</p>
-                  </div>
-                  <div>
-                    <span className="text-sm font-medium text-muted-foreground">
-                      Areas:
-                    </span>
-                    <div className="mt-1 flex flex-wrap gap-2">
-                      {instructor.areas?.map((area: string) => (
-                        <span
-                          key={area}
-                          className="inline-block rounded bg-muted px-2 py-1 text-xs"
+
+                {/* Delete Confirmation Dialog */}
+                {deleteConfirmInstructorId === instructor.id_instructor && (
+                  <Dialog
+                    open={true}
+                    onOpenChange={() => setDeleteConfirmInstructorId(null)}
+                  >
+                    <DialogContent>
+                      <DialogHeader>
+                        <DialogTitle>Delete Instructor</DialogTitle>
+                        <DialogDescription>
+                          Are you sure you want to delete{" "}
+                          <strong>{instructor.name}</strong>? This will:
+                          <ul className="mt-2 list-disc space-y-1 pl-5 text-left">
+                            <li>
+                              Remove all upcoming booked schedules for this
+                              instructor
+                            </li>
+                            <li>
+                              Mark affected learners as needing rescheduling
+                            </li>
+                            <li>Permanently delete the instructor record</li>
+                          </ul>
+                          <p className="mt-2 font-semibold text-destructive">
+                            This action cannot be undone.
+                          </p>
+                        </DialogDescription>
+                      </DialogHeader>
+                      <DialogFooter className="gap-2">
+                        <Button
+                          variant="outline"
+                          onClick={() => setDeleteConfirmInstructorId(null)}
                         >
-                          {area}
-                        </span>
-                      )) || "No areas assigned"}
-                    </div>
-                  </div>
-                </div>
-              </CardContent>
-              {/* View Schedule Button */}
-              <div className="mt-auto flex flex-col gap-2 p-4">
-                <Button
-                  variant="outline"
-                  className="w-full"
-                  onClick={() =>
-                    handleOpenScheduleDialog(instructor.id_instructor)
-                  }
-                >
-                  View Schedule
-                </Button>
-                <Button
-                  variant="outline"
-                  className="w-full"
-                  onClick={() =>
-                    handleOpenSearchScheduleDialog(instructor.id_instructor)
-                  }
-                >
-                  Search Schedule
-                </Button>
-                <Button
-                  variant="outline"
-                  className="w-full"
-                  onClick={() => handleEditInstructor(instructor)}
-                >
-                  Edit Details
-                </Button>
-                <div className="flex w-full items-center justify-between gap-2 rounded-md border px-3 py-1.5">
-                  <span className="text-sm text-muted-foreground">Status</span>
-                  <InstructorStatusControl
-                    instructorId={instructor.id_instructor}
-                    status={resolveInstructorStatus(instructor)}
-                    size="compact"
-                  />
-                </div>
-                <Button
-                  variant="destructive"
-                  className="w-full"
-                  onClick={() =>
-                    setDeleteConfirmInstructorId(instructor.id_instructor)
-                  }
-                >
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  Delete Instructor
-                </Button>
-              </div>
+                          Cancel
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          disabled={deleteInstructorMutation.isPending}
+                          onClick={() =>
+                            deleteInstructorMutation.mutate(
+                              instructor.id_instructor,
+                            )
+                          }
+                        >
+                          {deleteInstructorMutation.isPending
+                            ? "Deleting..."
+                            : "Delete"}
+                        </Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
+                )}
 
-              {/* Delete Confirmation Dialog */}
-              {deleteConfirmInstructorId === instructor.id_instructor && (
-                <Dialog
-                  open={true}
-                  onOpenChange={() => setDeleteConfirmInstructorId(null)}
-                >
-                  <DialogContent>
-                    <DialogHeader>
-                      <DialogTitle>Delete Instructor</DialogTitle>
-                      <DialogDescription>
-                        Are you sure you want to delete{" "}
-                        <strong>{instructor.name}</strong>? This will:
-                        <ul className="mt-2 list-disc space-y-1 pl-5 text-left">
-                          <li>
-                            Remove all upcoming booked schedules for this
-                            instructor
-                          </li>
-                          <li>
-                            Mark affected learners as needing rescheduling
-                          </li>
-                          <li>Permanently delete the instructor record</li>
-                        </ul>
-                        <p className="mt-2 font-semibold text-destructive">
-                          This action cannot be undone.
-                        </p>
-                      </DialogDescription>
-                    </DialogHeader>
-                    <DialogFooter className="gap-2">
-                      <Button
-                        variant="outline"
-                        onClick={() => setDeleteConfirmInstructorId(null)}
-                      >
-                        Cancel
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        disabled={deleteInstructorMutation.isPending}
-                        onClick={() =>
-                          deleteInstructorMutation.mutate(
-                            instructor.id_instructor,
-                          )
-                        }
-                      >
-                        {deleteInstructorMutation.isPending
-                          ? "Deleting..."
-                          : "Delete"}
-                      </Button>
-                    </DialogFooter>
-                  </DialogContent>
-                </Dialog>
-              )}
-
-              {/* Schedule Dialog */}
-              {openScheduleDialogId === instructor.id_instructor && (
-                <Dialog open={true} onOpenChange={handleCloseScheduleDialog}>
-                  <DialogContent className="p-4 sm:max-w-[1200px]">
-                    <DialogHeader className="mb-0 p-0">
-                      <DialogTitle className="p-0 text-base font-semibold">
-                        {instructor.name}'s Weekly Schedule
-                      </DialogTitle>
-                    </DialogHeader>
-                    <div className="mt-1">
-                      <WeeklyScheduleView
-                        instructor_id={instructor.id_instructor}
-                        instructorName={instructor.name}
-                        // Pass schedules and unavailability to the schedule view
-                        schedules={instructor.schedules}
-                        unavailability={instructor.unavailability || []}
-                      />
-                    </div>
-                    {/* <DialogFooter className="pt-0 p-0 mt-2 flex justify-end">  */}
-                    {/* Reduced vertical padding (p-0, pt-0) and kept small top margin (mt-2) */}
-                    {/* <Button
+                {/* Schedule Dialog */}
+                {openScheduleDialogId === instructor.id_instructor && (
+                  <Dialog open={true} onOpenChange={handleCloseScheduleDialog}>
+                    <DialogContent className="p-4 sm:max-w-[1200px]">
+                      <DialogHeader className="mb-0 p-0">
+                        <DialogTitle className="p-0 text-base font-semibold">
+                          {instructor.name}'s Weekly Schedule
+                        </DialogTitle>
+                      </DialogHeader>
+                      <div className="mt-1">
+                        <WeeklyScheduleView
+                          instructor_id={instructor.id_instructor}
+                          instructorName={instructor.name}
+                          // Pass schedules and unavailability to the schedule view
+                          schedules={instructor.schedules}
+                          unavailability={instructor.unavailability || []}
+                        />
+                      </div>
+                      {/* <DialogFooter className="pt-0 p-0 mt-2 flex justify-end">  */}
+                      {/* Reduced vertical padding (p-0, pt-0) and kept small top margin (mt-2) */}
+                      {/* <Button
                         variant="outline"
                         size="xs" 
                         className="h-6 px-2 py-0 text-xs" // Explicitly set height, horizontal padding, zero vertical padding, and smallest text size
@@ -1575,45 +1722,63 @@ export default function InstructorsManagement() {
                       >
                         Close
                       </Button> */}
-                    {/* </DialogFooter> */}
-                  </DialogContent>
-                </Dialog>
-              )}
-              {/* Search schedule dialog */}
-              {openSearchScheduleDialogId === instructor.id_instructor && (
-                <Dialog
-                  key={instructor.id_instructor}
-                  open={true}
-                  onOpenChange={handleCloseSearchScheduleDialog}
-                >
-                  <DialogContent className="sm:max-w-[1200px]">
-                    <DialogHeader>
-                      <DialogTitle>
-                        Search {instructor.name}'s Schedule
-                      </DialogTitle>
-                    </DialogHeader>
-                    <div className="mt-4">
-                      {/* {instructor.id_instructor} */}
-                      <SearchInstructorScheduleInfo
-                        instructorId={instructor.id_instructor}
-                        openFlag={!!openSearchScheduleDialogId}
-                        closeAction={() => setOpenSearchScheduleDialogId(null)}
-                      />
-                    </div>
-                    <DialogFooter>
-                      <Button
-                        variant="outline"
-                        onClick={handleCloseSearchScheduleDialog}
-                      >
-                        Close
-                      </Button>
-                    </DialogFooter>
-                  </DialogContent>
-                </Dialog>
-              )}
-            </Card>
-          ))}
-        </div>
+                      {/* </DialogFooter> */}
+                    </DialogContent>
+                  </Dialog>
+                )}
+                {/* Search schedule dialog */}
+                {openSearchScheduleDialogId === instructor.id_instructor && (
+                  <Dialog
+                    key={instructor.id_instructor}
+                    open={true}
+                    onOpenChange={handleCloseSearchScheduleDialog}
+                  >
+                    <DialogContent className="sm:max-w-[1200px]">
+                      <DialogHeader>
+                        <DialogTitle>
+                          Search {instructor.name}'s Schedule
+                        </DialogTitle>
+                      </DialogHeader>
+                      <div className="mt-4">
+                        {/* {instructor.id_instructor} */}
+                        <SearchInstructorScheduleInfo
+                          instructorId={instructor.id_instructor}
+                          openFlag={!!openSearchScheduleDialogId}
+                          closeAction={() =>
+                            setOpenSearchScheduleDialogId(null)
+                          }
+                        />
+                      </div>
+                      <DialogFooter>
+                        <Button
+                          variant="outline"
+                          onClick={handleCloseSearchScheduleDialog}
+                        >
+                          Close
+                        </Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
+                )}
+              </Card>
+            ))}
+          </div>
+          <div
+            ref={loadMoreSentinelRef}
+            className="flex min-h-16 items-center justify-center py-4 text-sm text-muted-foreground"
+          >
+            {isFetchingNextPage ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Loading more instructors…
+              </>
+            ) : hasNextPage ? (
+              "Scroll to load more"
+            ) : (
+              `All ${instructors.length} matching instructor${instructors.length === 1 ? "" : "s"} loaded`
+            )}
+          </div>
+        </>
       )}
 
       {/* Add/Edit Instructor Dialog */}
@@ -5090,6 +5255,7 @@ export const EditTentativeSchedule = ({
   instructorName?: string;
 }) => {
   const navigate = useNavigate();
+  const location = useLocation();
   const { toast } = useToast();
   const instructorId = schedule?.instructor_id;
 
@@ -5251,7 +5417,10 @@ export const EditTentativeSchedule = ({
         description: "Schedule updated successfully",
         variant: "success",
       });
-      navigate("/admin/instructors/" + instructorId);
+      navigate({
+        pathname: "/admin/instructors/" + instructorId,
+        search: location.search,
+      });
       window.location.reload();
     },
   });
@@ -5693,6 +5862,7 @@ function getImportedEventsForSlot(
 export const InstructorSchedulePage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
 
   const [selectedSlot, setSelectedSlot] = useState(null);
@@ -5761,19 +5931,18 @@ export const InstructorSchedulePage = () => {
     }
     const status = schedule.status?.toLowerCase();
     if (status === "paused") {
+      if (schedule.pause_reason?.toLowerCase() === "payment") {
+        return {
+          block: "border-red-700 bg-red-500 text-white",
+          card: "border-red-200 bg-red-50",
+        };
+      }
 
-  if (schedule.pause_reason?.toLowerCase() === "payment") {
-    return {
-      block: "border-red-700 bg-red-500 text-white",
-      card: "border-red-200 bg-red-50",
-    };
-  }
-
-  return {
-    block: "border-slate-700 bg-slate-500 text-white",
-    card: "border-slate-200 bg-slate-50",
-  };
-}
+      return {
+        block: "border-slate-700 bg-slate-500 text-white",
+        card: "border-slate-200 bg-slate-50",
+      };
+    }
     if (status === "ongoing") {
       return {
         block: "border-blue-700 bg-blue-500 text-white",
@@ -5972,7 +6141,12 @@ export const InstructorSchedulePage = () => {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => navigate("/admin/instructors")}
+            onClick={() =>
+              navigate({
+                pathname: "/admin/instructors",
+                search: location.search,
+              })
+            }
             className="rounded-full"
           >
             <ChevronLeft className="h-5 w-5" />
@@ -6075,9 +6249,9 @@ export const InstructorSchedulePage = () => {
               Paused
             </span>
             <span className="flex items-center gap-1">
-  <span className="h-2 w-2 rounded-sm bg-red-500" />
-  Payment Due
-</span>
+              <span className="h-2 w-2 rounded-sm bg-red-500" />
+              Payment Due
+            </span>
           </div>
 
           <div className="relative w-full max-w-xs">
@@ -6332,20 +6506,21 @@ export const InstructorSchedulePage = () => {
                                 : "N/A"}
                             </span>
                           </div>
-                      
-                          {schedule.status?.toLowerCase() === "paused" && (
-  <div className="rounded-lg border border-dashed border-slate-200 bg-slate-100/40 p-2.5 text-[11px] text-slate-600">
-    <p className="mb-1 text-[9px] font-bold uppercase tracking-wider text-slate-400">
-      Pause Notes
-    </p>
 
-    <span className="block italic leading-relaxed">
-      {schedule.pause_reason?.toLowerCase() === "payment"
-        ? "Due to payment"
-        : schedule.pause_notes || "N/A"}
-    </span>
-  </div>
-)}
+                          {schedule.status?.toLowerCase() === "paused" && (
+                            <div className="rounded-lg border border-dashed border-slate-200 bg-slate-100/40 p-2.5 text-[11px] text-slate-600">
+                              <p className="mb-1 text-[9px] font-bold uppercase tracking-wider text-slate-400">
+                                Pause Notes
+                              </p>
+
+                              <span className="block italic leading-relaxed">
+                                {schedule.pause_reason?.toLowerCase() ===
+                                "payment"
+                                  ? "Due to payment"
+                                  : schedule.pause_notes || "N/A"}
+                              </span>
+                            </div>
+                          )}
                           {/* 6. LEAD NAME */}
                           <div className="flex items-center gap-2 pt-1">
                             <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">

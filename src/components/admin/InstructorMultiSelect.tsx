@@ -1,8 +1,12 @@
-import { Search, X } from "lucide-react";
+import { Loader2, Search, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
-import { MatrixInstructor } from "@/queries/instructorMatrix";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import {
+  MatrixInstructor,
+  useInstructorMatrixSuggestions,
+} from "@/queries/instructorMatrix";
 
 interface Props {
   instructors: MatrixInstructor[];
@@ -19,24 +23,44 @@ export function InstructorMultiSelect({
 }: Props) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
+  // Keep chip labels when the matrix resets its pages or a picked instructor
+  // was found by searching beyond the matrix's loaded batch.
+  const [pickedInstructors, setPickedInstructors] = useState<
+    MatrixInstructor[]
+  >([]);
   const containerRef = useRef<HTMLDivElement>(null);
+  const debouncedQuery = useDebouncedValue(query);
+  const searchPending = query !== debouncedQuery;
+  const {
+    data: matches,
+    isFetching,
+    isError,
+    refetch,
+  } = useInstructorMatrixSuggestions({
+    search: debouncedQuery,
+    selectedIds,
+    enabled: open && !searchPending,
+  });
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const selectedInstructors = useMemo(
-    () => instructors.filter((i) => selectedSet.has(i.id)),
-    [instructors, selectedSet],
+    () =>
+      selectedIds
+        .map(
+          (id) =>
+            instructors.find((i) => i.id === id) ??
+            pickedInstructors.find((i) => i.id === id),
+        )
+        .filter((i): i is MatrixInstructor => !!i)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [instructors, pickedInstructors, selectedIds],
   );
 
   const suggestions = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return instructors
-      .filter((i) => !selectedSet.has(i.id))
-      .filter(
-        (i) =>
-          !q || `${i.name ?? ""} ${i.phone ?? ""}`.toLowerCase().includes(q),
-      )
-      .slice(0, 40);
-  }, [instructors, selectedSet, query]);
+    return searchPending
+      ? []
+      : (matches ?? []).filter((i) => !selectedSet.has(i.id));
+  }, [matches, selectedSet, searchPending]);
 
   // Dismiss the dropdown on any click outside the control.
   useEffect(() => {
@@ -52,12 +76,20 @@ export function InstructorMultiSelect({
     return () => document.removeEventListener("mousedown", onDocMouseDown);
   }, []);
 
-  const add = (id: string) => {
-    onChange([...selectedIds, id]);
+  const add = (instructor: MatrixInstructor) => {
+    if (selectedSet.has(instructor.id)) return;
+    setPickedInstructors((previous) => [
+      ...previous.filter((i) => i.id !== instructor.id),
+      instructor,
+    ]);
+    onChange([...selectedIds, instructor.id]);
     setQuery("");
     setOpen(true); // stay open to add more
   };
-  const remove = (id: string) => onChange(selectedIds.filter((x) => x !== id));
+  const remove = (id: string) => {
+    setPickedInstructors((previous) => previous.filter((i) => i.id !== id));
+    onChange(selectedIds.filter((x) => x !== id));
+  };
 
   return (
     <div ref={containerRef} className="relative w-full max-w-md">
@@ -100,6 +132,7 @@ export function InstructorMultiSelect({
             onClick={(e) => {
               e.stopPropagation();
               onChange([]);
+              setPickedInstructors([]);
               setQuery("");
             }}
             className="text-xs text-muted-foreground hover:text-foreground"
@@ -109,13 +142,13 @@ export function InstructorMultiSelect({
         )}
       </div>
 
-      {open && suggestions.length > 0 && (
+      {open && (
         <div className="absolute z-30 mt-1 max-h-64 w-full overflow-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
           {suggestions.map((i) => (
             <button
               key={i.id}
               type="button"
-              onClick={() => add(i.id)}
+              onClick={() => add(i)}
               className="flex w-full flex-col items-start rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
             >
               <span className="font-medium">{i.name}</span>
@@ -126,6 +159,32 @@ export function InstructorMultiSelect({
               )}
             </button>
           ))}
+          {(isFetching || searchPending) && (
+            <div
+              role="status"
+              className="flex items-center justify-center gap-2 p-2 text-xs text-muted-foreground"
+            >
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Loading instructors…
+            </div>
+          )}
+          {isError && !searchPending && (
+            <button
+              type="button"
+              onClick={() => refetch()}
+              className="w-full p-2 text-xs text-destructive"
+            >
+              Could not load instructors. Retry
+            </button>
+          )}
+          {!isFetching &&
+            !searchPending &&
+            !isError &&
+            suggestions.length === 0 && (
+              <div className="p-2 text-center text-xs text-muted-foreground">
+                No instructors found.
+              </div>
+            )}
         </div>
       )}
     </div>

@@ -51,6 +51,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/components/ui/use-toast";
 import {
   EnrollmentPlanAuditChange,
+  LEARNER_ISSUE_PAGE_SIZE,
+  LearnerIssueFilter,
   useCreateEnrollmentAdmin,
   useCreateEnrollmentPlanAudit,
   useCreatePaymentAdmin,
@@ -58,6 +60,7 @@ import {
   useEnrollmentPlanAudit,
   useLearnerSchedulesAdmin,
   useLearnersWithIssues,
+  useLearnerWithIssuesAdmin,
   useUpdateEnrollmentAdmin,
   useUpdateLearnerAdmin,
   useUpdatePaymentAdmin,
@@ -257,15 +260,35 @@ function getStatusDot(issues: Issue[]) {
 
 export default function LearnerIssueFixer() {
   const [searchQuery, setSearchQuery] = useState("");
-  const [issueFilter, setIssueFilter] = useState<string>("all");
+  const [issueFilter, setIssueFilter] = useState<LearnerIssueFilter>("all");
+  const [page, setPage] = useState(1);
   const [selectedLearnerId, setSelectedLearnerId] = useState<string | null>(
     null,
   );
 
-  const { data: learnersData, isLoading, refetch } = useLearnersWithIssues();
+  const {
+    data: learnersData,
+    isLoading,
+    isFetching,
+    isError,
+    error,
+    refetch,
+  } = useLearnersWithIssues({ page, searchQuery, issueFilter });
+  const { data: selectedLearner, refetch: refetchSelectedLearner } =
+    useLearnerWithIssuesAdmin(selectedLearnerId);
+  const totalCount = learnersData?.totalCount ?? 0;
+  const totalPages = Math.max(
+    1,
+    Math.ceil(totalCount / LEARNER_ISSUE_PAGE_SIZE),
+  );
   const { data: schedules } = useLearnerSchedulesAdmin({
     learnerId: selectedLearnerId ?? undefined,
   });
+
+  // A fix or deletion can remove the last result from the current page.
+  useEffect(() => {
+    if (learnersData && page > totalPages) setPage(totalPages);
+  }, [learnersData, page, totalPages]);
 
   // Real-time subscription: Auto-refresh when payments complete
   useEffect(() => {
@@ -282,6 +305,7 @@ export default function LearnerIssueFixer() {
         () => {
           console.log('[LearnerIssueFixer] Payment completed, refreshing data...');
           refetch();
+          if (selectedLearnerId) refetchSelectedLearner();
         }
       )
       .subscribe();
@@ -289,71 +313,31 @@ export default function LearnerIssueFixer() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [refetch]);
-
-  // Auto-refresh fallback: Every 5 seconds as safety net
-  useEffect(() => {
-    const interval = setInterval(() => {
-      refetch();
-    }, 5000);
-
-    return () => clearInterval(interval);
-  }, [refetch]);
-
-  // Get selected learner data
-  const selectedLearner = useMemo(() => {
-    if (!selectedLearnerId || !learnersData) return null;
-    return learnersData.find((l) => l.id === selectedLearnerId) || null;
-  }, [selectedLearnerId, learnersData]);
+  }, [refetch, refetchSelectedLearner, selectedLearnerId]);
 
   // Calculate issues for each learner
   const learnersWithIssues = useMemo(() => {
     if (!learnersData) return [];
-    return learnersData.map((learner) => {
-      const enrollments = (learner as any).enrollment || [];
-      const payments = (learner as any).payment || [];
+    return learnersData.learners.map((learner) => {
+      const enrollments = learner.enrollment || [];
+      const payments = learner.payment || [];
       // Don't include schedule check here since we don't have schedule data for all learners
       const issues = detectIssues(learner, enrollments, payments, 0, false);
       return { ...learner, enrollments, payments, issues };
     });
   }, [learnersData]);
 
-  // Filter learners
-  const filteredLearners = useMemo(() => {
-    return learnersWithIssues.filter((learner) => {
-      // Search filter
-      const matchesSearch =
-        !searchQuery ||
-        learner.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        learner.phone?.includes(searchQuery) ||
-        learner.area?.toLowerCase().includes(searchQuery.toLowerCase());
-
-      // Issue type filter
-      const matchesIssue =
-        issueFilter === "all" ||
-        (issueFilter === "has-issues" && learner.issues.length > 0) ||
-        (issueFilter === "no-issues" && learner.issues.length === 0) ||
-        learner.issues.some((i) => i.type === issueFilter);
-
-      return matchesSearch && matchesIssue;
-    });
-  }, [learnersWithIssues, searchQuery, issueFilter]);
-
   // Current learner's issues (with schedule count - include schedule check)
   const currentIssues = useMemo(() => {
     if (!selectedLearner) return [];
-    const learnerData = learnersWithIssues.find(
-      (l) => l.id === selectedLearnerId,
-    );
-    if (!learnerData) return [];
     return detectIssues(
       selectedLearner,
-      learnerData.enrollments,
-      learnerData.payments,
+      selectedLearner.enrollment || [],
+      selectedLearner.payment || [],
       schedules?.length || 0,
       true, // Include schedule check since we have actual schedule data
     );
-  }, [selectedLearner, learnersWithIssues, schedules, selectedLearnerId]);
+  }, [selectedLearner, schedules]);
 
   return (
     <div className="flex h-screen flex-col bg-gray-50">
@@ -370,7 +354,14 @@ export default function LearnerIssueFixer() {
             <h1 className="text-lg font-semibold">Learner Issue Fixer</h1>
           </div>
           <div className="ml-auto">
-            <Button variant="outline" size="sm" onClick={() => refetch()}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                refetch();
+                if (selectedLearnerId) refetchSelectedLearner();
+              }}
+            >
               <RefreshCw className="mr-2 h-4 w-4" />
               Refresh
             </Button>
@@ -386,11 +377,20 @@ export default function LearnerIssueFixer() {
             <Input
               placeholder="Search by name, phone, or area..."
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setPage(1);
+              }}
               className="pl-9"
             />
           </div>
-          <Select value={issueFilter} onValueChange={setIssueFilter}>
+          <Select
+            value={issueFilter}
+            onValueChange={(value) => {
+              setIssueFilter(value as LearnerIssueFilter);
+              setPage(1);
+            }}
+          >
             <SelectTrigger className="w-[180px]">
               <SelectValue placeholder="Filter by issue" />
             </SelectTrigger>
@@ -410,25 +410,28 @@ export default function LearnerIssueFixer() {
       {/* Main Content */}
       <div className="grid flex-1 grid-cols-12 gap-3 overflow-hidden p-3">
         {/* Learner List */}
-        <Card className="col-span-4 flex flex-col">
+        <Card className="col-span-4 flex min-h-0 flex-col">
           <CardHeader className="p-3">
-            <CardTitle className="text-sm">
-              Learners ({filteredLearners.length})
-            </CardTitle>
+            <CardTitle className="text-sm">Learners ({totalCount})</CardTitle>
           </CardHeader>
-          <CardContent className="flex-1 overflow-hidden p-0">
-            <ScrollArea className="h-[calc(100vh-220px)]">
+          <CardContent className="min-h-0 flex-1 overflow-hidden p-0">
+            <ScrollArea className="h-full">
               <div className="space-y-1 p-3 pt-0">
                 {isLoading ? (
                   <div className="py-8 text-center text-muted-foreground">
                     Loading...
                   </div>
-                ) : filteredLearners.length === 0 ? (
+                ) : isError ? (
+                  <div className="py-8 text-center text-destructive">
+                    {error?.message ||
+                      "Unable to load learners. Please try Refresh."}
+                  </div>
+                ) : learnersWithIssues.length === 0 ? (
                   <div className="py-8 text-center text-muted-foreground">
                     No learners found
                   </div>
                 ) : (
-                  filteredLearners.map((learner) => (
+                  learnersWithIssues.map((learner) => (
                     <div
                       key={learner.id}
                       onClick={() => setSelectedLearnerId(learner.id)}
@@ -461,6 +464,30 @@ export default function LearnerIssueFixer() {
               </div>
             </ScrollArea>
           </CardContent>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t p-3">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page === 1 || isFetching}
+              onClick={() => setPage((current) => current - 1)}
+            >
+              Previous
+            </Button>
+            <span className="text-xs text-muted-foreground" aria-live="polite">
+              Page {page}
+              {learnersData && ` of ${totalPages}`}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={
+                !learnersData || page >= totalPages || isFetching || isError
+              }
+              onClick={() => setPage((current) => current + 1)}
+            >
+              Next
+            </Button>
+          </div>
         </Card>
 
         {/* Issue Panel */}
@@ -525,14 +552,8 @@ export default function LearnerIssueFixer() {
                 <DataEditor
                   key={selectedLearner.id}
                   learner={selectedLearner}
-                  enrollments={
-                    learnersWithIssues.find((l) => l.id === selectedLearnerId)
-                      ?.enrollments || []
-                  }
-                  payments={
-                    learnersWithIssues.find((l) => l.id === selectedLearnerId)
-                      ?.payments || []
-                  }
+                  enrollments={selectedLearner.enrollment || []}
+                  payments={selectedLearner.payment || []}
                   schedules={schedules || []}
                   onDeleteSuccess={() => setSelectedLearnerId(null)}
                 />

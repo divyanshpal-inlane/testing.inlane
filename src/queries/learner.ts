@@ -732,49 +732,141 @@ export function useLearnerEnrollment({ learnerId }: { learnerId?: string }) {
 
 // ==================== ADMIN ISSUE FIXER QUERIES ====================
 
-// Fetch all learners with their enrollment and payment data for issue diagnosis
-// Handles pagination internally to get all records beyond 1000 limit
-export function useLearnersWithIssues() {
+export const LEARNER_ISSUE_PAGE_SIZE = 15;
+
+export type LearnerIssueFilter =
+  | "all"
+  | "has-issues"
+  | "no-issues"
+  | "enrollment"
+  | "payment"
+  | "schedule"
+  | "learner";
+
+type LearnerWithIssueData = Database["public"]["Tables"]["Learner"]["Row"] & {
+  enrollment: (Database["public"]["Tables"]["enrollment"]["Row"] & {
+    Courses: Database["public"]["Tables"]["Courses"]["Row"] | null;
+  })[];
+  payment: Database["public"]["Tables"]["payment"]["Row"][];
+};
+
+const LEARNER_ISSUE_SELECT = "*, enrollment (*, Courses(*)), payment (*)";
+
+// Quote PostgREST values and escape regex syntax to preserve literal substring
+// search, including commas, parentheses, quotes and wildcard characters.
+function learnerIssueSearchFilter(searchQuery: string) {
+  const pattern = JSON.stringify(
+    searchQuery.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&"),
+  );
+  return `name.imatch.${pattern},phone.match.${pattern},area.imatch.${pattern}`;
+}
+
+// Filter in the database before requesting exactly one page of learners.
+export function useLearnersWithIssues({
+  page = 1,
+  searchQuery = "",
+  issueFilter = "all",
+}: {
+  page?: number;
+  searchQuery?: string;
+  issueFilter?: LearnerIssueFilter;
+} = {}) {
+  const buildQuery = (head = false) => {
+    if (issueFilter !== "all") {
+      return supabase
+        .rpc(
+          "get_learners_with_issues",
+          { search_term: searchQuery, issue_filter: issueFilter },
+          { count: "exact", head },
+        )
+        .select(LEARNER_ISSUE_SELECT);
+    }
+
+    // Ordinary listing/search uses the existing table immediately, without
+    // depending on deployment of the issue-filter RPC.
+    let query = supabase
+      .from("Learner")
+      .select(LEARNER_ISSUE_SELECT, { count: "exact", head });
+    if (searchQuery) query = query.or(learnerIssueSearchFilter(searchQuery));
+    return query;
+  };
+
   return useQuery({
-    queryKey: ["learners-with-issues"],
-    queryFn: async () => {
-      let allLearners: any[] = [];
-      let page = 0;
-      const pageSize = 1000;
-      let hasMore = true;
+    queryKey: ["learners-with-issues", "page", page, searchQuery, issueFilter],
+    queryFn: async ({ signal }) => {
+      const from = (page - 1) * LEARNER_ISSUE_PAGE_SIZE;
+      const { data, count, error } = await buildQuery()
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .order("created_at", {
+          referencedTable: "enrollment",
+          ascending: false,
+        })
+        .order("id", { referencedTable: "enrollment", ascending: false })
+        .order("created_at", { referencedTable: "payment", ascending: false })
+        .order("id", { referencedTable: "payment", ascending: false })
+        .range(from, from + LEARNER_ISSUE_PAGE_SIZE - 1)
+        .abortSignal(signal)
+        .returns<LearnerWithIssueData[]>();
 
-      while (hasMore) {
-        const from = page * pageSize;
-        const to = from + pageSize - 1;
-
-        const { data, error } = await supabase
-          .from("Learner")
-          .select(
-            `
-            *,
-            enrollment (*, Courses(*)),
-            payment (*)
-          `,
-          )
-          .order("created_at", { ascending: false })
-          .range(from, to);
-
-        if (error) throw error;
-
-        if (!data || data.length === 0) {
-          hasMore = false;
-        } else {
-          allLearners = allLearners.concat(data);
-          if (data.length < pageSize) {
-            hasMore = false;
-          } else {
-            page++;
-          }
-        }
+      // PostgREST reports an out-of-range offset after a fix/deletion shrinks
+      // the results. Fetch only the count so the page can move back in bounds.
+      if (error?.code === "PGRST103" && from > 0) {
+        const { count: remainingCount, error: countError } =
+          await buildQuery(true).abortSignal(signal);
+        if (countError) throw countError;
+        return { learners: [], totalCount: remainingCount ?? 0 };
       }
-
-      return allLearners;
+      if (error?.code === "PGRST202") {
+        throw new Error(
+          "Issue filters require the learner issue fixer database migration " +
+            "(20260917000000_learner_issue_fixer_pagination.sql). " +
+            "Apply it in Supabase, or select All Learners to view learners.",
+        );
+      }
+      if (error) throw error;
+      return { learners: data || [], totalCount: count ?? 0 };
     },
+    // Missing schema/permissions will not be fixed by retrying the same request.
+    retry: (failureCount, error) => {
+      const code = (error as { code?: string }).code;
+      return !(error instanceof Error) && code !== "42501" && failureCount < 2;
+    },
+    // Keep background refresh with the query and stop polling after errors so
+    // failed requests remain visible until the user retries or changes filters.
+    refetchInterval: (query) =>
+      query.state.status === "success" ? 5000 : false,
+  });
+}
+
+// Keep the editor available even when its learner is outside the current page.
+// The shared query-key prefix preserves all existing issue-fixer invalidations.
+export function useLearnerWithIssuesAdmin(learnerId: string | null) {
+  return useQuery({
+    queryKey: ["learners-with-issues", "learner", learnerId],
+    queryFn: async ({ signal }) => {
+      if (!learnerId) return null;
+      const { data, error } = await supabase
+        .from("Learner")
+        .select(LEARNER_ISSUE_SELECT)
+        .eq("id", learnerId)
+        .order("created_at", {
+          referencedTable: "enrollment",
+          ascending: false,
+        })
+        .order("id", { referencedTable: "enrollment", ascending: false })
+        .order("created_at", { referencedTable: "payment", ascending: false })
+        .order("id", { referencedTable: "payment", ascending: false })
+        .abortSignal(signal)
+        .returns<LearnerWithIssueData[]>()
+        .maybeSingle();
+
+      if (error) throw error;
+      return data;
+    },
+    enabled: !!learnerId,
+    refetchInterval: (query) =>
+      query.state.status === "success" ? 5000 : false,
   });
 }
 

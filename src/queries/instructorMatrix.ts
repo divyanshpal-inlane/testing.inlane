@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { addDays, format, parseISO } from "date-fns";
 
 import { supabase } from "@/lib/supabaseClient";
@@ -7,6 +7,8 @@ import { isTimeUnavailable } from "@/utils/time";
 export const MATRIX_DAY_START_HOUR = 6;
 export const MATRIX_DAY_END_HOUR = 20;
 export const MATRIX_HOURS_PER_DAY = MATRIX_DAY_END_HOUR - MATRIX_DAY_START_HOUR; // 14
+export const MATRIX_INSTRUCTOR_BATCH_SIZE = 10;
+const MATRIX_SCHEDULE_BATCH_SIZE = 1000;
 
 // The grid is rendered in 30-minute slots so half-hour lessons map to a single
 // block instead of bleeding across two whole-hour cells.
@@ -148,131 +150,302 @@ const hoursBetween = (
   return Math.max(0, (endMin - startMin) / 60);
 };
 
+export interface MatrixRawPage extends MatrixRawData {
+  hasMore: boolean;
+  nextOffset: number;
+}
+
+export function mergeInstructorMatrixPages(
+  pages: MatrixRawData[],
+): MatrixRawData {
+  const { from, to, dayHeaders } = pages[0];
+  const instructors = new Map<string, MatrixInstructorMeta>();
+  const schedules = new Map<number, MatrixRawSchedule>();
+  for (const page of pages) {
+    for (const instructor of page.instructors) {
+      instructors.set(instructor.id, instructor);
+    }
+    for (const schedule of page.schedules) schedules.set(schedule.id, schedule);
+  }
+  return {
+    from,
+    to,
+    dayHeaders,
+    instructors: Array.from(instructors.values()),
+    schedules: Array.from(schedules.values()),
+  };
+}
+
+// Keep the selector stable so loading indicators and drawer state don't cause
+// React Query to rebuild the raw payload and recalculate every loaded row.
+const selectInstructorMatrixData = (data: { pages: MatrixRawPage[] }) =>
+  mergeInstructorMatrixPages(data.pages);
+
 export function useInstructorMatrix(opts: {
   weekStart: Date; // Monday at 00:00 local
+  selectedIds?: string[];
+  hideOffDuty?: boolean;
+  countTentative?: boolean;
   enabled?: boolean;
 }) {
-  const { weekStart, enabled = true } = opts;
+  const {
+    weekStart,
+    selectedIds = [],
+    hideOffDuty = false,
+    countTentative = true,
+    enabled = true,
+  } = opts;
   const from = format(weekStart, "yyyy-MM-dd");
   const to = format(addDays(weekStart, 6), "yyyy-MM-dd");
 
-  return useQuery<MatrixRawData>({
-    queryKey: ["instructor-matrix", from, to],
+  return useInfiniteQuery({
+    queryKey: [
+      "instructor-matrix",
+      from,
+      to,
+      [...selectedIds].sort(),
+      hideOffDuty,
+      countTentative,
+    ],
     enabled,
-    queryFn: async () => {
-      const { data: instructorRows, error: instructorErr } = await supabase
+    // Revisiting a week/filter starts at the first batch instead of restoring
+    // (and refetching) every page loaded on the previous visit.
+    gcTime: 0,
+    initialPageParam: 0,
+    queryFn: ({ pageParam, signal }) =>
+      fetchInstructorMatrixPage({
+        weekStart,
+        selectedIds,
+        offset: pageParam,
+        signal,
+      }),
+    getNextPageParam: (lastPage) =>
+      lastPage.hasMore ? lastPage.nextOffset : undefined,
+    select: selectInstructorMatrixData,
+  });
+}
+
+// The picker searches all enabled instructors on demand, independently of the
+// matrix's loaded pages. Keep its existing limit of 40 suggestions.
+export function useInstructorMatrixSuggestions(opts: {
+  search: string;
+  selectedIds: string[];
+  enabled: boolean;
+}) {
+  const { search, selectedIds, enabled } = opts;
+  return useQuery({
+    queryKey: [
+      "instructor-matrix-suggestions",
+      search,
+      [...selectedIds].sort(),
+    ],
+    enabled,
+    gcTime: 0,
+    queryFn: async ({ signal }): Promise<MatrixInstructor[]> => {
+      let query = supabase
         .from("Instructor")
-        .select("id_instructor, name, phone, unavailability, enabled")
-        .order("name", { ascending: true });
-
-      if (instructorErr) throw instructorErr;
-
-      const instructorRowsEnabled = (instructorRows ?? []).filter(
-        (i) => i.enabled !== false,
-      );
-
-      const { data: scheduleRows, error: scheduleErr } = await supabase
-        .from("Schedule")
-        .select(
-          "id, instructor_id, learner_id, lesson_id, date, start_time, end_time, status, isTentative, Learner(id, name, phone), Lesson(id, number)",
-        )
-        .gte("date", from)
-        .lte("date", to)
-        .not("status", "in", "(paused,pending_payment)");
-
-      if (scheduleErr) throw scheduleErr;
-
-      const scheduleData = scheduleRows ?? [];
-
-      // Enrollment lookup for booked learners — to tag course / demo / topup.
-      const uniqueLearnerIds = Array.from(
-        new Set(
-          scheduleData
-            .map((s) => s.learner_id)
-            .filter((id): id is string => !!id),
-        ),
-      );
-
-      const enrollmentTypeByLearner = new Map<string, EnrollmentType>();
-      if (uniqueLearnerIds.length > 0) {
-        const { data: enrollmentRows } = await supabase
-          .from("enrollment")
-          .select("learner_id, course_id, progress, created_at")
-          .in("learner_id", uniqueLearnerIds)
-          .order("created_at", { ascending: false });
-
-        for (const e of enrollmentRows ?? []) {
-          if (enrollmentTypeByLearner.has(e.learner_id)) continue;
-          const progress = e.progress as { type?: string } | null | undefined;
-          const t = progress?.type ?? (e.course_id ? "course" : null);
-          enrollmentTypeByLearner.set(
-            e.learner_id,
-            t === "course" || t === "demo" || t === "topup" ? t : null,
-          );
-        }
+        .select("id_instructor, name, phone")
+        .or("enabled.eq.true,enabled.is.null")
+        .order("name", { ascending: true })
+        .order("id_instructor", { ascending: true })
+        .range(0, 39)
+        .abortSignal(signal);
+      if (selectedIds.length > 0) {
+        query = query.not("id_instructor", "in", `(${selectedIds.join(",")})`);
       }
-
-      // Enrich + tag each schedule with its instructor/day so the builder can
-      // regroup. View-independent — the tentative toggle is applied later.
-      const schedules: MatrixRawSchedule[] = [];
-      for (const s of scheduleData) {
-        if (!s.instructor_id) continue;
-        const learner = Array.isArray(s.Learner) ? s.Learner[0] : s.Learner;
-        const lesson = Array.isArray(s.Lesson) ? s.Lesson[0] : s.Lesson;
-        schedules.push({
-          instructorId: s.instructor_id,
-          date: s.date,
-          id: s.id,
-          start_time: s.start_time,
-          end_time: s.end_time,
-          startHour: Number(s.start_time?.slice(0, 2) ?? 0),
-          endHour: Number(s.end_time?.slice(0, 2) ?? 0),
-          startMin: timeToMinutes(s.start_time),
-          endMin: timeToMinutes(s.end_time),
-          status: s.status,
-          isTentative: s.isTentative,
-          learnerId: s.learner_id,
-          learnerName: learner?.name ?? s["leadName" as keyof typeof s] ?? null,
-          learnerPhone: learner?.phone ?? null,
-          lessonId: s.lesson_id,
-          lessonNumber: lesson?.number ?? null,
-          enrollmentType: s.isTentative
-            ? "tentative"
-            : s.learner_id
-              ? (enrollmentTypeByLearner.get(s.learner_id) ?? null)
-              : null,
-        });
+      if (search.trim()) {
+        // Quote PostgREST values and escape LIKE wildcards so punctuation in
+        // names/phone numbers is matched literally, as in the original picker.
+        const pattern = `%${search.trim().replace(/[\\%_]/g, "\\$&")}%`;
+        const value = `"${pattern.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+        query = query.or(`name.ilike.${value},phone.ilike.${value}`);
       }
-
-      // Build day headers
-      const dayHeaders = Array.from({ length: 7 }).map((_, i) => {
-        const d = addDays(weekStart, i);
-        return {
-          date: format(d, "yyyy-MM-dd"),
-          weekday: format(d, "EEE"),
-          dayOfMonth: d.getDate(),
-        };
-      });
-
-      const instructors: MatrixInstructorMeta[] = instructorRowsEnabled.map(
-        (instr) => ({
-          id: instr.id_instructor,
-          name: instr.name ?? "(unnamed)",
-          phone: instr.phone,
-          unavailability: Array.isArray(instr.unavailability)
-            ? (instr.unavailability as unknown[])
-            : null,
-        }),
-      );
-
-      return { from, to, dayHeaders, instructors, schedules };
+      const { data, error } = await query;
+      if (error) throw error;
+      return (data ?? []).map((instructor) => ({
+        id: instructor.id_instructor,
+        name: instructor.name ?? "(unnamed)",
+        phone: instructor.phone,
+      }));
     },
   });
 }
 
-// Pure computation of the matrix from the raw fetched data. Keeping this out of
-// the query lets the UI flip between "count tentative as busy" (View A) and
-// "exclude tentative" (View B) instantly, with no re-fetch.
+export async function fetchInstructorMatrixPage(opts: {
+  weekStart: Date;
+  offset?: number;
+  selectedIds?: string[];
+  signal?: AbortSignal;
+}): Promise<MatrixRawPage> {
+  const { weekStart, offset = 0, selectedIds = [], signal } = opts;
+  const from = format(weekStart, "yyyy-MM-dd");
+  const to = format(addDays(weekStart, 6), "yyyy-MM-dd");
+  // One lookahead row determines whether another batch exists. Only this
+  // database-bounded batch is sliced; the full instructor list is never fetched.
+  let instructorQuery = supabase
+    .from("Instructor")
+    .select("id_instructor, name, phone, unavailability")
+    .or("enabled.eq.true,enabled.is.null")
+    .order("name", { ascending: true })
+    .order("id_instructor", { ascending: true })
+    .range(offset, offset + MATRIX_INSTRUCTOR_BATCH_SIZE);
+  if (selectedIds.length > 0) {
+    instructorQuery = instructorQuery.in("id_instructor", selectedIds);
+  }
+  if (signal) instructorQuery = instructorQuery.abortSignal(signal);
+  const { data: instructorRows, error: instructorErr } = await instructorQuery;
+
+  if (instructorErr) throw instructorErr;
+
+  const instructorBatch = (instructorRows ?? []).slice(
+    0,
+    MATRIX_INSTRUCTOR_BATCH_SIZE,
+  );
+  const instructorIds = instructorBatch.map((i) => i.id_instructor);
+
+  const buildScheduleQuery = (scheduleOffset: number) => {
+    let query = supabase
+      .from("Schedule")
+      .select(
+        "id, instructor_id, learner_id, lesson_id, date, start_time, end_time, status, isTentative, Learner(id, name, phone), Lesson(id, number)",
+      )
+      .in("instructor_id", instructorIds)
+      .gte("date", from)
+      .lte("date", to)
+      .not("status", "in", "(paused,pending_payment)")
+      .order("id", { ascending: true })
+      .range(scheduleOffset, scheduleOffset + MATRIX_SCHEDULE_BATCH_SIZE - 1);
+    if (signal) query = query.abortSignal(signal);
+    return query;
+  };
+  // A busy batch can exceed Supabase's response limit. Fetch all schedules
+  // for these instructors so their hours/conflicts remain accurate.
+  const scheduleData: NonNullable<
+    Awaited<ReturnType<typeof buildScheduleQuery>>["data"]
+  > = [];
+  if (instructorIds.length > 0) {
+    for (
+      let scheduleOffset = 0;
+      ;
+      scheduleOffset += MATRIX_SCHEDULE_BATCH_SIZE
+    ) {
+      const { data: scheduleRows, error: scheduleErr } =
+        await buildScheduleQuery(scheduleOffset);
+      if (scheduleErr) throw scheduleErr;
+      scheduleData.push(...(scheduleRows ?? []));
+      if (!scheduleRows || scheduleRows.length < MATRIX_SCHEDULE_BATCH_SIZE)
+        break;
+    }
+  }
+
+  // Enrollment lookup for booked learners — to tag course / demo / topup.
+  const uniqueLearnerIds = Array.from(
+    new Set(
+      scheduleData.map((s) => s.learner_id).filter((id): id is string => !!id),
+    ),
+  );
+
+  const enrollmentTypeByLearner = new Map<string, EnrollmentType>();
+  if (uniqueLearnerIds.length > 0) {
+    let enrollmentQuery = supabase
+      .from("enrollment")
+      .select("learner_id, course_id, progress, created_at")
+      .in("learner_id", uniqueLearnerIds)
+      .order("created_at", { ascending: false });
+    if (signal) enrollmentQuery = enrollmentQuery.abortSignal(signal);
+    const { data: enrollmentRows } = await enrollmentQuery;
+
+    for (const e of enrollmentRows ?? []) {
+      if (enrollmentTypeByLearner.has(e.learner_id)) continue;
+      const progress = e.progress as { type?: string } | null | undefined;
+      const t = progress?.type ?? (e.course_id ? "course" : null);
+      enrollmentTypeByLearner.set(
+        e.learner_id,
+        t === "course" || t === "demo" || t === "topup" ? t : null,
+      );
+    }
+  }
+
+  // Enrich + tag each schedule with its instructor/day so the builder can
+  // regroup. View-independent — the tentative toggle is applied later.
+  const schedules: MatrixRawSchedule[] = [];
+  for (const s of scheduleData) {
+    if (!s.instructor_id) continue;
+    const learner = Array.isArray(s.Learner) ? s.Learner[0] : s.Learner;
+    const lesson = Array.isArray(s.Lesson) ? s.Lesson[0] : s.Lesson;
+    schedules.push({
+      instructorId: s.instructor_id,
+      date: s.date,
+      id: s.id,
+      start_time: s.start_time,
+      end_time: s.end_time,
+      startHour: Number(s.start_time?.slice(0, 2) ?? 0),
+      endHour: Number(s.end_time?.slice(0, 2) ?? 0),
+      startMin: timeToMinutes(s.start_time),
+      endMin: timeToMinutes(s.end_time),
+      status: s.status,
+      isTentative: s.isTentative,
+      learnerId: s.learner_id,
+      learnerName: learner?.name ?? s["leadName" as keyof typeof s] ?? null,
+      learnerPhone: learner?.phone ?? null,
+      lessonId: s.lesson_id,
+      lessonNumber: lesson?.number ?? null,
+      enrollmentType: s.isTentative
+        ? "tentative"
+        : s.learner_id
+          ? (enrollmentTypeByLearner.get(s.learner_id) ?? null)
+          : null,
+    });
+  }
+
+  // Build day headers
+  const dayHeaders = Array.from({ length: 7 }).map((_, i) => {
+    const d = addDays(weekStart, i);
+    return {
+      date: format(d, "yyyy-MM-dd"),
+      weekday: format(d, "EEE"),
+      dayOfMonth: d.getDate(),
+    };
+  });
+
+  const instructors: MatrixInstructorMeta[] = instructorBatch.map((instr) => ({
+    id: instr.id_instructor,
+    name: instr.name ?? "(unnamed)",
+    phone: instr.phone,
+    unavailability: Array.isArray(instr.unavailability)
+      ? (instr.unavailability as unknown[])
+      : null,
+  }));
+
+  return {
+    from,
+    to,
+    dayHeaders,
+    instructors,
+    schedules,
+    hasMore: (instructorRows?.length ?? 0) > MATRIX_INSTRUCTOR_BATCH_SIZE,
+    nextOffset: offset + MATRIX_INSTRUCTOR_BATCH_SIZE,
+  };
+}
+
+// Full-week export is deliberately separate from the infinite query: download
+// every enabled instructor only in response to the Export Excel action.
+export async function fetchCompleteInstructorMatrix(
+  weekStart: Date,
+): Promise<MatrixRawData> {
+  const pages: MatrixRawPage[] = [];
+  let offset = 0;
+  for (;;) {
+    const page = await fetchInstructorMatrixPage({ weekStart, offset });
+    pages.push(page);
+    if (!page.hasMore) break;
+    offset = page.nextOffset;
+  }
+  return mergeInstructorMatrixPages(pages);
+}
+
+// Pure computation of the matrix from the raw fetched data. The same builder
+// applies the tentative view to both the loaded batches and full-week exports.
 //
 // View A (includeTentative=true): tentative holds count exactly like confirmed
 //   bookings — block time, count toward conflicts and booked hours.

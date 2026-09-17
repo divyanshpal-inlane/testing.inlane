@@ -8,7 +8,7 @@ import {
   Loader2,
   RefreshCcw,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { InstructorMatrixCell } from "@/components/admin/InstructorMatrixCell";
@@ -19,6 +19,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import {
   buildInstructorMatrix,
+  fetchCompleteInstructorMatrix,
   MatrixRow,
   useInstructorMatrix,
 } from "@/queries/instructorMatrix";
@@ -36,18 +37,28 @@ export default function InstructorMatrix() {
   // View A (default): tentative holds count as busy. View B: exclude them.
   const [countTentative, setCountTentative] = useState(true);
   const [exporting, setExporting] = useState(false);
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+  const hasScrolledRef = useRef(false);
 
   const {
     data: raw,
     isLoading,
     isFetching,
+    isError,
+    hasNextPage,
+    isFetchingNextPage,
+    isFetchNextPageError,
+    fetchNextPage,
     refetch,
   } = useInstructorMatrix({
     weekStart,
+    selectedIds,
+    hideOffDuty,
+    countTentative,
   });
 
-  // Recompute the matrix client-side when the tentative toggle flips — no
-  // re-fetch, since the raw data is view-independent.
+  // Availability calculations and the tentative view stay in the existing
+  // builder. Each appended batch contributes to the same matrix/totals.
   const data = useMemo(
     () =>
       raw
@@ -56,8 +67,9 @@ export default function InstructorMatrix() {
     [raw, countTentative],
   );
 
-  // The full instructor list for the picker (all enabled instructors).
-  const allInstructors = useMemo(
+  // Loaded instructors supply chip labels; the picker queries suggestions on
+  // demand so search can still find instructors beyond these pages.
+  const loadedInstructors = useMemo(
     () => (data ? data.rows.map((r) => r.instructor) : []),
     [data],
   );
@@ -72,6 +84,69 @@ export default function InstructorMatrix() {
       return true;
     });
   }, [data, selectedIds, hideOffDuty]);
+
+  useEffect(() => {
+    hasScrolledRef.current = false;
+  }, [weekStart, selectedIds, hideOffDuty, countTentative]);
+
+  useEffect(() => {
+    const sentinel = loadMoreRef.current;
+    if (
+      !sentinel ||
+      !data ||
+      !hasNextPage ||
+      isFetching ||
+      isFetchNextPageError
+    )
+      return;
+
+    let requested = false;
+    const loadMore = () => {
+      if (requested) return;
+      requested = true;
+      observer.disconnect();
+      void fetchNextPage({ cancelRefetch: false });
+    };
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (
+          entry.isIntersecting &&
+          (hasScrolledRef.current || (hideOffDuty && visibleRows.length === 0))
+        ) {
+          loadMore();
+        }
+      },
+      { rootMargin: "0px 0px 200px" },
+    );
+    const onScroll = (event: Event) => {
+      // Ignore scrolling the picker or the horizontal matrix viewport.
+      if (event.target instanceof Element && !event.target.contains(sentinel))
+        return;
+      hasScrolledRef.current = true;
+      const bounds = sentinel.getBoundingClientRect();
+      if (bounds.top <= window.innerHeight + 200 && bounds.bottom >= 0)
+        loadMore();
+    };
+    // A tall viewport may already contain the sentinel. Wait for scrolling
+    // before loading more, so opening/resetting the page fetches only one batch.
+    window.addEventListener("scroll", onScroll, {
+      capture: true,
+      passive: true,
+    });
+    observer.observe(sentinel);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [
+    data,
+    fetchNextPage,
+    hasNextPage,
+    isFetching,
+    isFetchNextPageError,
+    hideOffDuty,
+    visibleRows.length,
+  ]);
 
   const visibleTotals = useMemo(() => {
     return visibleRows.reduce(
@@ -109,7 +184,15 @@ export default function InstructorMatrix() {
     if (!raw || !data || exporting) return;
     setExporting(true);
     try {
-      await exportInstructorMatrixWorkbook(raw, data, countTentative);
+      const exportRaw = await fetchCompleteInstructorMatrix(weekStart);
+      const exportData = buildInstructorMatrix(exportRaw, {
+        includeTentative: countTentative,
+      });
+      await exportInstructorMatrixWorkbook(
+        exportRaw,
+        exportData,
+        countTentative,
+      );
     } catch (err) {
       console.error("Failed to export instructor matrix", err);
     } finally {
@@ -198,7 +281,7 @@ export default function InstructorMatrix() {
             </div>
             <div className="ml-auto w-full max-w-md">
               <InstructorMultiSelect
-                instructors={allInstructors}
+                instructors={loadedInstructors}
                 selectedIds={selectedIds}
                 onChange={setSelectedIds}
               />
@@ -306,7 +389,11 @@ export default function InstructorMatrix() {
               <div className="flex h-40 items-center justify-center">
                 <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
               </div>
-            ) : !data || visibleRows.length === 0 ? (
+            ) : isError && !data ? (
+              <div className="p-6 text-center text-sm text-destructive">
+                Could not load instructors. Use Refresh to try again.
+              </div>
+            ) : !data || (visibleRows.length === 0 && !hasNextPage) ? (
               <div className="p-6 text-center text-sm text-muted-foreground">
                 No instructors match the current filters.
               </div>
@@ -385,6 +472,32 @@ export default function InstructorMatrix() {
                 <ScrollBar orientation="horizontal" />
               </ScrollArea>
             )}
+            {/* Outside the horizontal ScrollArea so page scrolling can always
+                reach it, including when a batch contains only off-duty rows. */}
+            <div ref={loadMoreRef} className={hasNextPage ? "min-h-10" : ""}>
+              {isFetchingNextPage && (
+                <div
+                  role="status"
+                  className="flex items-center justify-center gap-2 p-3 text-sm text-muted-foreground"
+                >
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading more instructors…
+                </div>
+              )}
+              {isFetchNextPageError && (
+                <div className="p-3 text-center text-sm text-destructive">
+                  Could not load more instructors.
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => fetchNextPage()}
+                    disabled={isFetching}
+                  >
+                    Retry
+                  </Button>
+                </div>
+              )}
+            </div>
           </CardContent>
         </Card>
       </div>
