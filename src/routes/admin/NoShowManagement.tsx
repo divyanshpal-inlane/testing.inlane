@@ -7,6 +7,7 @@ import {
   Loader2,
   X,
 } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
@@ -45,8 +46,96 @@ const fmtWhen = (c: NoShowCase) =>
     ? `${format(new Date(c.date), "EEE d MMM")} · ${c.startTime?.slice(0, 5) ?? ""}–${c.endTime?.slice(0, 5) ?? ""}`
     : "—";
 
+// Pages can overlap if a new case is inserted while the list is being read.
+function loadedRows<T>(
+  pages: { rows: T[] }[] | undefined,
+  key: (row: T) => string | number,
+): T[] {
+  return Array.from(
+    new Map(
+      (pages ?? [])
+        .flatMap((page) => page.rows)
+        .map((row) => [key(row), row]),
+    ).values(),
+  );
+}
+
+function LoadMoreCases({
+  hasNextPage,
+  isFetching,
+  isFetchingNextPage,
+  isFetchNextPageError,
+  fetchNextPage,
+}: {
+  hasNextPage: boolean;
+  isFetching: boolean;
+  isFetchingNextPage: boolean;
+  isFetchNextPageError: boolean;
+  fetchNextPage: (options: { cancelRefetch: boolean }) => Promise<unknown>;
+}) {
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const hasScrolledRef = useRef(false);
+
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || !hasNextPage || isFetching) return;
+
+    let requested = false;
+    const loadMore = () => {
+      if (requested) return;
+      requested = true;
+      observer.disconnect();
+      void fetchNextPage({ cancelRefetch: false });
+    };
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (
+          entry.isIntersecting &&
+          hasScrolledRef.current &&
+          !isFetchNextPageError
+        ) {
+          loadMore();
+        }
+      },
+      { rootMargin: "0px 0px 200px" },
+    );
+    const onScroll = (event: Event) => {
+      if (event.target instanceof Element && !event.target.contains(sentinel))
+        return;
+      hasScrolledRef.current = true;
+      const bounds = sentinel.getBoundingClientRect();
+      if (bounds.top <= window.innerHeight + 200 && bounds.bottom >= 0) loadMore();
+    };
+    // Opening a tab fetches only its first batch, even in a tall viewport.
+    // A failed next-page request can be retried by scrolling again, without
+    // an observer-driven retry loop.
+    window.addEventListener("scroll", onScroll, {
+      capture: true,
+      passive: true,
+    });
+    observer.observe(sentinel);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [hasNextPage, isFetching, isFetchNextPageError, fetchNextPage]);
+
+  if (!hasNextPage) return null;
+  return (
+    <div ref={sentinelRef} className="min-h-px">
+      {isFetchingNextPage && (
+        <div className="flex justify-center py-4">
+          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReportedCases() {
-  const { data: cases, isLoading } = useNoShowCases();
+  const query = useNoShowCases();
+  const { isLoading } = query;
+  const cases = loadedRows(query.data?.pages, (c) => c.id);
   const resolve = useResolveNoShow();
   const charge = useChargeNoShowFee();
   const { data: admin } = useCurrentAdmin();
@@ -157,12 +246,15 @@ function ReportedCases() {
           </CardContent>
         </Card>
       ))}
+      <LoadMoreCases {...query} />
     </div>
   );
 }
 
 function PotentialInstructorNoShows() {
-  const { data: rows, isLoading } = usePotentialInstructorNoShows();
+  const query = usePotentialInstructorNoShows();
+  const { isLoading } = query;
+  const rows = loadedRows(query.data?.pages, (r) => r.scheduleId);
   const flag = useFlagInstructorNoShow();
   const { toast } = useToast();
 
@@ -218,6 +310,7 @@ function PotentialInstructorNoShows() {
             </CardContent>
           </Card>
         ))}
+        <LoadMoreCases {...query} />
       </div>
     </>
   );
@@ -245,7 +338,14 @@ const fmtFeeWhen = (f: NoShowFee) =>
     : "—";
 
 function FeesAndAppeals() {
-  const { data: fees, isLoading } = useAllNoShowFees();
+  const query = useAllNoShowFees();
+  const appealsQuery = useAllNoShowFees({ pendingAppealsOnly: true });
+  const isLoading = query.isLoading || appealsQuery.isLoading;
+  const fees = loadedRows(query.data?.pages, (f) => f.id);
+  const pendingAppeals = loadedRows(appealsQuery.data?.pages, (f) => f.id);
+  const totalFees = query.data?.pages[0]?.total ?? fees.length;
+  const totalPendingAppeals =
+    appealsQuery.data?.pages[0]?.total ?? pendingAppeals.length;
   const review = useReviewAppeal();
   const { data: admin } = useCurrentAdmin();
   const { toast } = useToast();
@@ -315,16 +415,12 @@ function FeesAndAppeals() {
       </Card>
     );
 
-  const pendingAppeals = fees.filter(
-    (f) => f.appeal && f.appeal.status === "pending",
-  );
-
   return (
     <div className="space-y-4">
       {pendingAppeals.length > 0 && (
         <div>
           <h2 className="mb-2 text-sm font-semibold">
-            Pending appeals ({pendingAppeals.length})
+            Pending appeals ({totalPendingAppeals})
           </h2>
           <div className="space-y-2">
             {pendingAppeals.map((f) => (
@@ -376,12 +472,13 @@ function FeesAndAppeals() {
                 </CardContent>
               </Card>
             ))}
+            <LoadMoreCases {...appealsQuery} />
           </div>
         </div>
       )}
 
       <div>
-        <h2 className="mb-2 text-sm font-semibold">All fees ({fees.length})</h2>
+        <h2 className="mb-2 text-sm font-semibold">All fees ({totalFees})</h2>
         <div className="space-y-2">
           {fees.map((f) => (
             <Card key={f.id}>
@@ -406,6 +503,7 @@ function FeesAndAppeals() {
               </CardContent>
             </Card>
           ))}
+          <LoadMoreCases {...query} />
         </div>
       </div>
     </div>
