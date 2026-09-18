@@ -1,6 +1,7 @@
 import { describe } from "node:test";
 
 import {
+  InfiniteData,
   useInfiniteQuery,
   useMutation,
   useQuery,
@@ -57,11 +58,17 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import {
+  useLocation,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
 
 import { SearchInstructorScheduleInfo } from "@/components/admin/InstructorScheduleInfo";
 import { CalendarImport } from "@/components/instructor/CalendarImport";
@@ -179,6 +186,36 @@ interface ServiceableArea {
 }
 
 const INSTRUCTOR_PAGE_SIZE = 6;
+type InstructorStatusFilter = "all" | InstructorStatus;
+
+interface InstructorListPage {
+  instructors: (InstructorFromDB & { schedules: Schedule[] })[];
+  hasMore: boolean;
+  nextOffset: number;
+}
+
+interface InstructorListReturnState {
+  statusFilter: InstructorStatusFilter;
+  searchTerm: string;
+  debouncedSearchTerm: string;
+  listSession: number;
+  scrollY: number;
+  data: InfiniteData<InstructorListPage, number>;
+  dataUpdatedAt: number;
+}
+
+// One pending return from View Schedule; retain pages even if the query expires.
+let instructorListReturnState: InstructorListReturnState | undefined;
+
+const INSTRUCTOR_STATUS_FILTERS = [
+  {
+    value: "all" as const,
+    label: "All",
+    badgeClass: "bg-primary/10 text-primary",
+    dotClass: "bg-primary",
+  },
+  ...INSTRUCTOR_STATUSES,
+];
 
 // Supabase's `.or()` accepts raw PostgREST filter syntax, so strip the
 // characters that can break an individual filter expression before using a
@@ -671,6 +708,27 @@ const AddressAutocomplete = memo(
 
 export default function InstructorsManagement() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Keep list filters in the route so returning from a schedule restores them.
+  const searchTerm = searchParams.get("search") ?? "";
+  const statusFilter: InstructorStatusFilter =
+    INSTRUCTOR_STATUS_FILTERS.find(
+      ({ value }) => value === searchParams.get("status"),
+    )?.value ?? "all";
+
+  const updateListFilter = (key: "search" | "status", value: string) => {
+    setSearchParams(
+      (previous) => {
+        const next = new URLSearchParams(previous);
+        if (value) next.set(key, value);
+        else next.delete(key);
+        return next;
+      },
+      { replace: true },
+    );
+  };
+
   const { data: currentAdmin } = useCurrentAdmin();
   const { data: currentUser } = useCurrentUser();
   const canViewUnmaskedPhoneNumbers =
@@ -707,9 +765,6 @@ export default function InstructorsManagement() {
   const [unavailabilityData, setUnavailabilityData] = useState<
     Partial<Unavailability>
   >({});
-
-  // instructor search bar
-  const [searchTerm, setSearchTerm] = useState("");
 
   // Delete instructor
   const [deleteConfirmInstructorId, setDeleteConfirmInstructorId] = useState<
@@ -788,18 +843,26 @@ export default function InstructorsManagement() {
     },
   });
 
-  const [statusFilter, setStatusFilter] = useState<InstructorStatus>("active");
-  const [listSession, setListSession] = useState(0);
-  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState("");
+  const [returnState] = useState(() =>
+    instructorListReturnState?.statusFilter === statusFilter &&
+    instructorListReturnState.searchTerm === searchTerm
+      ? instructorListReturnState
+      : undefined,
+  );
+  const [listSession, setListSession] = useState(returnState?.listSession ?? 0);
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(
+    returnState?.debouncedSearchTerm ?? searchTerm,
+  );
+  const pendingScrollRestorationRef = useRef(returnState);
 
-  const selectStatusFilter = (status: InstructorStatus) => {
+  const selectStatusFilter = (status: InstructorStatusFilter) => {
     queryClient.cancelQueries({ queryKey: ["instructors", "list"] });
-    setStatusFilter(status);
+    updateListFilter("status", status === "all" ? "" : status);
     setListSession((session) => session + 1);
   };
 
   const clearStatusFilter = () => {
-    selectStatusFilter("active");
+    selectStatusFilter("all");
   };
 
   useEffect(() => {
@@ -909,18 +972,19 @@ export default function InstructorsManagement() {
   // Counts are independent HEAD requests: Postgres returns only each exact
   // count, never the instructor rows used by the card list.
   const {
-    data: statusCounts = { active: 0, on_break: 0, inactive: 0 },
+    data: statusCounts = { all: 0, active: 0, on_break: 0, inactive: 0 },
     isLoading: areStatusCountsLoading,
     isError: areStatusCountsError,
   } = useQuery({
     queryKey: ["instructors", "status-counts"],
     queryFn: async () => {
       const entries = await Promise.all(
-        INSTRUCTOR_STATUSES.map(async ({ value }) => {
-          const query = supabase
+        INSTRUCTOR_STATUS_FILTERS.map(async ({ value }) => {
+          let query = supabase
             .from("Instructor")
-            .select("id_instructor", { count: "exact", head: true })
-            .eq("status", value);
+            .select("id_instructor", { count: "exact", head: true });
+
+          if (value !== "all") query = query.eq("status", value);
 
           const { count, error } = await query;
           if (error) throw error;
@@ -928,19 +992,34 @@ export default function InstructorsManagement() {
         }),
       );
 
-      return Object.fromEntries(entries) as Record<InstructorStatus, number>;
+      return Object.fromEntries(entries) as Record<
+        InstructorStatusFilter,
+        number
+      >;
     },
   });
 
+  const isReturningToList =
+    returnState?.statusFilter === statusFilter &&
+    returnState.debouncedSearchTerm === debouncedSearchTerm &&
+    returnState.listSession === listSession;
+
   const {
     data: instructorPages,
+    dataUpdatedAt,
     isLoading: isInstructorListLoading,
     isError: isInstructorListError,
     error: instructorListError,
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
-  } = useInfiniteQuery({
+  } = useInfiniteQuery<
+    InstructorListPage,
+    Error,
+    InfiniteData<InstructorListPage, number>,
+    (string | number)[],
+    number
+  >({
     queryKey: [
       "instructors",
       "list",
@@ -948,6 +1027,12 @@ export default function InstructorsManagement() {
       debouncedSearchTerm,
       listSession,
     ],
+    initialData: isReturningToList ? returnState.data : undefined,
+    initialDataUpdatedAt: isReturningToList
+      ? returnState.dataUpdatedAt
+      : undefined,
+    // Reuse the loaded pages on return, but still refresh explicitly invalidated data.
+    refetchOnMount: (query) => !isReturningToList || query.state.isInvalidated,
     initialPageParam: 0,
     queryFn: async ({ pageParam, signal }) => {
       // Fetch one extra row so we can detect another page without running an
@@ -955,12 +1040,12 @@ export default function InstructorsManagement() {
       let query = supabase
         .from("Instructor")
         .select("*")
-        .eq("status", statusFilter)
         .order("name")
         .order("id_instructor")
         .range(pageParam, pageParam + INSTRUCTOR_PAGE_SIZE)
         .abortSignal(signal);
 
+      if (statusFilter !== "all") query = query.eq("status", statusFilter);
       if (searchFilter) query = query.or(searchFilter);
 
       const { data, error } = await query;
@@ -988,6 +1073,21 @@ export default function InstructorsManagement() {
     () => instructorPages?.pages.flatMap((page) => page.instructors) ?? [],
     [instructorPages],
   );
+
+  useLayoutEffect(() => {
+    const saved = pendingScrollRestorationRef.current;
+    if (!saved || !instructorPages || isInstructorListLoading) return;
+
+    if (
+      saved.statusFilter === statusFilter &&
+      saved.searchTerm === searchTerm
+    ) {
+      window.scrollTo({ top: saved.scrollY, behavior: "instant" });
+    }
+    pendingScrollRestorationRef.current = undefined;
+    if (instructorListReturnState === saved)
+      instructorListReturnState = undefined;
+  }, [instructorPages, isInstructorListLoading, searchTerm, statusFilter]);
 
   const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
 
@@ -1241,7 +1341,18 @@ export default function InstructorsManagement() {
 
   const handleOpenScheduleDialog = (id: string) => {
     console.log("Open schedule fo id`", id);
-    navigate(id);
+    if (instructorPages) {
+      instructorListReturnState = {
+        statusFilter,
+        searchTerm,
+        debouncedSearchTerm,
+        listSession,
+        scrollY: window.scrollY,
+        data: instructorPages,
+        dataUpdatedAt,
+      };
+    }
+    navigate({ pathname: id, search: searchParams.toString() });
     // setOpenScheduleDialogId(id); // Set the ID of the instructor whose dialog is open
   };
 
@@ -1296,7 +1407,7 @@ export default function InstructorsManagement() {
           <Input
             placeholder="Search instructors by name, phone, car, or area..."
             value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
+            onChange={(e) => updateListFilter("search", e.target.value)}
             className="pl-10"
           />
         </div>
@@ -1307,7 +1418,7 @@ export default function InstructorsManagement() {
         <span className="text-sm font-medium text-muted-foreground">
           Status:
         </span>
-        {INSTRUCTOR_STATUSES.map((s) => {
+        {INSTRUCTOR_STATUS_FILTERS.map((s) => {
           const selected = statusFilter === s.value;
           const displayedCount = areStatusCountsLoading
             ? "…"
@@ -5144,6 +5255,7 @@ export const EditTentativeSchedule = ({
   instructorName?: string;
 }) => {
   const navigate = useNavigate();
+  const location = useLocation();
   const { toast } = useToast();
   const instructorId = schedule?.instructor_id;
 
@@ -5305,7 +5417,10 @@ export const EditTentativeSchedule = ({
         description: "Schedule updated successfully",
         variant: "success",
       });
-      navigate("/admin/instructors/" + instructorId);
+      navigate({
+        pathname: "/admin/instructors/" + instructorId,
+        search: location.search,
+      });
       window.location.reload();
     },
   });
@@ -5747,6 +5862,7 @@ function getImportedEventsForSlot(
 export const InstructorSchedulePage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
 
   const [selectedSlot, setSelectedSlot] = useState(null);
@@ -6025,7 +6141,12 @@ export const InstructorSchedulePage = () => {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => navigate("/admin/instructors")}
+            onClick={() =>
+              navigate({
+                pathname: "/admin/instructors",
+                search: location.search,
+              })
+            }
             className="rounded-full"
           >
             <ChevronLeft className="h-5 w-5" />

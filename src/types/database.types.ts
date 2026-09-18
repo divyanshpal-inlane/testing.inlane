@@ -1252,6 +1252,9 @@ export type Database = {
           name: string | null;
           phone: string | null;
         }[];
+      get_learners_with_issues: {
+        Args: { search_term: string; issue_filter: string };
+        Returns: Database["public"]["Tables"]["Learner"]["Row"][];
       };
       record_learning_session: {
         Args: {
