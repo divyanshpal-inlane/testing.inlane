@@ -1245,6 +1245,10 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      get_leave_requests_paginated: {
+        Args: { p_status: string; p_offset: number; p_limit: number };
+        Returns: Database["public"]["Tables"]["instructor_leave_request"]["Row"][];
+      };
       get_learners_with_issues: {
         Args: { search_term: string; issue_filter: string };
         Returns: Database["public"]["Tables"]["Learner"]["Row"][];
