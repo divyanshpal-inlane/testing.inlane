@@ -1,3 +1,4 @@
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import {
   AlertTriangle,
@@ -11,7 +12,7 @@ import {
   Search,
   Users,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
@@ -31,6 +32,7 @@ import { supabase } from "@/lib/supabaseClient";
 
 interface EnrollmentRow {
   id: string;
+  completed_count: number;
   amount: number;
   installment1_amount: number;
   installment2_amount: number;
@@ -77,154 +79,99 @@ interface TopupRow {
   paymentDate: string | null;
 }
 
+type PaymentTab = "half_paid" | "full_paid" | "pending" | "topup";
+
+interface PaymentTrackerData {
+  tab: PaymentTab;
+  enrollments: EnrollmentRow[];
+  topups: TopupRow[];
+  courseNames: string[];
+  counts: Record<PaymentTab, number>;
+  totalOutstanding: number;
+  totalRevenue: number;
+  pendingAmount: number;
+  urgentCount: number;
+  topupPaidCount: number;
+  topupUnpaidCount: number;
+}
+
+const PAGE_SIZE = 10;
+
 export default function PaymentTracker() {
-  const [enrollments, setEnrollments] = useState<EnrollmentRow[]>([]);
-  const [topupRows, setTopupRows] = useState<TopupRow[]>([]);
-  const [lessonCounts, setLessonCounts] = useState<Record<string, number>>({});
-  const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<PaymentTab>("half_paid");
+  const [page, setPage] = useState(1);
   const [searchTerm, setSearchTerm] = useState("");
   const [courseFilter, setCourseFilter] = useState<string>("all");
   const [urgencyFilter, setUrgencyFilter] = useState<string>("all");
   const { toast } = useToast();
   const navigate = useNavigate();
 
-  const fetchData = async () => {
-    setLoading(true);
-    try {
-      // Fetch all active enrollments with payment info
-      const { data: enrollmentData, error: enrollmentError } = await supabase
-        .from("enrollment")
-        .select(
-          `
-          id,
-          amount,
-          installment1_amount,
-          installment2_amount,
-          payment_status,
-          unlocked_lessons,
-          created_at,
-          learner_id,
-          status,
-          progress,
-          Learner (id, name, phone),
-          Courses (id, name, duration, total_lessons),
-          payment (id, amount, status, created_at, updated_at, installment_type, payment_type)
-        `,
-        )
-        .eq("status", "active")
-        .order("created_at", { ascending: false });
+  const {
+    data,
+    isLoading,
+    isFetching: loading,
+    isPlaceholderData,
+    error,
+    refetch,
+  } = useQuery({
+    queryKey: [
+      "payment-tracker",
+      activeTab,
+      page,
+      searchTerm,
+      courseFilter,
+      urgencyFilter,
+    ],
+    queryFn: async ({ signal }) => {
+      const { data, error } = await supabase
+        .rpc("get_payment_tracker_page", {
+          p_tab: activeTab,
+          p_page: page,
+          p_search: searchTerm,
+          p_course: courseFilter,
+          p_urgency: urgencyFilter,
+        })
+        .abortSignal(signal);
+      if (error) throw error;
+      return data as unknown as PaymentTrackerData;
+    },
+    placeholderData: keepPreviousData,
+    staleTime: 0,
+  });
 
-      if (enrollmentError) throw enrollmentError;
-
-      const rows = (enrollmentData as unknown as EnrollmentRow[]) || [];
-      setEnrollments(rows);
-
-      // Fetch completed lesson counts per learner from Schedule
-      const learnerIds = [
-        ...new Set(rows.map((e) => e.learner_id).filter(Boolean)),
-      ];
-
-      if (learnerIds.length > 0) {
-        const { data: schedules, error: scheduleError } = await supabase
-          .from("Schedule")
-          .select("learner_id, status")
-          .in("learner_id", learnerIds)
-          .eq("status", "completed");
-
-        if (scheduleError) throw scheduleError;
-
-        const counts: Record<string, number> = {};
-        (schedules || []).forEach((s: { learner_id: string | null }) => {
-          if (s.learner_id) {
-            counts[s.learner_id] = (counts[s.learner_id] || 0) + 1;
-          }
-        });
-        setLessonCounts(counts);
-      }
-
-      // Fetch topup schedules (pending_payment or topup status)
-      const { data: topupSchedules, error: topupError } = await supabase
-        .from("Schedule")
-        .select("id, learner_id, date, status, Learner(id, name, phone)")
-        .in("status", ["pending_payment", "topup"])
-        .order("date", { ascending: true });
-
-      if (topupError) throw topupError;
-
-      // Group topup schedules by learner
-      const topupByLearner: Record<string, { learner: any; schedules: any[] }> =
-        {};
-      (topupSchedules || []).forEach((s: any) => {
-        if (!s.learner_id) return;
-        if (!topupByLearner[s.learner_id]) {
-          topupByLearner[s.learner_id] = { learner: s.Learner, schedules: [] };
-        }
-        topupByLearner[s.learner_id].schedules.push(s);
-      });
-
-      // Check which learners have completed demo/topup payments
-      const topupLearnerIds = Object.keys(topupByLearner);
-      const paidMap: Record<string, { paid: boolean; date: string | null }> =
-        {};
-      if (topupLearnerIds.length > 0) {
-        const { data: topupPayments } = await supabase
-          .from("payment")
-          .select("learner_id, status, updated_at, created_at")
-          .in("learner_id", topupLearnerIds)
-          .eq("payment_type", "demo")
-          .order("created_at", { ascending: false });
-
-        (topupPayments || []).forEach((p: any) => {
-          // Only record the first (most recent) payment per learner
-          if (!paidMap[p.learner_id]) {
-            paidMap[p.learner_id] = {
-              paid: p.status === "completed",
-              date:
-                p.status === "completed" ? p.updated_at || p.created_at : null,
-            };
-          }
-        });
-      }
-
-      const topupData: TopupRow[] = Object.entries(topupByLearner).map(
-        ([learnerId, { learner, schedules }]) => ({
-          learner_id: learnerId,
-          learner_name: learner?.name || "Unknown",
-          learner_phone: learner?.phone || "",
-          totalSlots: schedules.length,
-          dates: schedules.map((s: any) => s.date),
-          isPaid: paidMap[learnerId]?.paid || false,
-          paymentDate: paidMap[learnerId]?.date || null,
-        }),
-      );
-
-      setTopupRows(topupData);
-    } catch (err) {
-      console.error("Error fetching payment data:", err);
-      toast({
-        title: "Error",
-        description: "Failed to fetch payment data",
-        variant: "destructive",
-      });
-    } finally {
-      setLoading(false);
-    }
+  const counts = data?.counts ?? {
+    half_paid: 0,
+    full_paid: 0,
+    pending: 0,
+    topup: 0,
   };
+  const totalCount = counts[activeTab];
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const enrollments = data?.tab === activeTab ? data.enrollments : [];
+  const sortedHalfPaid = activeTab === "half_paid" ? enrollments : [];
+  const fullPaid = activeTab === "full_paid" ? enrollments : [];
+  const pending = activeTab === "pending" ? enrollments : [];
+  const filteredTopups = data?.tab === activeTab ? data.topups : [];
+  const courseNames = data?.courseNames ?? [];
+  const totalOutstanding = data?.totalOutstanding ?? 0;
+  const totalRevenue = data?.totalRevenue ?? 0;
+  const pendingAmount = data?.pendingAmount ?? 0;
+  const urgentCount = data?.urgentCount ?? 0;
+  const displayedTotal = counts.half_paid + counts.full_paid + counts.pending;
 
   useEffect(() => {
-    fetchData();
-  }, []);
+    if (data && !isPlaceholderData && page > totalPages) setPage(totalPages);
+  }, [data, isPlaceholderData, page, totalPages]);
 
-  // Search filter helper
-  const matchesSearch = (e: EnrollmentRow): boolean => {
-    if (!searchTerm) return true;
-    const term = searchTerm.toLowerCase();
-    return (
-      (e.Learner?.name?.toLowerCase().includes(term) ?? false) ||
-      (e.Learner?.phone?.includes(searchTerm) ?? false) ||
-      (e.Courses?.name?.toLowerCase().includes(term) ?? false)
-    );
-  };
+  useEffect(() => {
+    if (!error) return;
+    console.error("Error fetching payment data:", error);
+    toast({
+      title: "Error",
+      description: "Failed to fetch payment data",
+      variant: "destructive",
+    });
+  }, [error, toast]);
 
   // Helpers
   const getTotalLessons = (e: EnrollmentRow): number => {
@@ -254,7 +201,7 @@ export default function PaymentTracker() {
   };
 
   const getCompletedCount = (e: EnrollmentRow): number => {
-    return lessonCounts[e.learner_id] || 0;
+    return e.completed_count || 0;
   };
 
   const getRemaining = (e: EnrollmentRow): number => {
@@ -269,48 +216,6 @@ export default function PaymentTracker() {
       return `Custom (${e.progress?.total_hours || "?"}hr)`;
     return "Unknown";
   };
-
-  // Get unique course names for filter dropdown
-  const courseNames = useMemo(() => {
-    const names = new Set<string>();
-    enrollments.forEach((e) => {
-      names.add(getCourseName(e));
-    });
-    return [...names].sort();
-  }, [enrollments]);
-
-  // Course filter helper
-  const matchesCourse = (e: EnrollmentRow): boolean => {
-    if (courseFilter === "all") return true;
-    return getCourseName(e) === courseFilter;
-  };
-
-  // Split enrollments (filtered)
-  const filtered = enrollments.filter(
-    (e) => matchesSearch(e) && matchesCourse(e),
-  );
-  const halfPaid = filtered.filter((e) => e.payment_status === "half_paid");
-  const fullPaid = filtered.filter(
-    (e) => e.payment_status === "full_paid" || e.payment_status === "completed",
-  );
-  const pending = filtered.filter(
-    (e) =>
-      e.payment_status !== "half_paid" &&
-      e.payment_status !== "full_paid" &&
-      e.payment_status !== "completed",
-  );
-
-  // Filter topup rows by search
-  const filteredTopups = topupRows.filter((t) => {
-    if (!searchTerm) return true;
-    const term = searchTerm.toLowerCase();
-    return (
-      t.learner_name.toLowerCase().includes(term) ||
-      t.learner_phone.includes(searchTerm)
-    );
-  });
-  const topupPaid = filteredTopups.filter((t) => t.isPaid);
-  const topupUnpaid = filteredTopups.filter((t) => !t.isPaid);
 
   const getPaymentDate = (e: EnrollmentRow): string | null => {
     if (e.payment?.status === "completed" && e.payment?.updated_at) {
@@ -349,40 +254,37 @@ export default function PaymentTracker() {
     return { label: "OK", variant: "outline" };
   };
 
-  // Apply urgency filter and sort half-paid
-  const sortedHalfPaid = [...halfPaid]
-    .filter((e) => {
-      if (urgencyFilter === "all") return true;
-      const remaining = getRemaining(e);
-      if (urgencyFilter === "urgent") return remaining <= 1;
-      if (urgencyFilter === "soon") return remaining === 2;
-      if (urgencyFilter === "ok") return remaining >= 3;
-      return true;
-    })
-    .sort((a, b) => {
-      const remA = getRemaining(a);
-      const remB = getRemaining(b);
-      if (remA !== remB) return remA - remB;
-      const dateA = new Date(getPaymentDate(a) || 0).getTime();
-      const dateB = new Date(getPaymentDate(b) || 0).getTime();
-      return dateA - dateB;
-    });
-
-  // Summary stats — use sortedHalfPaid (urgency-filtered) for half-paid stats
-  const displayedHalfPaid = urgencyFilter !== "all" ? sortedHalfPaid : halfPaid;
-  const totalOutstanding = displayedHalfPaid.reduce(
-    (s, e) => s + getBalanceDue(e),
-    0,
+  const paginationControls = (
+    <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+      <p
+        className="text-sm text-muted-foreground"
+        role="status"
+        aria-live="polite"
+      >
+        Page {page} of {totalPages} ({totalCount} records)
+      </p>
+      <div className="flex gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={loading || page <= 1}
+          onClick={() => setPage((current) => current - 1)}
+        >
+          Previous
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={loading || page >= totalPages}
+          onClick={() => setPage((current) => current + 1)}
+        >
+          Next
+        </Button>
+      </div>
+    </div>
   );
-  const totalRevenue = fullPaid.reduce((s, e) => s + getAmountPaid(e), 0);
-  const pendingAmount = pending.reduce((s, e) => s + (e.amount || 0), 0);
-  const urgentCount = halfPaid.filter((e) => getRemaining(e) <= 1).length;
-  const displayedTotal =
-    (urgencyFilter !== "all" ? sortedHalfPaid.length : halfPaid.length) +
-    fullPaid.length +
-    pending.length;
 
-  if (loading) {
+  if (isLoading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <Loader2 className="h-8 w-8 animate-spin text-primary" />
@@ -411,7 +313,7 @@ export default function PaymentTracker() {
           <Button
             variant="outline"
             size="icon"
-            onClick={fetchData}
+            onClick={() => refetch()}
             disabled={loading}
           >
             <RefreshCcw size={16} className={loading ? "animate-spin" : ""} />
@@ -426,10 +328,19 @@ export default function PaymentTracker() {
               placeholder="Search by name or phone..."
               className="pl-9"
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={(e) => {
+                setSearchTerm(e.target.value);
+                setPage(1);
+              }}
             />
           </div>
-          <Select value={courseFilter} onValueChange={setCourseFilter}>
+          <Select
+            value={courseFilter}
+            onValueChange={(value) => {
+              setCourseFilter(value);
+              setPage(1);
+            }}
+          >
             <SelectTrigger className="w-[200px]">
               <SelectValue placeholder="All Courses" />
             </SelectTrigger>
@@ -442,7 +353,13 @@ export default function PaymentTracker() {
               ))}
             </SelectContent>
           </Select>
-          <Select value={urgencyFilter} onValueChange={setUrgencyFilter}>
+          <Select
+            value={urgencyFilter}
+            onValueChange={(value) => {
+              setUrgencyFilter(value);
+              setPage(1);
+            }}
+          >
             <SelectTrigger className="w-[160px]">
               <SelectValue placeholder="All Urgency" />
             </SelectTrigger>
@@ -463,6 +380,7 @@ export default function PaymentTracker() {
                 setSearchTerm("");
                 setCourseFilter("all");
                 setUrgencyFilter("all");
+                setPage(1);
               }}
             >
               Clear filters
@@ -491,7 +409,7 @@ export default function PaymentTracker() {
               </div>
               <div>
                 <p className="text-xs text-muted-foreground">Full Paid</p>
-                <p className="text-xl font-bold">{fullPaid.length}</p>
+                <p className="text-xl font-bold">{counts.full_paid}</p>
                 <p className="text-xs text-green-600">
                   {totalRevenue > 0 && `₹${totalRevenue.toLocaleString()}`}
                 </p>
@@ -506,7 +424,7 @@ export default function PaymentTracker() {
               </div>
               <div>
                 <p className="text-xs text-muted-foreground">Half Paid</p>
-                <p className="text-xl font-bold">{displayedHalfPaid.length}</p>
+                <p className="text-xl font-bold">{counts.half_paid}</p>
                 <p className="text-xs text-red-600">
                   {totalOutstanding > 0 &&
                     `₹${totalOutstanding.toLocaleString()} due`}
@@ -522,7 +440,7 @@ export default function PaymentTracker() {
               </div>
               <div>
                 <p className="text-xs text-muted-foreground">Pending</p>
-                <p className="text-xl font-bold">{pending.length}</p>
+                <p className="text-xl font-bold">{counts.pending}</p>
                 <p className="text-xs text-yellow-600">
                   {pendingAmount > 0 && `₹${pendingAmount.toLocaleString()}`}
                 </p>
@@ -549,20 +467,24 @@ export default function PaymentTracker() {
         </div>
 
         {/* Tabbed Tables */}
-        <Tabs defaultValue="half_paid">
+        <Tabs
+          value={activeTab}
+          onValueChange={(value) => {
+            setActiveTab(value as PaymentTab);
+            setPage(1);
+          }}
+        >
           <TabsList>
             <TabsTrigger value="half_paid">
-              Half Paid ({sortedHalfPaid.length})
+              Half Paid ({counts.half_paid})
             </TabsTrigger>
             <TabsTrigger value="full_paid">
-              Full Paid ({fullPaid.length})
+              Full Paid ({counts.full_paid})
             </TabsTrigger>
             <TabsTrigger value="pending">
-              Pending ({pending.length})
+              Pending ({counts.pending})
             </TabsTrigger>
-            <TabsTrigger value="topup">
-              Topup ({filteredTopups.length})
-            </TabsTrigger>
+            <TabsTrigger value="topup">Topup ({counts.topup})</TabsTrigger>
           </TabsList>
 
           {/* Half Paid Tab */}
@@ -677,6 +599,7 @@ export default function PaymentTracker() {
                     </table>
                   </div>
                 )}
+                {paginationControls}
               </CardContent>
             </Card>
           </TabsContent>
@@ -780,6 +703,7 @@ export default function PaymentTracker() {
                     </table>
                   </div>
                 )}
+                {paginationControls}
               </CardContent>
             </Card>
           </TabsContent>
@@ -865,6 +789,7 @@ export default function PaymentTracker() {
                     </table>
                   </div>
                 )}
+                {paginationControls}
               </CardContent>
             </Card>
           </TabsContent>
@@ -887,10 +812,10 @@ export default function PaymentTracker() {
                   <>
                     <div className="mb-4 flex gap-4 text-sm">
                       <span className="font-medium text-green-600">
-                        Paid: {topupPaid.length}
+                        Paid: {data?.topupPaidCount ?? 0}
                       </span>
                       <span className="font-medium text-red-600">
-                        Unpaid: {topupUnpaid.length}
+                        Unpaid: {data?.topupUnpaidCount ?? 0}
                       </span>
                     </div>
                     <div className="overflow-x-auto">
@@ -915,7 +840,7 @@ export default function PaymentTracker() {
                           </tr>
                         </thead>
                         <tbody>
-                          {[...topupUnpaid, ...topupPaid].map((row) => (
+                          {filteredTopups.map((row) => (
                             <tr
                               key={row.learner_id}
                               className="border-b hover:bg-muted/50"
@@ -972,6 +897,7 @@ export default function PaymentTracker() {
                     </div>
                   </>
                 )}
+                {paginationControls}
               </CardContent>
             </Card>
           </TabsContent>

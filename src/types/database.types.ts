@@ -1245,6 +1245,16 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      get_payment_tracker_page: {
+        Args: {
+          p_tab: string;
+          p_page: number;
+          p_search: string;
+          p_course: string;
+          p_urgency: string;
+        };
+        Returns: Json;
+      };
       get_learners_with_issues: {
         Args: { search_term: string; issue_filter: string };
         Returns: Database["public"]["Tables"]["Learner"]["Row"][];
