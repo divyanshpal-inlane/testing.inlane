@@ -1245,6 +1245,18 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      get_car_leads: {
+        Args: {
+          search_term?: string;
+          area_filter?: string;
+          planning_filter?: string;
+        };
+        Returns: Database["public"]["Tables"]["Learner"]["Row"][];
+      };
+      get_car_lead_areas: {
+        Args: Record<PropertyKey, never>;
+        Returns: { area: string }[];
+      };
       get_learners_with_issues: {
         Args: { search_term: string; issue_filter: string };
         Returns: Database["public"]["Tables"]["Learner"]["Row"][];
