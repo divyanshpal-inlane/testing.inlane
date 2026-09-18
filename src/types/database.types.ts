@@ -1245,6 +1245,10 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      get_tentative_customers_paginated: {
+        Args: { p_start_date: string; p_search?: string; p_page?: number };
+        Returns: Json;
+      };
       get_learners_with_issues: {
         Args: { search_term: string; issue_filter: string };
         Returns: Database["public"]["Tables"]["Learner"]["Row"][];
