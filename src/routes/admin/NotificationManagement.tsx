@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { addDays, format, formatDate, parse } from "date-fns";
 import { Delete, Mail, RefreshCcw, Search, Send, UserPlus } from "lucide-react";
 import { ArrowLeft, Loader2 } from "lucide-react";
@@ -28,6 +28,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/use-toast";
 import { usePhoneVisibility } from "@/context/phone-visibility-context";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { useCurrentAdmin } from "@/queries/adminPermissions";
 import { useCurrentUser } from "@/queries/userManagement";
 import { supabase } from "@/lib/supabaseClient";
@@ -419,107 +420,85 @@ function IndividualNotificationCard() {
   );
 }
 
+const DAILY_NOTIFICATION_PAGE_SIZE = 15;
+type NotificationTab = "learners" | "instructors";
+type NotificationSchedulesPage = {
+  schedules: Record<string, unknown>[];
+  total_count: number;
+  learner_count: number;
+  instructor_count: number;
+};
+
 function LearnerNotificationCard() {
-  const [loading, setLoading] = useState(true);
-  const [schedulesList, setSchedulesList] = useState<any[]>([]);
   const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [activeTab, setActiveTab] = useState<NotificationTab>("learners");
+  const [tabState, setTabState] = useState({
+    learners: { page: 1, search: "" },
+    instructors: { page: 1, search: "" },
+  });
+  const [counts, setCounts] = useState({ learners: 0, instructors: 0 });
+  const learnerSearch = useDebouncedValue(tabState.learners.search);
+  const instructorSearch = useDebouncedValue(tabState.instructors.search);
+  const { page, search } = tabState[activeTab];
+  const searchPending =
+    search !== (activeTab === "learners" ? learnerSearch : instructorSearch);
+  const tomorrow = addDays(new Date(), 1).toISOString().split("T")[0];
 
-  const maxDaysWindowToFetch = 1;
-
-  const fetchSchedulesForReminder = async () => {
-    const startDate = new Date();
-    const endDate = addDays(startDate, maxDaysWindowToFetch);
-    setLoading(true);
-    try {
+  const { data, isFetching, isError } = useQuery({
+    queryKey: [
+      "daily-notification-schedules",
+      tomorrow,
+      activeTab,
+      search,
+      page,
+    ],
+    queryFn: async ({ signal }) => {
       const { data, error } = await supabase
-        .from("Schedule")
-        .select(
-          `
-          *,
-          Learner(name, phone, email, pick_up_location, address_lat, address_lng),
-          Instructor(name, phone, email),
-          Courses(name, duration),
-          Lesson(id, description, number)`,
-        )
-        .gte("date", endDate.toISOString().split("T")[0])
-        .lte("date", endDate.toISOString().split("T")[0])
-        .or("isTentative.eq.false,isTentative.is.null")
-        .neq("status", "paused")
-        .order("date", { ascending: true })
-        .order("start_time", { ascending: true });
-
+        .rpc("get_daily_notification_schedules", {
+          schedule_date: tomorrow,
+          recipient_tab: activeTab,
+          search_term: search,
+          page_number: page,
+        })
+        .abortSignal(signal);
       if (error) throw error;
+      return data as unknown as NotificationSchedulesPage;
+    },
+    enabled: !searchPending,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
 
-      // Fix lesson numbers: calculate chronological position per learner+course
-      if (data && data.length > 0) {
-        // Get unique learner+course combos
-        const combos = new Set(
-          data.map((s: any) => `${s.learner_id}__${s.course_id}`),
-        );
-
-        // Fetch all schedules for these learner+course combos to determine correct order
-        const learnerIds = [
-          ...new Set(data.map((s: any) => s.learner_id).filter(Boolean)),
-        ];
-        const { data: allSchedules } = await supabase
-          .from("Schedule")
-          .select(
-            "id, date, start_time, learner_id, course_id, lesson_id, Lesson(id, number)",
-          )
-          .in("learner_id", learnerIds)
-          .neq("status", "paused")
-          .or("isTentative.eq.false,isTentative.is.null")
-          .order("date", { ascending: true })
-          .order("start_time", { ascending: true });
-
-        if (allSchedules) {
-          // Group by learner+course and assign chronological numbers
-          const lessonNumberMap = new Map<number, number>(); // schedule.id -> correct lesson number
-          const grouped: Record<string, any[]> = {};
-          for (const s of allSchedules) {
-            const key = `${s.learner_id}__${s.course_id}`;
-            if (!grouped[key]) grouped[key] = [];
-            grouped[key].push(s);
-          }
-          for (const schedules of Object.values(grouped)) {
-            schedules
-              .sort(
-                (a: any, b: any) =>
-                  new Date(`${a.date}T${a.start_time}`).getTime() -
-                  new Date(`${b.date}T${b.start_time}`).getTime(),
-              )
-              .forEach((s: any, i: number) => {
-                lessonNumberMap.set(s.id, i + 1);
-              });
-          }
-
-          // Apply correct lesson numbers to tomorrow's schedules
-          for (const schedule of data as any[]) {
-            const correctNumber = lessonNumberMap.get(schedule.id);
-            if (correctNumber && schedule.Lesson) {
-              schedule.Lesson.number = correctNumber;
-            }
-          }
-        }
-      }
-
-      setSchedulesList(data || []);
-      return data;
-    } catch (err) {
-      console.error("Error fetching schedules:", err);
-      toast({
-        title: "Error",
-        description: "Failed to fetch schedules",
-        variant: "destructive",
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
+  const loading = searchPending || isFetching || (!data && !isError);
+  const totalCount = data?.total_count ?? 0;
+  const totalPages = Math.max(
+    1,
+    Math.ceil(totalCount / DAILY_NOTIFICATION_PAGE_SIZE),
+  );
 
   useEffect(() => {
-    fetchSchedulesForReminder();
-  }, []);
+    if (!data) return;
+    setCounts({
+      learners: data.learner_count,
+      instructors: data.instructor_count,
+    });
+    // Refresh can remove the last record on the current page.
+    if (page > totalPages) {
+      setTabState((prev) => ({
+        ...prev,
+        [activeTab]: { ...prev[activeTab], page: totalPages },
+      }));
+    }
+  }, [data, activeTab, page, totalPages]);
+
+  const setPage = (nextPage: number) => {
+    setTabState((prev) => ({
+      ...prev,
+      [activeTab]: { ...prev[activeTab], page: nextPage },
+    }));
+  };
 
   return (
     <Card className="transition-all hover:shadow-lg">
@@ -528,42 +507,102 @@ function LearnerNotificationCard() {
         <Button
           variant="outline"
           size="icon"
-          onClick={fetchSchedulesForReminder}
+          onClick={() =>
+            queryClient.invalidateQueries({
+              queryKey: ["daily-notification-schedules", tomorrow],
+            })
+          }
           disabled={loading}
         >
           <RefreshCcw size={16} className={loading ? "animate-spin" : ""} />
         </Button>
       </CardHeader>
       <CardContent>
-        {loading ? (
-          <p className="py-4 text-center text-muted-foreground">
-            Loading schedules...
-          </p>
-        ) : schedulesList.length === 0 ? (
-          <p className="py-4 text-center text-muted-foreground">
-            No schedules found for tomorrow
-          </p>
-        ) : (
-          <Tabs defaultValue="learners">
-            <TabsList>
-              <TabsTrigger value="learners">
-                Learners ({schedulesList.length})
-              </TabsTrigger>
-              <TabsTrigger value="instructors">
-                Instructors (
-                {new Set(schedulesList.map((s) => s.instructor_id)).size})
-              </TabsTrigger>
-            </TabsList>
+        <Tabs
+          value={activeTab}
+          onValueChange={(value) => setActiveTab(value as NotificationTab)}
+        >
+          <TabsList>
+            <TabsTrigger value="learners">
+              Learners ({counts.learners})
+            </TabsTrigger>
+            <TabsTrigger value="instructors">
+              Instructors ({counts.instructors})
+            </TabsTrigger>
+          </TabsList>
 
-            <TabsContent value="learners">
-              <LearnerTab schedulesList={schedulesList} toast={toast} />
-            </TabsContent>
+          <TabsContent value={activeTab}>
+            <div className="relative mt-4">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                placeholder={`Search ${activeTab} by name or phone...`}
+                aria-label={`Search ${activeTab} by name or phone`}
+                value={search}
+                onChange={(e) => {
+                  const nextSearch = e.target.value;
+                  // Reset atomically so the old filter is never fetched at page 1.
+                  setTabState((prev) => ({
+                    ...prev,
+                    [activeTab]: { page: 1, search: nextSearch },
+                  }));
+                }}
+                className="pl-10"
+              />
+            </div>
+            {loading ? (
+              <p className="py-4 text-center text-muted-foreground">
+                Loading schedules...
+              </p>
+            ) : isError ? (
+              <p className="py-4 text-center text-muted-foreground">
+                Failed to fetch schedules
+              </p>
+            ) : !data?.schedules.length ? (
+              <p className="py-4 text-center text-muted-foreground">
+                {search
+                  ? "No schedules match your search"
+                  : "No schedules found for tomorrow"}
+              </p>
+            ) : activeTab === "learners" ? (
+              <LearnerTab
+                key={`${tomorrow}:${search}:${page}`}
+                schedulesList={data.schedules}
+                toast={toast}
+              />
+            ) : (
+              <InstructorTab
+                key={`${tomorrow}:${search}:${page}`}
+                schedulesList={data.schedules}
+                toast={toast}
+              />
+            )}
 
-            <TabsContent value="instructors">
-              <InstructorTab schedulesList={schedulesList} toast={toast} />
-            </TabsContent>
-          </Tabs>
-        )}
+            <div className="mt-4 flex items-center justify-between gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPage(page - 1)}
+                disabled={page <= 1 || loading || isError}
+              >
+                Previous
+              </Button>
+              <span className="text-sm text-muted-foreground">
+                Page {page}
+                {data &&
+                  !searchPending &&
+                  ` of ${totalPages} (${totalCount} ${activeTab === "learners" ? "records" : "instructors"})`}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPage(page + 1)}
+                disabled={!data || page >= totalPages || loading || isError}
+              >
+                Next
+              </Button>
+            </div>
+          </TabsContent>
+        </Tabs>
       </CardContent>
     </Card>
   );
