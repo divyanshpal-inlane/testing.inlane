@@ -126,90 +126,96 @@ export const ADMIN_PERMISSIONS = {
       "Track full and half payments, lesson progress, and follow-up urgency",
     route: "/admin/payment-tracker",
   },
-   course_feedback: {
-     key: "course_feedback",
-     label: "Course Feedback",
-     description:
-       "View learner feedback submitted at midway and course completion checkpoints",
-     route: "/admin/feedback",
-   },
-    view_unmasked_phone_numbers: {
-      key: "view_unmasked_phone_numbers",
-      label: "View Unmasked Phone Numbers",
-      description: "View and edit unmasked phone numbers for instructors and learners",
-      route: null,
-    },
-    view_unmasked_car_numbers: {
-      key: "view_unmasked_car_numbers",
-      label: "View Unmasked Car Numbers",
-      description: "View unmasked vehicle registration numbers for instructors",
-      route: null,
-    },
-    admin_management: {
-      key: "admin_management",
-      label: "User Management",
-      description: "Create and manage admin team members and their permissions",
-      route: "/admin/user-management",
-    },
-    leave_management: {
-      key: "leave_management",
-      label: "Leave Management",
-      description: "Approve instructor leave and arrange replacement instructors",
-      route: "/admin/leave-management",
-    },
-    no_show_management: {
-      key: "no_show_management",
-      label: "No-show Management",
-      description: "Manage learner and instructor no-show cases",
-      route: "/admin/no-shows",
-    },
-    support_tickets: {
-      key: "support_tickets",
-      label: "Support Tickets",
-      description: "View and resolve instructor support tickets",
-      route: "/admin/support-tickets",
-    },
-    car_commerce_leads: {
-      key: "car_commerce_leads",
-      label: "Car Commerce Leads",
-      description: "Learners who want to buy a car — with CSV export",
-      route: "/admin/car-commerce-leads",
-    },
-    ll_customer_migration: {
-      key: "ll_customer_migration",
-      label: "LL Customer Migration",
-      description: "Bulk-import existing Learner's License customers from CSV",
-      route: "/admin/ll-customer-migration",
-    },
-    compliance_forms: {
-      key: "compliance_forms",
-      label: "Compliance Forms",
-      description:
-        "Generate RTO Form 14, Form 15 & Certificate for any customer",
-      route: "/admin/compliance-forms",
-    },
-    safety_monitoring: {
-      key: "safety_monitoring",
-      label: "Safety Monitoring",
-      description:
-        "Accidents, breakdowns, misconduct reports and SOS alerts",
-      route: "/admin/safety-monitoring",
-    },
-    instructor_performance: {
-      key: "instructor_performance",
-      label: "Instructor Performance",
-      description:
-        "Attendance, punctuality, ratings, complaints and completion rates",
-      route: "/admin/instructor-performance",
-    },
-    ops_control_tower: {
-      key: "ops_control_tower",
-      label: "Operations Control Tower",
-      description:
-        "Live KPIs, today's operations and exception dashboard in one place",
-      route: "/admin/control-tower",
-    },
-  } as const;
+  course_feedback: {
+    key: "course_feedback",
+    label: "Course Feedback",
+    description:
+      "View learner feedback submitted at midway and course completion checkpoints",
+    route: "/admin/feedback",
+  },
+  view_unmasked_phone_numbers: {
+    key: "view_unmasked_phone_numbers",
+    label: "View Unmasked Phone Numbers",
+    description:
+      "View and edit unmasked phone numbers for instructors and learners",
+    route: null,
+  },
+  view_unmasked_car_numbers: {
+    key: "view_unmasked_car_numbers",
+    label: "View Unmasked Car Numbers",
+    description: "View unmasked vehicle registration numbers for instructors",
+    route: null,
+  },
+  admin_management: {
+    key: "admin_management",
+    label: "User Management",
+    description: "Create and manage admin team members and their permissions",
+    route: "/admin/user-management",
+  },
+  leave_management: {
+    key: "leave_management",
+    label: "Leave Management",
+    description: "Approve instructor leave and arrange replacement instructors",
+    route: "/admin/leave-management",
+  },
+  no_show_management: {
+    key: "no_show_management",
+    label: "No-show Management",
+    description: "Manage learner and instructor no-show cases",
+    route: "/admin/no-shows",
+  },
+  support_tickets: {
+    key: "support_tickets",
+    label: "Support Tickets",
+    description: "View and resolve instructor support tickets",
+    route: "/admin/support-tickets",
+  },
+  car_commerce_leads: {
+    key: "car_commerce_leads",
+    label: "Car Commerce Leads",
+    description: "Learners who want to buy a car — with CSV export",
+    route: "/admin/car-commerce-leads",
+  },
+  ll_customer_migration: {
+    key: "ll_customer_migration",
+    label: "LL Customer Migration",
+    description: "Bulk-import existing Learner's License customers from CSV",
+    route: "/admin/ll-customer-migration",
+  },
+  compliance_forms: {
+    key: "compliance_forms",
+    label: "Compliance Forms",
+    description: "Generate RTO Form 14, Form 15 & Certificate for any customer",
+    route: "/admin/compliance-forms",
+  },
+  safety_monitoring: {
+    key: "safety_monitoring",
+    label: "Safety Monitoring",
+    description: "Accidents, breakdowns, misconduct reports and SOS alerts",
+    route: "/admin/safety-monitoring",
+  },
+  instructor_performance: {
+    key: "instructor_performance",
+    label: "Instructor Performance",
+    description:
+      "Attendance, punctuality, ratings, complaints and completion rates",
+    route: "/admin/instructor-performance",
+  },
+  ops_control_tower: {
+    key: "ops_control_tower",
+    label: "Operations Control Tower",
+    description:
+      "Live KPIs, today's operations and exception dashboard in one place",
+    route: "/admin/control-tower",
+  },
+  sales_dashboard: {
+    key: "sales_dashboard",
+    label: "Sales Availability Dashboard",
+    description:
+      "Search instructors by name or location and see live 30-min free-slot availability",
+    route: "/admin/sales-dashboard",
+  },
+} as const;
 
 export type PermissionKey = keyof typeof ADMIN_PERMISSIONS;
 
@@ -482,31 +488,46 @@ export function useDeleteAdmin() {
         throw new Error("Admin not found");
       }
 
-      console.log("[useDeleteAdmin] Starting deletion for admin:", adminId, "phone:", admin.phone);
+      console.log(
+        "[useDeleteAdmin] Starting deletion for admin:",
+        adminId,
+        "phone:",
+        admin.phone,
+      );
 
       // Call edge function which handles BOTH auth deletion AND database deletion
       // The edge function:
       // 1. Deletes auth user FIRST (most important step)
       // 2. Then deletes from Admin table (cascade deletes permissions)
-      const { data: edgeFunctionResult, error: edgeFunctionError } = 
+      const { data: edgeFunctionResult, error: edgeFunctionError } =
         await supabase.functions.invoke("delete-admin-user", {
           body: { phone: admin.phone },
         });
 
       if (edgeFunctionError) {
-        console.error("[useDeleteAdmin] Edge function error:", edgeFunctionError);
+        console.error(
+          "[useDeleteAdmin] Edge function error:",
+          edgeFunctionError,
+        );
         throw new Error(
-          edgeFunctionError.message || "Failed to delete admin from authentication system"
+          edgeFunctionError.message ||
+            "Failed to delete admin from authentication system",
         );
       }
 
       // Check if the edge function returned an error in the response
       if (edgeFunctionResult && !edgeFunctionResult.success) {
-        console.error("[useDeleteAdmin] Edge function returned error:", edgeFunctionResult.error);
+        console.error(
+          "[useDeleteAdmin] Edge function returned error:",
+          edgeFunctionResult.error,
+        );
         throw new Error(edgeFunctionResult.error || "Failed to delete admin");
       }
 
-      console.log("[useDeleteAdmin] ✓ Admin deleted successfully:", edgeFunctionResult);
+      console.log(
+        "[useDeleteAdmin] ✓ Admin deleted successfully:",
+        edgeFunctionResult,
+      );
       return adminId;
     },
     onSuccess: () => {

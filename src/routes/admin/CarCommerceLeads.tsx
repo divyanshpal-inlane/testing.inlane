@@ -27,7 +27,9 @@ export default function CarCommerceLeads() {
   const areas = useMemo(
     () =>
       Array.from(
-        new Set((data ?? []).map((r) => r.area).filter((a): a is string => !!a)),
+        new Set(
+          (data ?? []).map((r) => r.area).filter((a): a is string => !!a),
+        ),
       ).sort(),
     [data],
   );
@@ -41,7 +43,8 @@ export default function CarCommerceLeads() {
       }
       if (area !== "all" && r.area !== area) return false;
       if (planning === "yes" && r.carIntentPlanning !== "Yes") return false;
-      if (planning === "onboarding" && r.drivingMotivation == null) return false;
+      if (planning === "onboarding" && r.drivingMotivation == null)
+        return false;
       return true;
     });
   }, [data, search, area, planning]);
@@ -177,20 +180,30 @@ export default function CarCommerceLeads() {
                   </thead>
                   <tbody>
                     {rows.map((r) => (
-                      <tr key={r.id} className="border-b [&>td]:p-2 hover:bg-muted/30">
+                      <tr
+                        key={r.id}
+                        className="border-b hover:bg-muted/30 [&>td]:p-2"
+                      >
                         <td className="font-medium">{r.name ?? "—"}</td>
                         <td className="tabular-nums">{r.phone ?? "—"}</td>
                         <td>{r.area ?? "—"}</td>
-                        <td className="max-w-[180px] truncate">{r.pickupLocation ?? "—"}</td>
-                        <td className="max-w-[160px] truncate">{r.drivingMotivation ?? "—"}</td>
+                        <td className="max-w-[180px] truncate">
+                          {r.pickupLocation ?? "—"}
+                        </td>
+                        <td className="max-w-[160px] truncate">
+                          {r.drivingMotivation ?? "—"}
+                        </td>
                         <td>{r.carPurchaseTimeline || "—"}</td>
                         <td>
                           {r.carIntentPlanning === "Yes" ? (
-                            <Badge variant="outline" className="border-emerald-200 bg-emerald-50 text-[10px] text-emerald-700">
+                            <Badge
+                              variant="outline"
+                              className="border-emerald-200 bg-emerald-50 text-[10px] text-emerald-700"
+                            >
                               Yes
                             </Badge>
                           ) : (
-                            r.carIntentPlanning ?? "—"
+                            (r.carIntentPlanning ?? "—")
                           )}
                         </td>
                         <td>{r.carIntentType ?? "—"}</td>
@@ -198,7 +211,10 @@ export default function CarCommerceLeads() {
                         <td>{r.carIntentTimeframe ?? "—"}</td>
                         <td className="whitespace-nowrap text-xs text-muted-foreground">
                           {r.carIntentUpdatedAt
-                            ? format(new Date(r.carIntentUpdatedAt), "d MMM yy, h:mm a")
+                            ? format(
+                                new Date(r.carIntentUpdatedAt),
+                                "d MMM yy, h:mm a",
+                              )
                             : "—"}
                         </td>
                         <td className="whitespace-nowrap text-xs text-muted-foreground">

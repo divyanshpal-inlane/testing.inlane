@@ -177,11 +177,13 @@ Deno.serve(async (req) => {
     // V1 item 9: promote matured / classes−1 learners before sending nudges,
     // and notify them to pick a DL test date.
     try {
-      const { data: promoted, error: promoteError } = await supabase.rpc(
-        "ll_auto_promote_dl",
-      );
+      const { data: promoted, error: promoteError } =
+        await supabase.rpc("ll_auto_promote_dl");
       if (promoteError) {
-        console.error("[ll-flow-reminders] ll_auto_promote_dl failed:", promoteError);
+        console.error(
+          "[ll-flow-reminders] ll_auto_promote_dl failed:",
+          promoteError,
+        );
       } else {
         for (const row of promoted ?? []) {
           const messageType =

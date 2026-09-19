@@ -1,0 +1,1648 @@
+/* Scoped to .sales-dashboard-root (not :root/html) so this theme never
+   leaks into the rest of the admin app. */
+/* Tokens below are pulled from the app's own design system (src/index.css's
+   shadcn/Tailwind CSS variables -- --background, --card, --border,
+   --foreground, --muted-foreground, --primary, plus the standard Tailwind
+   emerald/amber/violet/red/blue palettes for status colors) converted to
+   hex, rather than the Google Calendar-inspired palette this file used
+   before. Keeps the same --gc-* variable names/structure (every other rule
+   in this file already reads through these, so no other rule needed to
+   change) -- only the values move to match the rest of the app. */
+.sales-dashboard-root {
+  background: var(--gc-bg);
+  color: var(--gc-text);
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+  color-scheme: light;
+  --gc-bg: #ffffff;
+  --gc-surface: #f4f4f5;
+  --gc-hover: #e4e4e7;
+  --gc-detail: #fafafa;
+  --gc-border: #e4e4e7;
+  /* Dedicated grid-line tokens (scoped to the timeline grid only, not
+     --gc-border generally, which is used for buttons/inputs everywhere and
+     shouldn't get darker just for this). One step past --gc-border for the
+     regular 30-minute lines, another step past that for hour boundaries
+     and instructor-row separators, so the grid keeps a clear hierarchy
+     without any single line becoming heavy. */
+  --gc-grid-line: #d4d4d8;
+  --gc-grid-line-strong: #a1a1aa;
+  --gc-band-bg: var(--gc-detail);
+  /* Shared height for every topbar control -- same in both themes, so only
+     declared once here rather than repeated in the dark block below. */
+  --gc-control-h: 32px;
+  --gc-text: #0a0a0b;
+  --gc-text-2: #71717a;
+  --gc-blue: #2563eb;
+  --gc-blue-bg: #dbeafe;
+  --gc-blue-contrast: #ffffff;
+  /* Free: plain grey (not sourced from elsewhere -- Instructor Management's
+     View Schedule has no "Free" state of its own to copy). Named
+     --gc-green-* for historical reasons; still just the "free slot" token. */
+  --gc-green-fill: #e5e7eb;
+  --gc-green-hover: #d1d5db;
+  --gc-green-text: #374151;
+  --gc-red-text: #b91c1c;
+  --gc-red-bg: #fee2e2;
+  --gc-red-hover: #fecaca;
+  /* Tentative and Booked are copied exactly from Instructor Management's
+     "View Schedule" page (InstructorSchedulePage's getScheduleColors()):
+     tentative = border-amber-600 bg-amber-400 text-amber-950, default/
+     booked = border-indigo-700 bg-indigo-500 text-white -- same hex values,
+     not just the same hue family. */
+  --gc-yellow-fill: #fbbf24;
+  --gc-yellow-hover: #f59e0b;
+  --gc-yellow-text: #451a03;
+  --gc-purple-fill: #6366f1;
+  --gc-purple-hover: #4f46e5;
+  --gc-purple-text: #ffffff;
+  --gc-shadow: 0 1px 3px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.06);
+  --gc-pop-shadow: 0 4px 6px rgba(0, 0, 0, 0.1),
+    0 2px 4px rgba(0, 0, 0, 0.06);
+  --gc-suggest-shadow: 0 10px 15px rgba(0, 0, 0, 0.1),
+    0 4px 6px rgba(0, 0, 0, 0.05);
+}
+
+.sales-dashboard-root[data-theme="dark"] {
+  color-scheme: dark;
+  --gc-bg: #1c1917;
+  --gc-surface: #262626;
+  --gc-hover: #3f3f46;
+  --gc-detail: #221f1d;
+  --gc-border: #27272a;
+  /* Same two-step hierarchy as light mode, lightened rather than darkened
+     since dark mode needs to go the other direction to stay visible
+     against --gc-bg -- deliberately NOT reusing --gc-hover's #3f3f46 here,
+     since that's also the free-slot fill; a grid line the same color as a
+     free cell would vanish at every free/free cell boundary. */
+  --gc-grid-line: #52525b;
+  --gc-grid-line-strong: #71717a;
+  --gc-band-bg: var(--gc-detail);
+  --gc-text: #f2f2f2;
+  --gc-text-2: #a1a1aa;
+  --gc-blue: #60a5fa;
+  --gc-blue-bg: #1e3a5f;
+  --gc-blue-contrast: #0a0a0b;
+  --gc-green-fill: #3f3f46;
+  --gc-green-hover: #52525b;
+  --gc-green-text: #d4d4d8;
+  --gc-red-text: #fca5a5;
+  --gc-red-bg: #450a0a;
+  --gc-red-hover: #7f1d1d;
+  /* Same exact Tentative/Booked colors as light mode -- View Schedule has
+     no dark-mode variant of its own to copy, and these are saturated
+     enough to still read clearly on a dark background. */
+  --gc-yellow-fill: #fbbf24;
+  --gc-yellow-hover: #f59e0b;
+  --gc-yellow-text: #451a03;
+  --gc-purple-fill: #6366f1;
+  --gc-purple-hover: #4f46e5;
+  --gc-purple-text: #ffffff;
+  --gc-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --gc-pop-shadow: 0 4px 6px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.3);
+  --gc-suggest-shadow: 0 10px 15px rgba(0, 0, 0, 0.4),
+    0 4px 6px rgba(0, 0, 0, 0.3);
+}
+
+.shell {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 20px 24px 64px;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: linear-gradient(var(--gc-bg) 78%, rgba(255, 255, 255, 0));
+  padding: 8px 0 18px;
+}
+
+/* Holds the Back button, month nav, and all the filter/search/theme
+   controls -- unchanged from before other than no longer also holding the
+   title, so their relative order/positions stay exactly the same. */
+.topbar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* On its own row (see .topbar's flex-direction: column) so it can be
+   genuinely centered across the full header width without overlapping the
+   Back button or the controls row below it -- the header is dense enough
+   that centering it in the same row as those left no free space in the
+   middle. */
+.topbar-title {
+  margin: 0;
+  font-family: "Glancyr", sans-serif;
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  color: var(--gc-text);
+  text-align: center;
+}
+
+.cal-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* --gc-control-h: the one shared height for every control in the topbar
+   row (Back, month chevrons, month/filter dropdowns, search, dark-mode
+   toggle, Reset, Help) so they align on one line instead of each sizing
+   itself off its own font-size/padding. Matches src/components/ui/
+   button.tsx's size="sm" (h-8 = 32px), which is what the Back button
+   already renders at -- so the Back button needs no size override here,
+   everything else is brought to match it. */
+.cal-btn {
+  height: var(--gc-control-h, 32px);
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: "Glancyr", sans-serif;
+  font-size: 13px;
+  color: var(--gc-text);
+  background: var(--gc-bg);
+  border: 1px solid var(--gc-border);
+  border-radius: 10px;
+  padding: 0 12px;
+  transition:
+    background 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.cal-btn:hover:not(:disabled) {
+  background: var(--gc-surface);
+  box-shadow: var(--gc-shadow);
+}
+
+.cal-btn:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.cal-btn.chev {
+  width: var(--gc-control-h, 32px);
+  padding: 0;
+  font-size: 19px;
+  line-height: 1;
+}
+
+.icon-btn {
+  width: var(--gc-control-h, 32px);
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.cal-month {
+  min-width: 210px;
+  text-align: center;
+  font-family: "Glancyr", sans-serif;
+  font-size: 21px;
+  font-weight: 400;
+  letter-spacing: -0.2px;
+  color: var(--gc-text);
+  padding: 0 6px;
+}
+
+.controls {
+  display: flex;
+}
+
+.controls-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.search {
+  position: relative;
+  min-width: 300px;
+}
+
+.sort-select {
+  height: var(--gc-control-h, 32px);
+  box-sizing: border-box;
+  padding: 0 12px;
+  border: 1px solid var(--gc-border);
+  border-radius: 10px;
+  font-size: 13px;
+  font-family: "Glancyr", sans-serif;
+  background: var(--gc-bg);
+  color: var(--gc-text);
+  cursor: pointer;
+}
+
+.sort-select:hover {
+  background: var(--gc-hover);
+}
+
+.sort-select:focus {
+  border-color: var(--gc-blue);
+  outline: none;
+}
+
+.search input {
+  width: 100%;
+  height: var(--gc-control-h, 32px);
+  box-sizing: border-box;
+  padding: 0 14px;
+  border: 1px solid var(--gc-border);
+  border-radius: 10px;
+  font-size: 13.5px;
+  font-family: "Glancyr", sans-serif;
+  background: var(--gc-bg);
+  color: var(--gc-text);
+  outline: none;
+  transition: box-shadow 0.15s ease;
+}
+
+.search input:focus {
+  border-color: var(--gc-blue);
+  box-shadow: 0 0 0 1px var(--gc-blue);
+}
+
+.suggest {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  background: var(--gc-bg);
+  border: 1px solid var(--gc-border);
+  border-radius: 12px;
+  box-shadow: var(--gc-suggest-shadow);
+  max-height: 320px;
+  overflow: auto;
+}
+
+.suggest-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: 8px;
+}
+
+.suggest-row:hover {
+  background: var(--gc-hover);
+}
+
+.suggest-main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 8px;
+  border: none;
+  background: none;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.suggest-name-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* Fixed (not flex:1) so the Add button lands at the same x position on
+     every row regardless of name length or whether a break-badge is
+     present — previously this grew to fill leftover space, so
+     short/unbadged names pushed the button further right than long or
+     badged ones. Widened after removing the Compare button freed up room. */
+  width: 190px;
+  min-width: 0;
+  flex: none;
+}
+
+.suggest-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--gc-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.suggest-btn {
+  flex: none;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--gc-blue);
+  background: var(--gc-blue-bg);
+  border-radius: 12px;
+  padding: 3px 10px;
+}
+
+.suggest-row.added .suggest-btn {
+  color: var(--gc-green-text);
+  background: var(--gc-green-fill);
+}
+
+.clear-select {
+  margin-left: 8px;
+  border: 1px solid var(--gc-border);
+  background: var(--gc-bg);
+  color: var(--gc-blue);
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 10px;
+  padding: 2px 12px;
+}
+
+.clear-select:hover {
+  background: var(--gc-hover);
+}
+
+.remove-instr {
+  flex: none;
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 50%;
+  background: var(--gc-red-bg);
+  color: var(--gc-red-text);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.remove-instr:hover {
+  background: var(--gc-red-hover);
+}
+
+.summary {
+  margin: 4px 0 14px;
+  font-size: 12.5px;
+  color: var(--gc-text-2);
+}
+
+.summary strong {
+  color: var(--gc-text);
+}
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 2px 0 14px;
+  margin-bottom: 14px;
+  scrollbar-width: thin;
+}
+
+.tab {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  min-width: 88px;
+  padding: 8px 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 10px;
+  font-size: 11.5px;
+  font-family: "Glancyr", sans-serif;
+  color: var(--gc-text);
+  cursor: pointer;
+}
+
+.tab:hover {
+  background: var(--gc-hover);
+}
+
+.tab span {
+  color: var(--gc-text-2);
+  font-weight: 500;
+}
+
+.tab strong {
+  font-family: "Glancyr", sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--gc-text);
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+}
+
+.tab em {
+  font-style: normal;
+  color: var(--gc-green-text);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.tab.active strong {
+  background: var(--gc-blue);
+  color: var(--gc-blue-contrast);
+}
+
+.tab.active {
+  background: var(--gc-blue-bg);
+}
+
+.grid-wrap {
+  overflow: auto;
+  min-height: 55vh;
+  max-height: 74vh;
+  border: 1px solid var(--gc-border);
+  border-radius: 12px;
+  background: var(--gc-bg);
+  box-shadow: var(--gc-shadow);
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+/* Visually ties the "pick a slot now" banner (override / add-another-class
+   mode) to WHERE that click should happen — otherwise the banner and the
+   grid can read as two unrelated things, especially right after the modal
+   closes. */
+@keyframes grid-wrap-picking-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px var(--gc-yellow-hover);
+  }
+  50% {
+    box-shadow: 0 0 0 3px var(--gc-yellow-fill);
+  }
+}
+
+.grid-wrap-picking {
+  border-color: var(--gc-yellow-hover);
+  animation: grid-wrap-picking-pulse 1.6s ease-in-out infinite;
+}
+
+/* Grid table layout — ported as-is from the standalone reference dashboard
+   (Lane-sales-requirement/src/App.css). Deliberately auto layout (no
+   table-layout: fixed, no <colgroup>) with min-width per column class:
+   the browser sizes each column to the max of its cells' min-widths, which
+   is what keeps the header and every row's columns in lockstep without
+   needing to force exact widths. This is the reference's proven approach —
+   don't reintroduce fixed-layout/colgroup here. */
+.grid {
+  border-collapse: collapse;
+  min-width: 100%;
+}
+
+.grid th,
+.grid td {
+  border-right: 1px solid var(--gc-grid-line);
+  border-bottom: 1px solid var(--gc-grid-line);
+  padding: 6px 8px;
+  text-align: center;
+  font-size: 12px;
+  height: 30px;
+  color: var(--gc-text);
+}
+
+/* Hour-boundary vertical lines (every 2nd time column, i.e. the right edge
+   of :30 columns) get the stronger token so it's obvious at a glance where
+   each hour starts, without every 30-minute line competing for attention.
+   :not(...) excludes the sticky instructor column, which is also an
+   (odd) nth-child but isn't a time boundary. */
+.grid thead th:nth-child(odd):not(.col-instructor),
+.grid tr.row td:nth-child(odd):not(.instructor-cell) {
+  border-right: 1px solid var(--gc-grid-line-strong);
+}
+
+/* Instructor-row separator -- strengthens the existing top/bottom edges
+   that already sandwich the blank .row-gap spacer, rather than adding a
+   new border element, so consecutive instructors read as clearly distinct
+   rows without extra visual weight. */
+.grid tr.row td {
+  border-top: 1px solid var(--gc-grid-line-strong);
+  border-bottom: 1px solid var(--gc-grid-line-strong);
+}
+
+.grid thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--gc-surface);
+  border-bottom: 1px solid var(--gc-grid-line-strong);
+  font-weight: 500;
+  color: var(--gc-text-2);
+  font-size: 11px;
+  height: 40px;
+}
+
+.col-time-h {
+  position: relative;
+  min-width: 48px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Mini schedule time column */
+.mini-time {
+  position: relative;
+  min-width: 40px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Time label straddles the column's left grid line (matches the reference's
+   Google-Calendar-style time axis), not centered within the cell. */
+.time-label {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  transform: translate(-50%, -50%);
+  white-space: nowrap;
+  pointer-events: none;
+  background: inherit;
+  padding: 0 2px;
+}
+
+/* Instructor column header - sticky during scroll.
+   min-width reads a CSS variable (set from JS in SalesDashboard.tsx via a
+   useLayoutEffect that measures the widest rendered .instructor-cell's
+   scrollWidth) so the column is always exactly as wide as the longest
+   instructor name actually needs — 280px is only the pre-measurement
+   fallback. box-sizing: border-box so this value (which already includes
+   the cell's own padding, since it comes from scrollWidth) isn't
+   double-counted with padding added on top. */
+.col-instructor {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  box-sizing: border-box;
+  min-width: var(--instr-col-width, 280px);
+  text-align: left !important;
+  background: var(--gc-surface) !important;
+}
+
+/* Instructor cell - sticky left column. display: flex directly on this <td>
+   matches the reference exactly; it's safe under auto table layout (no
+   table-layout: fixed / <colgroup>, which is what previously made this
+   sticky column size independently of the header). */
+.instructor-cell {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  box-sizing: border-box;
+  background: var(--gc-bg);
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: var(--instr-col-width, 280px);
+  height: 100%;
+  padding: 10px 12px !important;
+}
+
+/* No flex-shrink/ellipsis truncation here on purpose: this button's natural
+   (single-line) content width is what the table's auto layout uses to size
+   the whole Instructor column, so the column — and therefore where the
+   timeline starts — always grows to fit the longest instructor name rather
+   than clipping it. white-space: nowrap keeps it on one line so row height
+   stays exactly as-is even for long names. */
+.instructor-name {
+  flex: none;
+  border: none;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  font-family: "Glancyr", sans-serif;
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--gc-text);
+  white-space: nowrap;
+}
+
+.instructor-name:hover {
+  color: var(--gc-blue);
+}
+
+.row-select {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1.5px solid var(--gc-text-2);
+  border-radius: 50%;
+  background: var(--gc-bg);
+  color: var(--gc-blue);
+  font-size: 9px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.row-select:hover {
+  border-color: var(--gc-blue);
+  background: var(--gc-blue-bg);
+}
+
+.row-selected td {
+  box-shadow: inset 0 0 0 2px var(--gc-blue);
+}
+
+.row-gap td {
+  height: 12px;
+  padding: 0 !important;
+  border: none;
+  background: var(--gc-bg);
+}
+
+.row-loading .instructor-cell {
+  color: var(--gc-text-2);
+  font-style: italic;
+}
+
+.row-loading-msg {
+  color: var(--gc-text-2);
+  font-size: 12px;
+}
+
+.reset-dash {
+  height: var(--gc-control-h, 32px);
+  box-sizing: border-box;
+  padding: 0 14px;
+  border: 1px solid var(--gc-border);
+  background: var(--gc-red-bg);
+  color: var(--gc-red-text);
+  border-radius: 10px;
+  font-size: 13px;
+  font-family: "Glancyr", sans-serif;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.reset-dash:hover {
+  background: var(--gc-red-hover);
+}
+
+.expand {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--gc-border);
+  background: var(--gc-bg);
+  color: var(--gc-text-2);
+  border-radius: 10px;
+  font-family: "Glancyr", sans-serif;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.expand .expand-chev {
+  font-size: 8px;
+  line-height: 1;
+}
+
+.expand:hover,
+.expand.open {
+  border-color: var(--gc-blue);
+  background: var(--gc-blue-bg);
+  color: var(--gc-blue);
+}
+
+/* Slot cell - matches time column width exactly (44px) */
+.cell {
+  position: relative;
+  min-width: 48px;
+  height: 26px;
+  padding: 0 !important;
+  cursor: pointer;
+}
+
+.cell-hovered {
+  z-index: 50;
+}
+
+.slot-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  min-width: 220px;
+  max-width: 300px;
+  background: var(--gc-bg);
+  border: 1px solid var(--gc-border);
+  border-radius: 8px;
+  box-shadow: var(--gc-pop-shadow);
+  padding: 10px 13px;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.15s ease,
+    visibility 0.15s ease;
+  pointer-events: none;
+}
+
+.cell-hovered .slot-pop {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.slot-pop::after {
+  content: "";
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-bottom-color: var(--gc-border);
+}
+
+.slot-pop::before {
+  content: "";
+  position: absolute;
+  bottom: calc(100% - 1px);
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-bottom-color: var(--gc-bg);
+  z-index: 1;
+}
+
+.pop-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.pop-title.free {
+  color: var(--gc-green-text);
+}
+
+.pop-title.busy {
+  color: var(--gc-red-text);
+}
+
+.pop-line {
+  font-size: 12.5px;
+  color: var(--gc-text);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.slot-pop-override-btn {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--gc-yellow-hover);
+  background: var(--gc-yellow-fill);
+  color: var(--gc-yellow-text);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.slot-pop-override-btn:hover {
+  background: var(--gc-yellow-hover);
+}
+
+.slot-pop-delete-btn {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--gc-red-hover);
+  background: var(--gc-red-bg);
+  color: var(--gc-red-text);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.slot-pop-delete-btn:hover {
+  background: var(--gc-red-hover);
+}
+
+.cell-free {
+  background: var(--gc-green-fill);
+}
+
+.cell-free:hover {
+  background: var(--gc-green-hover);
+}
+
+.cell-half {
+  background: linear-gradient(
+    45deg,
+    var(--gc-green-fill) 25%,
+    transparent 25%,
+    transparent 75%,
+    var(--gc-green-fill) 75%
+  ) !important;
+  background-size: 8px 8px;
+}
+
+.cell-half:hover {
+  background: linear-gradient(
+    45deg,
+    var(--gc-green-hover) 25%,
+    transparent 25%,
+    transparent 75%,
+    var(--gc-green-hover) 75%
+  ) !important;
+  background-size: 8px 8px;
+}
+
+/* Subtle alternating tint per hour (2 columns) for cells with no other
+   state (busy/plain) -- makes it easier to scan which hour a column
+   belongs to without competing with the free/tentative/booked/pending
+   colors, which all take priority over this class (see SlotCellInner). */
+.cell-band {
+  background: var(--gc-band-bg);
+}
+
+/* 🟡 Tentative — any payment status (unpaid/half/full paid all render the
+   same yellow; only the hover popover's title/override-eligibility
+   differs by payment status). */
+.cell-tentative {
+  background: var(--gc-yellow-fill);
+}
+
+.cell-tentative:hover {
+  background: var(--gc-yellow-hover);
+}
+
+/* 🟣 Booked — a real class (booked/completed), or a real learner booking
+   mid-payment (pending_payment). Never overridable from Sales. */
+.cell-booked {
+  background: var(--gc-purple-fill);
+}
+
+.cell-booked:hover {
+  background: var(--gc-purple-hover);
+}
+
+/* 🔵 Pending — a slot already added to the in-progress multi-class batch
+   (Task 19), not yet submitted. Reuses the existing blue "selected/active"
+   palette rather than introducing a new color. */
+.cell-pending {
+  background: var(--gc-blue-bg);
+  box-shadow: inset 0 0 0 2px var(--gc-blue);
+}
+
+.cell-pending:hover {
+  background: var(--gc-blue-bg);
+}
+
+/* Grey/hatched — a free slot that overlaps a class already in the
+   in-progress batch, so it can't be added on top of it. Same diagonal
+   pattern technique as .cell-half, just neutral-colored to read as
+   "disabled" rather than "partially available". */
+.cell-pending-blocked {
+  background: linear-gradient(
+    45deg,
+    var(--gc-hover) 25%,
+    transparent 25%,
+    transparent 75%,
+    var(--gc-hover) 75%
+  );
+  background-size: 8px 8px;
+  cursor: not-allowed;
+}
+
+.cell-pending-blocked:hover {
+  background: linear-gradient(
+    45deg,
+    var(--gc-border) 25%,
+    transparent 25%,
+    transparent 75%,
+    var(--gc-border) 75%
+  );
+  background-size: 8px 8px;
+}
+
+.detail-row td {
+  padding: 0 !important;
+  border-bottom: 1px solid var(--gc-border);
+}
+
+.detail {
+  overflow: auto;
+  max-height: 60vh;
+  background: var(--gc-detail);
+  border-top: 1px solid var(--gc-border);
+}
+
+.detail-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--gc-border);
+  background: var(--gc-surface);
+}
+
+.detail-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: "Glancyr", sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--gc-text);
+}
+
+.detail-chev {
+  font-size: 9px;
+  color: var(--gc-blue);
+}
+
+.detail-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--gc-blue);
+  background: var(--gc-blue-bg);
+  border-radius: 10px;
+  padding: 2px 8px;
+}
+
+.break-badge {
+  display: inline-block;
+  flex-shrink: 0;
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--gc-red-text);
+  background: var(--gc-red-bg);
+  border-radius: 10px;
+  padding: 2px 8px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.detail-sub {
+  font-size: 12px;
+  color: var(--gc-text-2);
+}
+
+.detail-close {
+  margin-left: auto;
+  padding: 4px 12px;
+  border: 1px solid var(--gc-border);
+  background: var(--gc-bg);
+  color: var(--gc-text-2);
+  border-radius: 14px;
+  font-family: "Glancyr", sans-serif;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.detail-close:hover {
+  background: var(--gc-hover);
+  color: var(--gc-blue);
+}
+
+.detail-areas {
+  padding: 2px 10px;
+  font-size: 11px;
+  color: var(--gc-text-2);
+  background: var(--gc-bg);
+  border: 1px solid var(--gc-border);
+  border-radius: 12px;
+}
+
+.detail-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 32px 16px;
+  font-size: 13px;
+  color: var(--gc-text-2);
+}
+
+.detail-loading::before {
+  content: "";
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid var(--gc-border);
+  border-top-color: var(--gc-blue);
+  animation: detail-loading-spin 0.7s linear infinite;
+}
+
+@keyframes detail-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.mini {
+  border-collapse: collapse;
+}
+
+.mini th,
+.mini td {
+  border-right: 1px solid var(--gc-border);
+  border-bottom: 1px solid var(--gc-border);
+  padding: 5px 7px;
+  font-size: 12px;
+}
+
+.mini th {
+  position: sticky;
+  top: 0;
+  background: var(--gc-surface);
+  color: var(--gc-text-2);
+  font-weight: 500;
+}
+
+.mini-date {
+  position: sticky;
+  left: 0;
+  background: var(--gc-surface);
+  text-align: left;
+  white-space: nowrap;
+  font-weight: 500;
+  color: var(--gc-text);
+}
+
+.mini-date .mini-count {
+  margin-left: 8px;
+  color: var(--gc-green-text);
+  font-weight: 700;
+}
+
+.mini-row:hover .mini-date {
+  background: var(--gc-blue-bg);
+  color: var(--gc-blue);
+}
+
+.mini-row.current .mini-date {
+  background: var(--gc-blue-bg);
+  color: var(--gc-blue);
+}
+
+.mini .cell {
+  min-width: 40px;
+  height: 20px;
+}
+
+.mini .cell-free {
+  background: var(--gc-green-fill);
+}
+
+.mini .cell-free:hover {
+  background: var(--gc-green-hover);
+}
+
+.empty {
+  color: var(--gc-text-2);
+  font-size: 13px;
+  text-align: center;
+  padding: 24px;
+}
+
+.legend {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--gc-text-2);
+}
+
+.swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  vertical-align: -2px;
+  margin-right: 6px;
+}
+
+.swatch.free {
+  background: var(--gc-green-fill);
+  border: 1px solid var(--gc-green-hover);
+}
+
+.swatch.busy {
+  background: var(--gc-bg);
+  border: 1px solid var(--gc-border);
+}
+
+.swatch.tentative {
+  background: var(--gc-yellow-fill);
+  border: 1px solid var(--gc-yellow-hover);
+}
+
+.swatch.booked {
+  background: var(--gc-purple-fill);
+  border: 1px solid var(--gc-purple-hover);
+}
+
+.swatch.pending {
+  background: var(--gc-blue-bg);
+  border: 1px solid var(--gc-blue);
+}
+
+.reload {
+  padding: 7px 16px;
+  border: 1px solid var(--gc-border);
+  background: var(--gc-bg);
+  border-radius: 10px;
+  font-size: 13px;
+  font-family: "Glancyr", sans-serif;
+}
+
+.reload:hover {
+  background: var(--gc-hover);
+}
+
+.state {
+  text-align: center;
+  color: var(--gc-text-2);
+  padding: 40px 0;
+}
+
+.state.error {
+  color: var(--gc-red-text);
+}
+
+.state.error button {
+  margin-top: 12px;
+  padding: 8px 18px;
+  border: 1px solid var(--gc-border);
+  background: var(--gc-bg);
+  border-radius: 10px;
+  font-size: 13px;
+  font-family: "Glancyr", sans-serif;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.modal {
+  width: min(680px, 92vw);
+  max-height: 84vh;
+  overflow: auto;
+  background: var(--gc-bg);
+  border: 1px solid var(--gc-border);
+  border-radius: 12px;
+  box-shadow: var(--gc-suggest-shadow);
+  padding: 22px 26px 26px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-family: "Glancyr", sans-serif;
+  font-size: 19px;
+  font-weight: 500;
+  letter-spacing: -0.2px;
+  color: var(--gc-text);
+}
+
+.modal-close {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--gc-border);
+  background: var(--gc-bg);
+  color: var(--gc-text-2);
+  border-radius: 50%;
+  font-size: 18px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-close:hover {
+  background: var(--gc-hover);
+  color: var(--gc-text);
+}
+
+.help-section {
+  margin-top: 16px;
+}
+
+.help-section h3 {
+  margin: 0 0 6px;
+  font-family: "Glancyr", sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--gc-blue);
+}
+
+.help-section p {
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--gc-text);
+}
+
+.help-section ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.help-section li {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--gc-text);
+  margin-bottom: 4px;
+}
+
+.loc-search {
+  width: 100%;
+  margin: 0 auto 14px;
+  padding: 14px 24px 12px;
+  border: 1px solid var(--gc-border);
+  border-radius: 12px;
+  background: var(--gc-surface);
+  max-width: 1400px;
+}
+
+.loc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.loc-collapse-btn {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  margin: -8px -10px 0 0;
+  border: 1px solid var(--gc-border);
+  background: var(--gc-bg);
+  color: var(--gc-text-2);
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.loc-collapse-btn:hover {
+  background: var(--gc-hover);
+  color: var(--gc-text);
+}
+
+.loc-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.loc-title {
+  font-family: "Glancyr", sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--gc-text);
+  white-space: nowrap;
+}
+
+.loc-input {
+  flex: 1;
+  min-width: 240px;
+  padding: 8px 14px;
+  border: 1px solid var(--gc-border);
+  border-radius: 10px;
+  font-size: 13.5px;
+  font-family: "Glancyr", sans-serif;
+  background: var(--gc-bg);
+  color: var(--gc-text);
+  outline: none;
+  transition: box-shadow 0.15s ease;
+}
+
+.loc-input:focus {
+  border-color: var(--gc-blue);
+  box-shadow: 0 0 0 1px var(--gc-blue);
+}
+
+.loc-btn {
+  padding: 8px 16px;
+  border: 1px solid var(--gc-blue);
+  background: var(--gc-blue);
+  color: var(--gc-blue-contrast);
+  border-radius: 10px;
+  font-size: 13px;
+  font-family: "Glancyr", sans-serif;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.loc-btn:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.loc-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.loc-manual-btn {
+  padding: 8px 12px;
+  border: 1px solid var(--gc-border);
+  background: var(--gc-bg);
+  color: var(--gc-text-2);
+  border-radius: 10px;
+  font-size: 13px;
+  font-family: "Glancyr", sans-serif;
+}
+
+.loc-manual-btn:hover {
+  background: var(--gc-hover);
+}
+
+.loc-clear {
+  padding: 8px 12px;
+  border: 1px solid var(--gc-border);
+  background: var(--gc-red-bg);
+  color: var(--gc-red-text);
+  border-radius: 10px;
+  font-size: 13px;
+  font-family: "Glancyr", sans-serif;
+  font-weight: 500;
+}
+
+.loc-clear:hover {
+  background: var(--gc-red-hover);
+}
+
+.loc-status {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--gc-text-2);
+}
+
+.loc-status.error {
+  color: var(--gc-red-text);
+}
+
+.loc-status.ok {
+  color: var(--gc-green-text);
+}
+
+.loc-status code {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  background: var(--gc-hover);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.loc-manual {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.loc-manual-input {
+  width: 160px;
+  padding: 7px 12px;
+  border: 1px solid var(--gc-border);
+  border-radius: 10px;
+  font-size: 12.5px;
+  font-family: "Glancyr", sans-serif;
+  background: var(--gc-bg);
+  color: var(--gc-text);
+  outline: none;
+}
+
+.loc-manual-input:focus {
+  border-color: var(--gc-blue);
+}
+
+.loc-map {
+  margin-top: 12px;
+  width: 100%;
+  height: 320px;
+  border: 1px solid var(--gc-border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--gc-surface);
+}
+
+.loc-legend {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--gc-text-2);
+}
+
+.loc-swatch {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  flex: none;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+
+.loc-results {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.loc-results-count {
+  font-size: 12.5px;
+  color: var(--gc-text-2);
+}
+
+.loc-results-chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.loc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border: 1px solid var(--gc-border);
+  background: var(--gc-bg);
+  color: var(--gc-blue);
+  border-radius: 10px;
+  font-size: 12px;
+  font-family: "Glancyr", sans-serif;
+  font-weight: 500;
+}
+
+.loc-chip:hover {
+  background: var(--gc-hover);
+}
+
+.loc-chip.added {
+  color: var(--gc-green-text);
+  background: var(--gc-green-fill);
+  border-color: var(--gc-green-hover);
+}
+
+/* In-app toast for slot-validation feedback (double-click on a slot that
+   turns out not to be fully bookable) — replaces the native browser
+   alert() so it matches the dashboard's own theme/typography instead of
+   an unstyled OS dialog. */
+@keyframes slot-toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -8px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+.slot-toast {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  /* Matches the keyframe's "to" state -- without this, the moment the
+     0.18s entrance animation ends (animation-fill-mode isn't "forwards"),
+     the transform reverts to this rule's own value. Left unset here, that
+     was "none": left: 50% alone positions the box's LEFT EDGE at the
+     viewport's midpoint, not its center, so the toast visibly snapped
+     from centered to shifted-right the instant the animation finished. */
+  transform: translate(-50%, 0);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 92vw;
+  background: var(--gc-red-bg);
+  color: var(--gc-red-text);
+  border: 1px solid var(--gc-red-hover);
+  border-radius: 12px;
+  box-shadow: var(--gc-pop-shadow);
+  padding: 12px 14px 12px 16px;
+  font-family: "Glancyr", sans-serif;
+  font-size: 13px;
+  animation: slot-toast-in 0.18s ease-out;
+}
+
+.slot-toast-icon {
+  flex: none;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.slot-toast-msg {
+  flex: 1;
+  line-height: 1.4;
+}
+
+.slot-toast-close {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--gc-red-text);
+  border-radius: 50%;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.slot-toast-close:hover {
+  background: var(--gc-red-hover);
+}
+
+/* Persistent "you're in override mode" banner — same shape as the
+   red slot-toast, yellow theme, no auto-dismiss animation replay needed
+   since it's controlled entirely by overrideSource state, not a timer. */
+.slot-toast-info {
+  background: var(--gc-yellow-fill);
+  color: var(--gc-yellow-text);
+  border-color: var(--gc-yellow-hover);
+}
+
+.slot-toast-info .slot-toast-close {
+  color: var(--gc-yellow-text);
+}
+
+.slot-toast-info .slot-toast-close:hover {
+  background: var(--gc-yellow-hover);
+}
+
+/* Booking success confirmation banner. */
+.slot-toast-success {
+  background: var(--gc-green-fill);
+  color: var(--gc-green-text);
+  border-color: var(--gc-green-hover);
+}
+
+.slot-toast-success .slot-toast-close {
+  color: var(--gc-green-text);
+}
+
+.slot-toast-success .slot-toast-close:hover {
+  background: var(--gc-green-hover);
+}

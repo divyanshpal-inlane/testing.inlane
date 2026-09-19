@@ -380,7 +380,9 @@ export function useSubmitLLApplication() {
 
       // Drop leftover secondary address-proof files when the customer
       // switched to a single-document subtype (e.g. Aadhaar).
-      const addressUploads = uploads.filter((u) => u.docType === "address_proof");
+      const addressUploads = uploads.filter(
+        (u) => u.docType === "address_proof",
+      );
       if (
         addressUploads.length > 0 &&
         !addressUploads.some((u) => u.docSlot === "secondary")

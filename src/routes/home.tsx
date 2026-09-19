@@ -725,9 +725,7 @@ export default function Home() {
 
           <Button
             onClick={() =>
-              navigate(
-                `/reschedule/${LessonData?.upcomingSchedule?.lesson_id}`,
-              )
+              navigate(`/reschedule/${LessonData?.upcomingSchedule?.lesson_id}`)
             }
             variant="secondary"
             className="w-full"
@@ -988,7 +986,7 @@ export default function Home() {
         ) : (
           <>
             {LessonData?.upcomingSchedule?.status?.toUpperCase() ===
-              "PAUSED" ? (
+            "PAUSED" ? (
               <div className="mb-6">{renderPausedLesson()}</div>
             ) : LessonData?.upcomingSchedule?.status === "pending_payment" ? (
               <div className="mb-6">

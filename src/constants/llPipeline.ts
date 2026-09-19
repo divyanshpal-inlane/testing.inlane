@@ -98,9 +98,10 @@ export const LL_SEGREGATION_ROUTES: LLSegregationRoute[] = [
 export const LL_SEGREGATION_ROUTE_MAP: Record<
   LLSegregationRouteCode,
   LLSegregationRoute
-> = Object.fromEntries(
-  LL_SEGREGATION_ROUTES.map((r) => [r.code, r]),
-) as Record<LLSegregationRouteCode, LLSegregationRoute>;
+> = Object.fromEntries(LL_SEGREGATION_ROUTES.map((r) => [r.code, r])) as Record<
+  LLSegregationRouteCode,
+  LLSegregationRoute
+>;
 
 /** @deprecated Use LL_SEGREGATION_ROUTES — kept as code list for callers that expect strings. */
 export const LL_BATCHES = LL_SEGREGATION_ROUTES.map((r) => r.code);
@@ -625,9 +626,7 @@ function buildLLReverseEdges(
       for (const f of s.failures ?? []) link(s.key, f.key);
     }
   }
-  return Object.fromEntries(
-    Object.entries(map).map(([k, v]) => [k, [...v]]),
-  );
+  return Object.fromEntries(Object.entries(map).map(([k, v]) => [k, [...v]]));
 }
 
 /**
@@ -708,15 +707,15 @@ export function assertLLStatusTransition(opts: {
   if (kind === "recover") {
     const failure = LL_FAILURE_STAGES[fromStatus];
     if (!failure || failure.recoverTo !== toStatus) {
-      throw new Error(
-        `Cannot recover from ${fromStatus} to ${toStatus}.`,
-      );
+      throw new Error(`Cannot recover from ${fromStatus} to ${toStatus}.`);
     }
     return;
   }
 
   if (kind === "failure") {
-    const allowed = getLLFailureOptions(fromStatus, batchCode).map((f) => f.key);
+    const allowed = getLLFailureOptions(fromStatus, batchCode).map(
+      (f) => f.key,
+    );
     if (!allowed.includes(toStatus)) {
       throw new Error(
         `Failure ${toStatus} is not available from ${fromStatus} for route ${batchCode ?? "unset"}.`,
@@ -726,7 +725,10 @@ export function assertLLStatusTransition(opts: {
   }
 
   // advance
-  if (fromStatus === "application_ready" && !isLLSegregationRouteCode(batchCode)) {
+  if (
+    fromStatus === "application_ready" &&
+    !isLLSegregationRouteCode(batchCode)
+  ) {
     throw new Error(
       "Set segregation route (A / B / C / D) before advancing from Ready for RTO.",
     );
@@ -752,7 +754,9 @@ export function classifyLLStatusTransition(
   if (getLLAdvanceTargets(fromStatus, batchCode).includes(toStatus)) {
     return "advance";
   }
-  if (getLLFailureOptions(fromStatus, batchCode).some((f) => f.key === toStatus)) {
+  if (
+    getLLFailureOptions(fromStatus, batchCode).some((f) => f.key === toStatus)
+  ) {
     return "failure";
   }
   const failure = LL_FAILURE_STAGES[fromStatus];
@@ -780,7 +784,13 @@ const STAGE_FIELD_CLEAR_AFTER: {
   },
   {
     afterStage: "ll_issued",
-    fields: ["ll_number", "ll_issue_date", "ll_expiry_date", "ll_type", "ll_matures_at"],
+    fields: [
+      "ll_number",
+      "ll_issue_date",
+      "ll_expiry_date",
+      "ll_type",
+      "ll_matures_at",
+    ],
   },
   {
     afterStage: "dl_date_preference_received",
@@ -1038,8 +1048,9 @@ export const DL_TEST_CHECKLIST_SECTIONS: {
 ];
 
 /** Flat list for calendar/reminder snippets. */
-export const DL_TEST_CHECKLIST: string[] =
-  DL_TEST_CHECKLIST_SECTIONS.flatMap((s) => s.items);
+export const DL_TEST_CHECKLIST: string[] = DL_TEST_CHECKLIST_SECTIONS.flatMap(
+  (s) => s.items,
+);
 
 /**
  * DL-phase statuses that get their own customer homepage screens. These are
@@ -1119,10 +1130,7 @@ export interface LLDocTypeDef {
    * Subtypes that need two separate files. Keys are subtype keys; values
    * are labels for the primary + secondary upload slots.
    */
-  dualUploadSubtypes?: Record<
-    string,
-    { primary: string; secondary: string }
-  >;
+  dualUploadSubtypes?: Record<string, { primary: string; secondary: string }>;
 }
 
 /** Default single-file slot used by most document types. */
