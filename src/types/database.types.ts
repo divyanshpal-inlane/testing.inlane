@@ -1245,6 +1245,24 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      get_course_feedback: {
+        Args: { search_term: string; checkpoint_filter: string };
+        Returns: {
+          id: string;
+          enrollment_id: string;
+          learner_id: string;
+          checkpoint: string;
+          overall_rating: number;
+          instructor_rating: number;
+          course_rating: number;
+          comment: string | null;
+          created_at: string;
+        }[];
+      };
+      get_course_feedback_stats: {
+        Args: Record<PropertyKey, never>;
+        Returns: Json;
+      };
       get_learners_with_issues: {
         Args: { search_term: string; issue_filter: string };
         Returns: Database["public"]["Tables"]["Learner"]["Row"][];
