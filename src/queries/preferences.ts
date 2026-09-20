@@ -204,10 +204,10 @@ export function useInfiniteSchedulingRequests() {
         .range(from, to);
 
       if (learnersError) throw learnersError;
-      
+
       // Track raw fetched count to determine if there are more pages
       const rawFetchedCount = learners?.length ?? 0;
-      
+
       if (!learners || learners.length === 0) {
         return { data: [], hasMoreInDb: false };
       }
@@ -271,7 +271,10 @@ export function useInfiniteSchedulingRequests() {
 
       // Return both the filtered data and whether there are more records in the DB
       // We determine hasMoreInDb based on the RAW fetched count, not filtered count
-      return { data: filteredLearners, hasMoreInDb: rawFetchedCount >= BATCH_SIZE };
+      return {
+        data: filteredLearners,
+        hasMoreInDb: rawFetchedCount >= BATCH_SIZE,
+      };
     },
     getNextPageParam: (lastPage, allPages) => {
       const BATCH_SIZE = 25;

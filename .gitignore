@@ -25,3 +25,32 @@ tests/playwright/.auth/
 
 # Local-only working notes, not meant to be pushed
 SALES_DASHBOARD_ACCESS_CONTROL.md
+
+# Test files - local only, not for production
+tests/*.mjs
+tests/*.spec.ts
+tests/*.md
+tests/backend-suite.mjs
+tests/playwright-credentials.local.json
+tests/playwright/.auth/
+tests/*.tmp.mjs
+tests/*.spec.js
+
+# Analysis/docs - local only, not for production
+*_ANALYSIS.md
+*_TEST_CHECKLIST.md
+*_NEEDED.md
+*_SUMMARY.md
+*_CHANGES_NEEDED.md
+*_FIX.md
+SIMPLE_FIX.md
+REALTIME_DELETE_REPLICA_IDENTITY.md
+SALES_DASHBOARD_DB_MIGRATION.md
+MIGRATION_CLEANUP_SUMMARY.md
+INFINITE_SCROLL_CHANGES_NEEDED.md
+INFINITE_SCROLL_TEST_CHECKLIST.md
+ACTIVE_LEARNERS_SLOW_LOADING_ANALYSIS.md
+OtherModule.md
+INFINITE_SCROLL_TEST_CHECKLIST.md
+E2E_TEST_REPORT.md
+pr_body.md

@@ -39,9 +39,11 @@
   --gc-blue-contrast: #ffffff;
   /* Free: plain grey (not sourced from elsewhere -- Instructor Management's
      View Schedule has no "Free" state of its own to copy). Named
-     --gc-green-* for historical reasons; still just the "free slot" token. */
-  --gc-green-fill: #e5e7eb;
-  --gc-green-hover: #d1d5db;
+     --gc-green-* for historical reasons; still just the "free slot" token.
+     One step darker than gray-200/300 (was #e5e7eb/#d1d5db) -- too close to
+     the white background to read as a distinct fill at a glance. */
+  --gc-green-fill: #d1d5db;
+  --gc-green-hover: #9ca3af;
   --gc-green-text: #374151;
   --gc-red-text: #b91c1c;
   --gc-red-bg: #fee2e2;
@@ -58,8 +60,7 @@
   --gc-purple-hover: #4f46e5;
   --gc-purple-text: #ffffff;
   --gc-shadow: 0 1px 3px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.06);
-  --gc-pop-shadow: 0 4px 6px rgba(0, 0, 0, 0.1),
-    0 2px 4px rgba(0, 0, 0, 0.06);
+  --gc-pop-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(0, 0, 0, 0.06);
   --gc-suggest-shadow: 0 10px 15px rgba(0, 0, 0, 0.1),
     0 4px 6px rgba(0, 0, 0, 0.05);
 }
@@ -1276,6 +1277,25 @@
 .modal-close:hover {
   background: var(--gc-hover);
   color: var(--gc-text);
+}
+
+/* Small confirm-style dialog (e.g. delete-tentative-slot) -- same .modal
+   shell, just narrower than the booking/help modals' default width. */
+.modal-sm {
+  width: min(420px, 92vw);
+}
+
+.confirm-message {
+  margin: 0 0 18px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--gc-text);
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .help-section {

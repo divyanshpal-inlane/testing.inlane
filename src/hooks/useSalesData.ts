@@ -353,6 +353,31 @@ export function useSalesData() {
         const str = (v: unknown): string =>
           typeof v === "string" && v.trim().length > 0 ? v : "";
 
+        // Two different flows write tentative_details with two different
+        // payment-status shapes: the Sales Dashboard itself writes
+        // payment_status ("unpaid"/"half_paid"/"full_paid", see
+        // TentativeBookingModal.tsx), while Instructor Management's own
+        // tentative-booking feature writes paid_info ("Unpaid"/"Half
+        // paid"/"Full paid", see instructors.tsx). Both land in the same
+        // Schedule.tentative_details column, so a slot created by the
+        // other flow needs its paid_info normalized to the same
+        // unpaid/half_paid/full_paid vocabulary the override/unpaid-badge
+        // logic below reads -- otherwise it silently defaults to "unpaid"
+        // (paymentStatus: null), which incorrectly offers Override on an
+        // already-paid slot.
+        const normalizePaymentStatus = (
+          td: Record<string, unknown>,
+        ): string | null => {
+          if (typeof td.payment_status === "string") return td.payment_status;
+          if (typeof td.paid_info === "string") {
+            const p = td.paid_info.trim().toLowerCase();
+            if (p === "unpaid") return "unpaid";
+            if (p === "half paid") return "half_paid";
+            if (p === "full paid") return "full_paid";
+          }
+          return null;
+        };
+
         const blockDetails: BlockDetail[] = scheduleRows.map((r) => {
           const td = (r.tentative_details ?? {}) as Record<string, unknown>;
           const learnerName =
@@ -379,8 +404,7 @@ export function useSalesData() {
             endMinute: timeToMinutes(r.end_time),
             status: r.status,
             isTentative: r.isTentative === true,
-            paymentStatus:
-              typeof td.payment_status === "string" ? td.payment_status : null,
+            paymentStatus: normalizePaymentStatus(td),
             rawTentativeDetails: r.tentative_details ?? null,
             learnerName,
             area,

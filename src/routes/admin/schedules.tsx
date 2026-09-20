@@ -144,7 +144,7 @@ function useInfiniteScrollSentinel(
 ) {
   // Use state to track the sentinel element - this triggers re-render when element changes
   const [sentinelEl, setSentinelEl] = useState<HTMLDivElement | null>(null);
-  
+
   // Callback ref that updates state when the DOM element is attached/detached
   const sentinelRef = useCallback((node: HTMLDivElement | null) => {
     setSentinelEl(node);
@@ -772,7 +772,7 @@ export default function AdminSchedules() {
 
       // Handle case where data is not an array (e.g., RPC error or unexpected response)
       const dataArray = Array.isArray(data) ? data : [];
-      
+
       // Map snake_case to camelCase for compatibility with existing UI
       const learners = dataArray.map((learner: any) => ({
         id: learner.id,
