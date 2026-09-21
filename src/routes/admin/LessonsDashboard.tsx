@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,6 +28,8 @@ import { useAllInstructorsForAssignment } from "@/queries/kam";
 import {
   defaultExportFilename,
   downloadCSV,
+  fetchLessonsDashboardExport,
+  LESSONS_PAGE_SIZE,
   lessonsToCSV,
   plusDaysYmd,
   todayYmd,
@@ -88,6 +91,8 @@ export default function LessonsDashboard() {
   const [classNumbersInput, setClassNumbersInput] = useState("");
   const [statuses, setStatuses] = useState<string[]>(ALL_STATUS_KEYS);
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [isExporting, setIsExporting] = useState(false);
 
   // When every status chip is on, send no status filter at all so lessons with
   // any status value (including ones not in STATUS_OPTIONS, e.g. null) still
@@ -103,12 +108,7 @@ export default function LessonsDashboard() {
       .filter((n) => Number.isFinite(n) && n > 0);
   }, [classNumbersInput]);
 
-  const {
-    data: rows,
-    isLoading,
-    isFetching,
-    refetch,
-  } = useLessonsDashboard({
+  const filters = {
     from,
     to,
     kamIds: selectedKamIds,
@@ -116,15 +116,32 @@ export default function LessonsDashboard() {
     classNumbers,
     statuses: allStatusesSelected ? undefined : statuses,
     search,
-  });
+  };
+  const { data, isLoading, isFetching, isError, error, refetch } =
+    useLessonsDashboard(filters, page);
+  const rows = data?.rows;
+  const totalCount = data?.totalCount ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalCount / LESSONS_PAGE_SIZE));
+  const shownCount = Math.min(
+    totalCount,
+    (page - 1) * LESSONS_PAGE_SIZE + (rows?.length ?? 0),
+  );
 
   const { data: kams } = useAllKAMsForFilter();
   const { data: instructors } = useAllInstructorsForAssignment();
 
-  const handleExport = () => {
+  const handleExport = async () => {
     if (!rows || rows.length === 0) return;
-    const csv = lessonsToCSV(rows);
-    downloadCSV(defaultExportFilename(from, to), csv);
+    setIsExporting(true);
+    try {
+      const exportRows = await fetchLessonsDashboardExport(filters);
+      const csv = lessonsToCSV(exportRows);
+      downloadCSV(defaultExportFilename(from, to), csv);
+    } catch {
+      toast.error("Unable to export lessons. Please try again.");
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   const dateLabel =
@@ -136,6 +153,7 @@ export default function LessonsDashboard() {
         )}`;
 
   const clearFilters = () => {
+    setPage(1);
     setSelectedKamIds([]);
     setSelectedInstructorIds([]);
     setClassNumbersInput("");
@@ -187,9 +205,13 @@ export default function LessonsDashboard() {
             <Button
               size="sm"
               onClick={handleExport}
-              disabled={!rows || rows.length === 0}
+              disabled={isExporting || !rows || rows.length === 0}
             >
-              <Download className="mr-1 h-4 w-4" />
+              {isExporting ? (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              ) : (
+                <Download className="mr-1 h-4 w-4" />
+              )}
               Export CSV
             </Button>
           </div>
@@ -211,7 +233,10 @@ export default function LessonsDashboard() {
                 <button
                   key={k}
                   type="button"
-                  onClick={() => setPreset(k)}
+                  onClick={() => {
+                    setPage(1);
+                    setPreset(k);
+                  }}
                   className={cn(
                     "rounded px-2 py-1 text-xs font-medium transition-colors",
                     preset === k
@@ -229,14 +254,20 @@ export default function LessonsDashboard() {
                 <Input
                   type="date"
                   value={customFrom}
-                  onChange={(e) => setCustomFrom(e.target.value)}
+                  onChange={(e) => {
+                    setPage(1);
+                    setCustomFrom(e.target.value);
+                  }}
                   className="h-8 w-[10.5rem]"
                 />
                 <span className="text-xs text-muted-foreground">→</span>
                 <Input
                   type="date"
                   value={customTo}
-                  onChange={(e) => setCustomTo(e.target.value)}
+                  onChange={(e) => {
+                    setPage(1);
+                    setCustomTo(e.target.value);
+                  }}
                   className="h-8 w-[10.5rem]"
                 />
               </div>
@@ -252,7 +283,10 @@ export default function LessonsDashboard() {
                   label: k.name,
                 }))}
                 selected={selectedKamIds}
-                onChange={setSelectedKamIds}
+                onChange={(ids) => {
+                  setPage(1);
+                  setSelectedKamIds(ids);
+                }}
               />
               <MultiSelectPopover
                 label="Instructor"
@@ -261,13 +295,19 @@ export default function LessonsDashboard() {
                   label: i.name ?? "(unnamed)",
                 }))}
                 selected={selectedInstructorIds}
-                onChange={setSelectedInstructorIds}
+                onChange={(ids) => {
+                  setPage(1);
+                  setSelectedInstructorIds(ids);
+                }}
               />
               <div className="relative">
                 <Input
                   placeholder="Class # (e.g. 1, 2, 3)"
                   value={classNumbersInput}
-                  onChange={(e) => setClassNumbersInput(e.target.value)}
+                  onChange={(e) => {
+                    setPage(1);
+                    setClassNumbersInput(e.target.value);
+                  }}
                   className="h-8 w-48"
                 />
               </div>
@@ -276,7 +316,10 @@ export default function LessonsDashboard() {
                 <Input
                   placeholder="Customer name / phone"
                   value={search}
-                  onChange={(e) => setSearch(e.target.value)}
+                  onChange={(e) => {
+                    setPage(1);
+                    setSearch(e.target.value);
+                  }}
                   className="h-8 w-56 pl-8"
                 />
               </div>
@@ -292,13 +335,14 @@ export default function LessonsDashboard() {
                 <button
                   key={opt.key}
                   type="button"
-                  onClick={() =>
+                  onClick={() => {
+                    setPage(1);
                     setStatuses((prev) =>
                       prev.includes(opt.key)
                         ? prev.filter((s) => s !== opt.key)
                         : [...prev, opt.key],
-                    )
-                  }
+                    );
+                  }}
                   className={cn(
                     "rounded-full border px-2.5 py-0.5 text-xs transition-colors",
                     on
@@ -325,17 +369,19 @@ export default function LessonsDashboard() {
         </Card>
 
         {/* Result count + table */}
-        <Card>
+        <Card className="overflow-hidden">
           <CardContent className="p-0">
             <div className="flex items-center justify-between border-b p-3 text-xs text-muted-foreground">
               <span>
-                {isLoading
-                  ? "Loading…"
-                  : `Showing ${rows?.length ?? 0} lesson${
-                      (rows?.length ?? 0) === 1 ? "" : "s"
-                    }`}
+                {isError
+                  ? "Unable to load lessons"
+                  : isLoading
+                    ? "Loading…"
+                    : `Showing ${shownCount} lesson${
+                        shownCount === 1 ? "" : "s"
+                      } of ${totalCount}`}
               </span>
-              {rows && rows.length > 200 && (
+              {totalCount > 200 && (
                 <span className="text-amber-600">
                   Tip: narrow the date range or filters for faster export.
                 </span>
@@ -346,14 +392,21 @@ export default function LessonsDashboard() {
               <div className="flex h-40 items-center justify-center">
                 <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
               </div>
+            ) : isError ? (
+              <div
+                role="alert"
+                className="p-6 text-center text-sm text-destructive"
+              >
+                Unable to load lessons: {error.message}
+              </div>
             ) : !rows || rows.length === 0 ? (
               <div className="p-6 text-center text-sm text-muted-foreground">
                 No lessons match the current filters.
               </div>
             ) : (
-              <div className="max-h-[70vh] overflow-auto">
+              <div className="isolate max-h-[70vh] overflow-auto">
                 <table className="w-full text-sm">
-                  <thead className="sticky top-0 z-10 bg-muted/60 text-xs font-medium text-muted-foreground">
+                  <thead className="sticky top-0 z-10 bg-muted text-xs font-medium text-muted-foreground shadow-sm">
                     <tr>
                       <th className="px-3 py-2 text-left">Date</th>
                       <th className="px-3 py-2 text-left">Time</th>
@@ -445,6 +498,38 @@ export default function LessonsDashboard() {
                 </table>
               </div>
             )}
+            <nav
+              aria-label="Lessons pagination"
+              className="flex flex-wrap items-center justify-between gap-2 border-t p-3"
+            >
+              <span
+                aria-live="polite"
+                className="text-xs text-muted-foreground"
+              >
+                Page {page}
+                {data ? ` of ${totalPages}` : ""}
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPage((current) => Math.max(1, current - 1))}
+                  disabled={page === 1 || isFetching}
+                >
+                  Previous
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPage((current) => current + 1)}
+                  disabled={
+                    !data || isFetching || isError || page >= totalPages
+                  }
+                >
+                  Next
+                </Button>
+              </div>
+            </nav>
           </CardContent>
         </Card>
       </div>

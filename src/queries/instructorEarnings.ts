@@ -745,7 +745,7 @@ export function useUpdatePayoutStatus() {
 }
 
 // ---------------------------------------------------------------------------
-// Admin overview: all instructors with computed month earnings + pending + KAM
+// Admin overview: one page with computed month earnings + pending + KAM
 // ---------------------------------------------------------------------------
 
 export interface AdminEarningsRow {
@@ -760,138 +760,168 @@ export interface AdminEarningsRow {
   perClassRate: number;
 }
 
-export function useAdminEarningsOverview() {
+export const ADMIN_EARNINGS_PAGE_SIZE = 15;
+
+export interface AdminEarningsPage {
+  rows: AdminEarningsRow[];
+  totalCount: number;
+}
+
+export function useAdminEarningsOverview(page: number, search: string) {
+  const searchTerm = search.trim().toLowerCase();
   return useQuery({
-    queryKey: ["admin-earnings-overview"],
-    queryFn: async (): Promise<AdminEarningsRow[]> => {
-      const periods = getEarningPeriods();
-      const [
-        instrRes,
-        schedRes,
-        adjRes,
-        settingsRes,
-        kamLinksRes,
-        kamListRes,
-        config,
-      ] = await Promise.all([
-        supabase
-          .from("Instructor")
-          .select("id_instructor, name, phone")
-          .order("name", { ascending: true }),
-        supabase
-          .from("Schedule")
-          .select("instructor_id, date, isTentative")
-          .eq("status", "completed")
-          .gte("date", periods.thisMonth.start)
-          .lte("date", periods.payoutPeriod.end),
-        supabase
-          .from("instructor_earning_adjustment")
-          .select("instructor_id, amount, type, effective_date")
-          .gte("effective_date", periods.thisMonth.start)
-          .lte("effective_date", periods.payoutPeriod.end),
-        supabase.from("instructor_earning_settings").select("*"),
-        supabase.from("kam_instructor").select("instructor_id, kam_id"),
-        supabase.from("KAM").select("id, name, phone"),
-        fetchEarningConfig(),
-      ]);
-
-      if (instrRes.error) throw instrRes.error;
-      if (schedRes.error) throw schedRes.error;
-      if (adjRes.error) throw adjRes.error;
-
-      const datesByInstr = new Map<string, string[]>();
-      for (const s of (schedRes.data ?? []) as Array<{
-        instructor_id: string | null;
-        date: string;
-        isTentative: boolean | null;
-      }>) {
-        if (!s.instructor_id || s.isTentative) continue;
-        const arr = datesByInstr.get(s.instructor_id) ?? [];
-        arr.push(s.date);
-        datesByInstr.set(s.instructor_id, arr);
-      }
-
-      const adjByInstr = new Map<string, AdjustmentRow[]>();
-      for (const a of (adjRes.data ?? []) as Array<
-        AdjustmentRow & { instructor_id: string }
-      >) {
-        const arr = adjByInstr.get(a.instructor_id) ?? [];
-        arr.push({
-          amount: a.amount,
-          type: a.type,
-          effective_date: a.effective_date,
-        });
-        adjByInstr.set(a.instructor_id, arr);
-      }
-
-      const settingsByInstr = new Map<string, InstructorEarningSettings>();
-      for (const st of (settingsRes.data ??
-        []) as unknown as InstructorEarningSettings[]) {
-        settingsByInstr.set(st.instructor_id, st);
-      }
-
-      const kamById = new Map<string, { name: string; phone: string | null }>();
-      for (const k of (kamListRes.data ?? []) as Array<{
-        id: string;
-        name: string;
-        phone: string | null;
-      }>) {
-        kamById.set(k.id, { name: k.name, phone: k.phone });
-      }
-
-      const kamByInstr = new Map<
-        string,
-        { name: string; phone: string | null }
-      >();
-      for (const row of (kamLinksRes.data ?? []) as Array<{
-        instructor_id: string;
-        kam_id: string;
-      }>) {
-        const kam = kamById.get(row.kam_id);
-        if (kam && !kamByInstr.has(row.instructor_id)) {
-          kamByInstr.set(row.instructor_id, kam);
-        }
-      }
-
-      return (
-        (instrRes.data ?? []) as Array<{
-          id_instructor: string;
-          name: string | null;
-          phone: string | null;
-        }>
-      ).map((i) => {
-        const dates = datesByInstr.get(i.id_instructor) ?? [];
-        const adjustments = adjByInstr.get(i.id_instructor) ?? [];
-        const settings = settingsByInstr.get(i.id_instructor);
-        const rate = effectiveRate(
-          settings?.per_class_rate,
-          config.default_per_class_rate,
-        );
-        const month = computeTotals(
-          dates,
-          adjustments,
-          periods.thisMonth,
-          rate,
-        );
-        const pending = computeTotals(
-          dates,
-          adjustments,
-          periods.payoutPeriod,
-          rate,
-        );
-        const kam = kamByInstr.get(i.id_instructor);
-        return {
-          instructorId: i.id_instructor,
-          name: i.name,
-          phone: i.phone,
-          kamName: kam?.name ?? null,
-          kamPhone: kam?.phone ?? null,
-          classesThisMonth: month.classes,
-          earningsThisMonth: month.earnings,
-          pendingPayout: pending.earnings,
-          perClassRate: rate,
-        };
-      });
-    },
+    queryKey: ["admin-earnings-overview", page, searchTerm],
+    queryFn: () => fetchAdminEarningsPage(page, searchTerm),
   });
+}
+
+/** Also used by the on-demand CSV export; every request is limited to 15. */
+export async function fetchAdminEarningsPage(
+  page: number,
+  search: string,
+): Promise<AdminEarningsPage> {
+  const buildInstructorQuery = (head = false) =>
+    supabase.rpc(
+      "get_earnings_instructors",
+      { p_search: search.trim().toLowerCase() },
+      { count: "exact", head },
+    );
+  const from = (page - 1) * ADMIN_EARNINGS_PAGE_SIZE;
+  const instrRes = await buildInstructorQuery()
+    .order("name", { ascending: true })
+    .order("id_instructor", { ascending: true })
+    .range(from, from + ADMIN_EARNINGS_PAGE_SIZE - 1);
+
+  if (instrRes.error) {
+    // The last page can disappear if instructors are deleted. Let the UI
+    // clamp to the new last page without fetching any extra instructors.
+    if (instrRes.error.code === "PGRST103") {
+      const { count, error } = await buildInstructorQuery(true);
+      if (error) throw error;
+      return { rows: [], totalCount: count ?? 0 };
+    }
+    throw instrRes.error;
+  }
+  const instructors = instrRes.data ?? [];
+  const totalCount = instrRes.count ?? 0;
+  if (instructors.length === 0) return { rows: [], totalCount };
+  const instructorIds = instructors.map((i) => i.id_instructor);
+  const periods = getEarningPeriods();
+  const [schedRes, adjRes, settingsRes, kamLinksRes, config] =
+    await Promise.all([
+      supabase
+        .from("Schedule")
+        .select("instructor_id, date, isTentative")
+        .in("instructor_id", instructorIds)
+        .eq("status", "completed")
+        .gte("date", periods.thisMonth.start)
+        .lte("date", periods.payoutPeriod.end),
+      supabase
+        .from("instructor_earning_adjustment")
+        .select("instructor_id, amount, type, effective_date")
+        .in("instructor_id", instructorIds)
+        .gte("effective_date", periods.thisMonth.start)
+        .lte("effective_date", periods.payoutPeriod.end),
+      supabase
+        .from("instructor_earning_settings")
+        .select("*")
+        .in("instructor_id", instructorIds),
+      supabase
+        .from("kam_instructor")
+        .select("instructor_id, kam_id")
+        .in("instructor_id", instructorIds),
+      fetchEarningConfig(),
+    ]);
+
+  if (schedRes.error) throw schedRes.error;
+  if (adjRes.error) throw adjRes.error;
+
+  const kamIds = Array.from(
+    new Set((kamLinksRes.data ?? []).map((k) => k.kam_id)),
+  );
+  const kamListRes =
+    kamIds.length > 0
+      ? await supabase.from("KAM").select("id, name, phone").in("id", kamIds)
+      : { data: [] };
+
+  const datesByInstr = new Map<string, string[]>();
+  for (const s of (schedRes.data ?? []) as Array<{
+    instructor_id: string | null;
+    date: string;
+    isTentative: boolean | null;
+  }>) {
+    if (!s.instructor_id || s.isTentative) continue;
+    const arr = datesByInstr.get(s.instructor_id) ?? [];
+    arr.push(s.date);
+    datesByInstr.set(s.instructor_id, arr);
+  }
+
+  const adjByInstr = new Map<string, AdjustmentRow[]>();
+  for (const a of (adjRes.data ?? []) as Array<
+    AdjustmentRow & { instructor_id: string }
+  >) {
+    const arr = adjByInstr.get(a.instructor_id) ?? [];
+    arr.push({
+      amount: a.amount,
+      type: a.type,
+      effective_date: a.effective_date,
+    });
+    adjByInstr.set(a.instructor_id, arr);
+  }
+
+  const settingsByInstr = new Map<string, InstructorEarningSettings>();
+  for (const st of (settingsRes.data ??
+    []) as unknown as InstructorEarningSettings[]) {
+    settingsByInstr.set(st.instructor_id, st);
+  }
+
+  const kamById = new Map<string, { name: string; phone: string | null }>();
+  for (const k of (kamListRes.data ?? []) as Array<{
+    id: string;
+    name: string;
+    phone: string | null;
+  }>) {
+    kamById.set(k.id, { name: k.name, phone: k.phone });
+  }
+
+  const kamByInstr = new Map<string, { name: string; phone: string | null }>();
+  for (const row of (kamLinksRes.data ?? []) as Array<{
+    instructor_id: string;
+    kam_id: string;
+  }>) {
+    const kam = kamById.get(row.kam_id);
+    if (kam && !kamByInstr.has(row.instructor_id)) {
+      kamByInstr.set(row.instructor_id, kam);
+    }
+  }
+
+  const rows = instructors.map((i) => {
+    const dates = datesByInstr.get(i.id_instructor) ?? [];
+    const adjustments = adjByInstr.get(i.id_instructor) ?? [];
+    const settings = settingsByInstr.get(i.id_instructor);
+    const rate = effectiveRate(
+      settings?.per_class_rate,
+      config.default_per_class_rate,
+    );
+    const month = computeTotals(dates, adjustments, periods.thisMonth, rate);
+    const pending = computeTotals(
+      dates,
+      adjustments,
+      periods.payoutPeriod,
+      rate,
+    );
+    const kam = kamByInstr.get(i.id_instructor);
+    return {
+      instructorId: i.id_instructor,
+      name: i.name,
+      phone: i.phone,
+      kamName: kam?.name ?? null,
+      kamPhone: kam?.phone ?? null,
+      classesThisMonth: month.classes,
+      earningsThisMonth: month.earnings,
+      pendingPayout: pending.earnings,
+      perClassRate: rate,
+    };
+  });
+  return { rows, totalCount };
 }

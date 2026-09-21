@@ -1,5 +1,5 @@
 import { ArrowLeft, Download, Loader2, Search } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
@@ -11,8 +11,10 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  ADMIN_EARNINGS_PAGE_SIZE,
   AdminEarningsRow,
   EarningProgram,
+  fetchAdminEarningsPage,
   ProgramStatusPill,
   useAdminEarningsOverview,
   useEarningConfig,
@@ -71,35 +73,48 @@ export default function InstructorEarnings() {
 }
 
 function InstructorsTab() {
-  const { data: rows, isLoading } = useAdminEarningsOverview();
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const { data, isLoading, isFetching, isError } = useAdminEarningsOverview(
+    page,
+    search,
+  );
+  const rows = data?.rows ?? [];
+  const totalPages = Math.max(
+    1,
+    Math.ceil((data?.totalCount ?? 0) / ADMIN_EARNINGS_PAGE_SIZE),
+  );
+  const [isExporting, setIsExporting] = useState(false);
   const [selected, setSelected] = useState<AdminEarningsRow | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return rows ?? [];
-    return (rows ?? []).filter(
-      (r) =>
-        (r.name ?? "").toLowerCase().includes(q) ||
-        (r.phone ?? "").toLowerCase().includes(q) ||
-        (r.kamName ?? "").toLowerCase().includes(q),
-    );
-  }, [rows, search]);
+  useEffect(() => {
+    if (data && page > totalPages) setPage(totalPages);
+  }, [data, page, totalPages]);
 
-  const exportCsv = () => {
-    const today = new Date().toISOString().split("T")[0];
-    downloadCsv(earningsCsvFilename(today), buildEarningsCsv(filtered));
-    toast.success("Exported earnings CSV");
+  const exportCsv = async () => {
+    setIsExporting(true);
+    try {
+      // Preserve export of all search matches, not just the visible page.
+      // Fetch the remaining pages only after an explicit Export click.
+      const firstPage = await fetchAdminEarningsPage(1, search);
+      const exportRows = [...firstPage.rows];
+      const exportPages = Math.ceil(
+        firstPage.totalCount / ADMIN_EARNINGS_PAGE_SIZE,
+      );
+      for (let exportPage = 2; exportPage <= exportPages; exportPage++) {
+        const result = await fetchAdminEarningsPage(exportPage, search);
+        exportRows.push(...result.rows);
+      }
+      const today = new Date().toISOString().split("T")[0];
+      downloadCsv(earningsCsvFilename(today), buildEarningsCsv(exportRows));
+      toast.success("Exported earnings CSV");
+    } catch {
+      toast.error("Failed to export earnings CSV");
+    } finally {
+      setIsExporting(false);
+    }
   };
-
-  if (isLoading) {
-    return (
-      <div className="flex min-h-[40vh] items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-primary" />
-      </div>
-    );
-  }
 
   return (
     <>
@@ -109,7 +124,10 @@ function InstructorsTab() {
           <Input
             placeholder="Search by instructor, phone, or KAM…"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setPage(1);
+            }}
             className="pl-10"
           />
         </div>
@@ -117,9 +135,13 @@ function InstructorsTab() {
           variant="outline"
           size="sm"
           onClick={exportCsv}
-          disabled={filtered.length === 0}
+          disabled={rows.length === 0 || isFetching || isExporting}
         >
-          <Download className="mr-1 h-4 w-4" />
+          {isExporting ? (
+            <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+          ) : (
+            <Download className="mr-1 h-4 w-4" />
+          )}
           Export
         </Button>
       </div>
@@ -138,7 +160,7 @@ function InstructorsTab() {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {filtered.map((r) => (
+            {rows.map((r) => (
               <tr
                 key={r.instructorId}
                 onClick={() => {
@@ -160,15 +182,45 @@ function InstructorsTab() {
                 </td>
               </tr>
             ))}
-            {filtered.length === 0 && (
+            {rows.length === 0 && (
               <tr>
                 <td colSpan={7} className="p-6 text-center text-gray-400">
-                  No instructors found.
+                  {isLoading ? (
+                    <Loader2 className="mx-auto h-8 w-8 animate-spin text-primary" />
+                  ) : isError ? (
+                    "Failed to load instructors."
+                  ) : (
+                    "No instructors found."
+                  )}
                 </td>
               </tr>
             )}
           </tbody>
         </table>
+      </div>
+
+      <div className="mt-4 flex items-center justify-end gap-3">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setPage((current) => Math.max(1, current - 1))}
+          disabled={page <= 1 || isFetching}
+        >
+          Previous
+        </Button>
+        <span className="text-sm text-gray-500">
+          Page {page} of {totalPages}
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            setPage((current) => Math.min(totalPages, current + 1))
+          }
+          disabled={page >= totalPages || isFetching || isError}
+        >
+          Next
+        </Button>
       </div>
 
       <InstructorEarningsDrawer

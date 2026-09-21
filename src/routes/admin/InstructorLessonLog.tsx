@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
 import {
   ArrowLeft,
@@ -11,7 +11,7 @@ import {
   Search,
   User,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
@@ -34,6 +34,8 @@ import {
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/queries/userManagement";
 import { maskPhoneNumber } from "@/utils/phoneMasking";
+
+const INSTRUCTOR_PAGE_SIZE = 15;
 
 // ─── helpers ────────────────────────────────────────────────────
 function fmtTimestamp(ts: string | null): string {
@@ -119,25 +121,118 @@ export default function InstructorLessonLog() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [dateFilter, setDateFilter] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+  const hasScrolledRef = useRef(false);
 
   // Check if user has permission to view unmasked phone numbers
   const canViewUnmaskedPhoneNumbers =
     currentUser?.permissions?.includes("view_unmasked_phone_numbers") || false;
 
-  // ── fetch all instructors ──
-  const { data: instructors, isLoading } = useQuery({
-    queryKey: ["admin-instructor-lesson-log"],
-    queryFn: async () => {
-      // Also fetch a count of their schedules so we can show it in the list
-      const { data, error } = await supabase
+  // ── fetch one instructor batch, searching before database pagination ──
+  const {
+    data: instructorPages,
+    isLoading,
+    isFetching,
+    isFetchingNextPage,
+    isFetchNextPageError,
+    hasNextPage,
+    fetchNextPage,
+  } = useInfiniteQuery({
+    queryKey: ["admin-instructor-lesson-log", searchTerm.toLowerCase()],
+    // Opening the page or revisiting a search starts with only the first batch.
+    gcTime: 0,
+    initialPageParam: 0,
+    queryFn: async ({ pageParam, signal }) => {
+      let query = supabase
         .from("Instructor")
         .select("id_instructor, name, phone, email")
-        .order("name");
+        .order("name")
+        .order("id_instructor")
+        // One lookahead row detects the end without a separate count query.
+        .range(pageParam, pageParam + INSTRUCTOR_PAGE_SIZE)
+        .abortSignal(signal);
 
+      if (searchTerm) {
+        // Preserve literal substring search, including punctuation/wildcards.
+        const pattern = `%${searchTerm.toLowerCase().replace(/[\\%_]/g, "\\$&")}%`;
+        const value = `"${pattern.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+        query = query.or(
+          `name.ilike.${value},phone.ilike.${value},email.ilike.${value}`,
+        );
+      }
+
+      const { data, error } = await query;
       if (error) throw error;
-      return data ?? [];
+      const rows = data ?? [];
+      return {
+        instructors: rows.slice(0, INSTRUCTOR_PAGE_SIZE),
+        hasMore: rows.length > INSTRUCTOR_PAGE_SIZE,
+        nextOffset: pageParam + INSTRUCTOR_PAGE_SIZE,
+      };
     },
+    getNextPageParam: (lastPage) =>
+      lastPage.hasMore ? lastPage.nextOffset : undefined,
   });
+
+  const instructors = useMemo(
+    () => instructorPages?.pages.flatMap((page) => page.instructors) ?? [],
+    [instructorPages],
+  );
+
+  useEffect(() => {
+    hasScrolledRef.current = false;
+  }, [searchTerm]);
+
+  useEffect(() => {
+    const sentinel = loadMoreRef.current;
+    if (!sentinel || !instructorPages || !hasNextPage || isFetching) return;
+
+    let requested = false;
+    const loadMore = () => {
+      if (requested) return;
+      requested = true;
+      observer.disconnect();
+      void fetchNextPage({ cancelRefetch: false });
+    };
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (
+          entry.isIntersecting &&
+          hasScrolledRef.current &&
+          !isFetchNextPageError
+        ) {
+          loadMore();
+        }
+      },
+      { rootMargin: "0px 0px 200px" },
+    );
+    const onScroll = (event: Event) => {
+      // Ignore scrolling inside unrelated controls or lesson details.
+      if (event.target instanceof Element && !event.target.contains(sentinel))
+        return;
+      hasScrolledRef.current = true;
+      const bounds = sentinel.getBoundingClientRect();
+      if (bounds.top <= window.innerHeight + 200 && bounds.bottom >= 0)
+        loadMore();
+    };
+    // Even a tall viewport must wait for scrolling before fetching more.
+    window.addEventListener("scroll", onScroll, {
+      capture: true,
+      passive: true,
+    });
+    observer.observe(sentinel);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [
+    fetchNextPage,
+    hasNextPage,
+    instructorPages,
+    isFetchNextPageError,
+    isFetching,
+    searchTerm,
+  ]);
 
   // ── fetch schedules for expanded instructor ──
   const { data: schedules, isLoading: schedulesLoading } = useQuery({
@@ -185,19 +280,6 @@ export default function InstructorLessonLog() {
     },
     enabled: !!expandedId,
   });
-
-  // ── client-side search filter ──
-  const filtered = useMemo(() => {
-    if (!instructors) return [];
-    if (!searchTerm) return instructors;
-    const q = searchTerm.toLowerCase();
-    return instructors.filter(
-      (i: any) =>
-        i.name?.toLowerCase().includes(q) ||
-        i.phone?.includes(q) ||
-        i.email?.toLowerCase().includes(q),
-    );
-  }, [instructors, searchTerm]);
 
   // ── stats for expanded instructor ──
   const stats = useMemo(() => {
@@ -286,13 +368,13 @@ export default function InstructorLessonLog() {
       {/* Instructor List */}
       {!isLoading && (
         <div className="space-y-3">
-          {filtered.length === 0 && (
+          {instructors.length === 0 && (
             <div className="py-12 text-center text-muted-foreground">
               No instructors found
             </div>
           )}
 
-          {filtered.map((inst) => {
+          {instructors.map((inst) => {
             const isOpen = expandedId === inst.id_instructor;
 
             return (
@@ -572,6 +654,12 @@ export default function InstructorLessonLog() {
               </Card>
             );
           })}
+          {hasNextPage && <div ref={loadMoreRef} className="h-px" />}
+          {isFetchingNextPage && (
+            <div className="flex justify-center py-4">
+              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+            </div>
+          )}
         </div>
       )}
     </div>
