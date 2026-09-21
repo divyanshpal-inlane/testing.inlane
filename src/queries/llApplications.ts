@@ -1,8 +1,5 @@
 import {
-  type InfiniteData,
   type QueryClient,
-  useInfiniteQuery,
-  type UseInfiniteQueryResult,
   useMutation,
   useQuery,
   useQueryClient,
@@ -99,9 +96,9 @@ export interface LLPipelineEvent {
 
 // ── Backend-driven pagination (LLDL Pipeline) ────────────────────────────
 // The admin list never downloads the whole table. Every request asks the
-// database for one page (10 rows) and applies the active queue/search/route/
+// database for one page (15 rows) and applies the active queue/search/route/
 // date filters in the WHERE clause (PostgREST LIMIT/OFFSET + filters). The
-// page can never return more than `limit` rows and pagination reaches well
+// page can never return more than 15 rows and pagination reaches well
 // past PostgREST's 1000-row response cap.
 
 export type LLPipelineQueueKey = "all" | LLPhaseKey | "escalations";
@@ -119,17 +116,7 @@ export interface LLPipelineFilters {
   dateTo: string;
 }
 
-export const DEFAULT_LL_PIPELINE_FILTERS: LLPipelineFilters = {
-  queue: "all",
-  stage: "all",
-  search: "",
-  route: "all",
-  dateField: "updated_at",
-  dateFrom: "",
-  dateTo: "",
-};
-
-const LL_PAGE_SIZE = 10;
+export const LL_PIPELINE_PAGE_SIZE = 15;
 
 /** Every storable status that belongs to a pipeline phase (incl. failures). */
 function llStatusesInPhase(phase: LLPhaseKey): string[] {
@@ -162,104 +149,85 @@ function applyLLQueueFilter(query: any, queue: LLPipelineQueueKey) {
       `escalated.is.true,status.in.(${LL_ESCALATION_STATUSES.join(",")})`,
     );
   }
-  if (queue !== "all") return query.in("status", llStatusesInPhase(queue));
+
+  if (queue !== "all") {
+    return query.in("status", llStatusesInPhase(queue));
+  }
+
   return query;
 }
 
-/**
- * Search OR-clauses (PostgREST `or=(…)` form) on the APPLICATIONS' own columns.
- * PostgREST on this project will not parse dotted sub-resource fields
- * (`Learner.name.ilike…`) inside `or()` logical operators, so embedded-learner
- * matches are resolved to `learner_id` values up front and folded in here as a
- * root-column `learner_id.in.(…)` clause instead. Route badges ("A — Out of
- * state") are derived client-side, so a term matching a route name/code/label
- * is expanded onto its batch codes for a DB-level match.
- */
-function llPipelineSearchOr(term: string): string[] {
-  // Commas are PostgREST's or() predicate separators — a comma inside an
-  // operand breaks parsing (PGRST100), so strip them before building clauses.
-  const t = term.trim().toLowerCase().replace(/,/g, "");
+/** Expand derived route labels into database batch-code matches. */
+function llPipelineSearchRoutes(term: string): string[] {
+  const t = term.trim().toLowerCase();
   if (!t) return [];
-  const clauses = [
-    `application_number.ilike.%${t}%`,
-    `ll_number.ilike.%${t}%`,
-    `batch_code.ilike.%${t}%`,
-  ];
-  const routeCodes = LL_SEGREGATION_ROUTES.filter(
-    (r) =>
-      r.code.toLowerCase() === t ||
-      r.name.toLowerCase().includes(t) ||
-      llSegregationRouteLabel(r.code).toLowerCase().includes(t),
-  ).map((r) => r.code);
-  if (routeCodes.length)
-    clauses.push(`batch_code.in.(${routeCodes.join(",")})`);
-  return clauses;
-}
 
-/** Resolve a search term against learner name/phone/email → matching IDs. */
-async function llPipelineLearnerIds(term: string): Promise<string[]> {
-  // See llPipelineSearchOr — commas break or() parsing, so strip them here too
-  // (the term flows into a name/phone/email or() below).
-  const t = term.trim().toLowerCase().replace(/,/g, "");
-  if (!t) return [];
-  const { data, error } = await sb
-    .from("Learner")
-    .select("id")
-    .or(`name.ilike.%${t}%,phone.ilike.%${t}%,email.ilike.%${t}%`)
-    .limit(300);
-  if (error) throw error;
-  return (data ?? []).map((r: { id: string }) => r.id);
+  return LL_SEGREGATION_ROUTES.filter(
+    (route) =>
+      route.code.toLowerCase() === t ||
+      route.name.toLowerCase().includes(t) ||
+      llSegregationRouteLabel(route.code).toLowerCase().includes(t),
+  ).map((route) => route.code);
 }
 
 async function fetchLLApplicationsPage(opts: {
   page: number;
-  limit: number;
   filters: LLPipelineFilters;
+  signal: AbortSignal;
 }): Promise<{ data: LLApplication[]; total: number }> {
-  const { page, limit, filters } = opts;
-  const from = (page - 1) * limit;
+  const { page, filters, signal } = opts;
+  const from = (page - 1) * LL_PIPELINE_PAGE_SIZE;
+  const buildQuery = (head = false) => {
+    // The SQL function returns the table type, preserving Learner embedding.
+    // Search, exact count and the 15-row range use a single database request.
+    let q = sb.rpc(
+      "get_ll_pipeline_applications",
+      {
+        search_term: filters.search.trim(),
+        search_routes: llPipelineSearchRoutes(filters.search),
+      },
+      { count: "exact", head },
+    );
 
-  let q = sb
-    .from("ll_applications")
-    .select("*, Learner(id, name, phone, email, area)", { count: "exact" })
+    q = q.select("*, Learner(id, name, phone, email, area)");
+    if (filters.queue === "escalations") {
+      q = q.or(
+        `escalated.is.true,status.in.(${Object.keys(LL_FAILURE_STAGES).join(",")})`,
+      );
+    } else if (filters.queue !== "all") {
+      q = q.in("status", llStatusesInPhase(filters.queue));
+    }
+    if (filters.route !== "all") {
+      q = q.eq("batch_code", filters.route);
+    }
+    if (filters.dateFrom) {
+      // Local-date aware bounds (IST) so a date filter includes the whole day.
+      q = q.gte(filters.dateField, `${filters.dateFrom}T00:00:00+05:30`);
+    }
+    if (filters.dateTo) {
+      q = q.lte(filters.dateField, `${filters.dateTo}T23:59:59+05:30`);
+    }
+    return q.abortSignal(signal);
+  };
+
+  const { data, error, count } = await buildQuery()
     .order("updated_at", { ascending: false })
     .order("id", { ascending: false })
-    .range(from, from + limit - 1);
-
-  q = applyLLQueueFilter(q, filters.queue);
-  if (filters.stage !== "all") q = q.eq("status", filters.stage);
-  if (filters.route !== "all") {
-    q = q.eq("batch_code", filters.route);
+    .range(from, from + LL_PIPELINE_PAGE_SIZE - 1);
+  // Status changes/deletions can shrink the last page. PostgREST doesn't give
+  // a usable count on PGRST103, so recover it with a count-only request.
+  if (error?.code === "PGRST103" && from > 0) {
+    const { count: remainingCount, error: countError } = await buildQuery(true);
+    if (countError) throw countError;
+    return { data: [], total: remainingCount ?? 0 };
   }
-  if (filters.dateFrom) {
-    // Local-date aware bounds (IST) so a date filter includes the whole day.
-    q = q.gte(filters.dateField, `${filters.dateFrom}T00:00:00+05:30`);
-  }
-  if (filters.dateTo) {
-    q = q.lte(filters.dateField, `${filters.dateTo}T23:59:59+05:30`);
-  }
-  const searchClauses = llPipelineSearchOr(filters.search);
-  if (searchClauses.length) {
-    const learnerIds = await llPipelineLearnerIds(filters.search);
-    if (learnerIds.length)
-      searchClauses.push(`learner_id.in.(${learnerIds.join(",")})`);
-    q = q.or(searchClauses.join(","));
-  } else if (filters.search.trim()) {
-    // Term matches nothing on the application's own columns — maybe it is a
-    // learner name/phone/email. Resolve learner ids separately.
-    const learnerIds = await llPipelineLearnerIds(filters.search);
-    if (learnerIds.length) {
-      q = q.or(`learner_id.in.(${learnerIds.join(",")})`);
-    } else {
-      return { data: [], total: 0 };
-    }
-  }
-
-  const { data, error, count } = await q;
   if (error) {
-    // PGRST103 = requested page is past the end (rows were deleted between
-    // fetches). Treat as an empty last page instead of throwing.
-    if (error.code === "PGRST103") return { data: [], total: count ?? 0 };
+    if (error.code === "PGRST202") {
+      throw new Error(
+        "Apply the LL pipeline pagination migration " +
+          "(20260918000700_ll_pipeline_pagination.sql) in Supabase.",
+      );
+    }
     throw error;
   }
   return {
@@ -268,49 +236,44 @@ async function fetchLLApplicationsPage(opts: {
   };
 }
 
-export interface LLPipelineQueryPage {
-  data: LLApplication[];
-  page: number;
-  total: number;
-  hasMore: boolean;
+/** Only the active tab's current 15-row page is fetched, never accumulated. */
+export function useLLApplicationsPage(
+  filters: LLPipelineFilters,
+  page: number,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["ll-applications", "page", filters, page],
+    queryFn: ({ signal }) => fetchLLApplicationsPage({ page, filters, signal }),
+    enabled,
+    staleTime: 30 * 1000,
+    retry: (failureCount, error) =>
+      !(error instanceof Error) &&
+      (error as { code?: string }).code !== "42501" &&
+      failureCount < 2,
+  });
 }
 
-/**
- * LLDL Pipeline list — 10 rows per request, filters applied by the database.
- * Changing `filters` creates a new query key, so switching tabs, routes,
- * dates, or the search term resets pagination and starts again from page 1.
- */
-export function useLLApplicationsInfinite(
-  filters: LLPipelineFilters,
-): UseInfiniteQueryResult<InfiniteData<LLPipelineQueryPage, number>, Error> {
-  return useInfiniteQuery<
-    LLPipelineQueryPage,
-    Error,
-    InfiniteData<LLPipelineQueryPage, number>,
-    ["ll-applications", LLPipelineFilters],
-    number
-  >({
-    queryKey: ["ll-applications", filters],
-    initialPageParam: 1,
-    queryFn: async ({
-      pageParam,
-    }: {
-      pageParam: number;
-    }): Promise<LLPipelineQueryPage> => {
-      const { data, total } = await fetchLLApplicationsPage({
-        page: pageParam,
-        limit: LL_PAGE_SIZE,
-        filters,
-      });
-      return {
-        data,
-        page: pageParam,
-        total,
-        hasMore: pageParam * LL_PAGE_SIZE < total,
-      };
+/** Keep selected details/actions available even outside the current page. */
+export function useLLApplication(
+  applicationId: string | null,
+  pageApplication?: LLApplication,
+) {
+  return useQuery({
+    queryKey: ["ll-applications", "detail", applicationId],
+    queryFn: async ({ signal }): Promise<LLApplication | null> => {
+      if (!applicationId) return null;
+      const { data, error } = await sb
+        .from("ll_applications")
+        .select("*, Learner(id, name, phone, email, area)")
+        .eq("id", applicationId)
+        .abortSignal(signal)
+        .single();
+      if (error) throw error;
+      return data;
     },
-    getNextPageParam: (lastPage) =>
-      lastPage.hasMore ? lastPage.page + 1 : undefined,
+    initialData: pageApplication,
+    enabled: !!applicationId && !pageApplication,
     staleTime: 30 * 1000,
   });
 }
@@ -410,7 +373,7 @@ export function useLLLearnerSearch(term: string) {
   return useQuery({
     queryKey: ["ll-learner-search", term],
     queryFn: async () => {
-      // Strip commas — they break or() parsing (PGRST100), see llPipelineSearchOr.
+      // Strip commas — they break or() parsing (PGRST100).
       const clean = term.trim().replace(/,/g, "");
       const like = `%${clean}%`;
       const { data, error } = await sb
