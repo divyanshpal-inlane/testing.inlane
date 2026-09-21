@@ -7,7 +7,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useUser } from "@/context/auth-context";
 import { usePhoneVisibility } from "@/context/phone-visibility-context";
 import { supabase } from "@/lib/supabaseClient";
-import { maskCarNumber } from "@/utils/phoneMasking";
 import {
   useLearner,
   useLearnerEnrollment,
@@ -15,6 +14,7 @@ import {
 } from "@/queries/learner";
 import { usePaymentsByLearner } from "@/queries/payment";
 import { useRescheduleLearnerLessonRequests } from "@/queries/schedule-requests";
+import { maskCarNumber } from "@/utils/phoneMasking";
 
 interface Message {
   role: "user" | "assistant";

@@ -565,7 +565,10 @@ function KamDetailDrawer({
                       className="pl-8"
                     />
                   </div>
-                  <ScrollArea className="h-72 rounded border" style={{ height: "288px" }}>
+                  <ScrollArea
+                    className="h-72 rounded border"
+                    style={{ height: "288px" }}
+                  >
                     {candidates.length === 0 ? (
                       <div className="p-3 text-sm text-muted-foreground">
                         {(allInstructors?.length ?? 0) === 0

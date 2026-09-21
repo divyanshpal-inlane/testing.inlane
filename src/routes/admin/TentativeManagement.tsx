@@ -420,9 +420,9 @@ export default function TentativeScheduleInfo2() {
 
       console.log("📊 TOTAL SCHEDULES FROM DB:", allData.length);
       if (allData.length > 0) {
-        const dates = allData.map(s => s.date).sort();
+        const dates = allData.map((s) => s.date).sort();
         console.log("📅 Date range:", dates[0], "to", dates[dates.length - 1]);
-        const months = new Set(allData.map(s => s.date.substring(0, 7)));
+        const months = new Set(allData.map((s) => s.date.substring(0, 7)));
         console.log("🗓️ Months present:", Array.from(months).sort());
       }
       console.log("tentativeSchedulesByLearners:", allData);

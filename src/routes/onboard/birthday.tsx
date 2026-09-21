@@ -43,74 +43,80 @@ export default function Birthday() {
   const navigate = useNavigate();
   const { phone } = useUser();
 
-   const handleContinueClick = useCallback(async () => {
-     setError("");
+  const handleContinueClick = useCallback(async () => {
+    setError("");
 
-     if (!day || !month || !year) {
-       setError("Please select your full date of birth");
-       return;
-     }
+    if (!day || !month || !year) {
+      setError("Please select your full date of birth");
+      return;
+    }
 
-     const dayNum = parseInt(day);
-     const monthIndex = months.indexOf(month);
-     const yearNum = parseInt(year);
+    const dayNum = parseInt(day);
+    const monthIndex = months.indexOf(month);
+    const yearNum = parseInt(year);
 
-     // Guard against impossible dates (e.g. 31 Feb).
-     const candidate = new Date(yearNum, monthIndex, dayNum);
-     if (
-       candidate.getFullYear() !== yearNum ||
-       candidate.getMonth() !== monthIndex ||
-       candidate.getDate() !== dayNum
-     ) {
-       setError("That date doesn't exist. Please check the day and month.");
-       return;
-     }
+    // Guard against impossible dates (e.g. 31 Feb).
+    const candidate = new Date(yearNum, monthIndex, dayNum);
+    if (
+      candidate.getFullYear() !== yearNum ||
+      candidate.getMonth() !== monthIndex ||
+      candidate.getDate() !== dayNum
+    ) {
+      setError("That date doesn't exist. Please check the day and month.");
+      return;
+    }
 
-     // ── VERIFY PHONE EXISTS ──────────────────────────────────────────────
-     if (!phone) {
-       setError("Phone number not found. Please log in again.");
-       return;
-     }
+    // ── VERIFY PHONE EXISTS ──────────────────────────────────────────────
+    if (!phone) {
+      setError("Phone number not found. Please log in again.");
+      return;
+    }
 
-     console.log("[BIRTHDAY] Proceeding with DOB update for phone:", phone);
+    console.log("[BIRTHDAY] Proceeding with DOB update for phone:", phone);
 
-     try {
-       // Check if learner already has DOB filled to prevent overwriting
-       const alreadyHasDOB = await learnerHasDOB(phone);
-       
-       if (alreadyHasDOB) {
-         console.warn("[BIRTHDAY] ⚠️ Learner already has DOB filled");
-         setError("You have already entered your date of birth. If you need to change it, please contact support.");
-         return;
-       }
+    try {
+      // Check if learner already has DOB filled to prevent overwriting
+      const alreadyHasDOB = await learnerHasDOB(phone);
 
-       const dob = `${yearNum}-${String(monthIndex + 1).padStart(2, "0")}-${String(
-         dayNum,
-       ).padStart(2, "0")}`;
+      if (alreadyHasDOB) {
+        console.warn("[BIRTHDAY] ⚠️ Learner already has DOB filled");
+        setError(
+          "You have already entered your date of birth. If you need to change it, please contact support.",
+        );
+        return;
+      }
 
-       console.log("[BIRTHDAY] Updating learner DOB with phone:", { phone, dob });
+      const dob = `${yearNum}-${String(monthIndex + 1).padStart(2, "0")}-${String(
+        dayNum,
+      ).padStart(2, "0")}`;
 
-       // Update the existing learner record created during signup
-       mutate(
-         { dob },
-         {
-           onSuccess: () => {
-             console.log("[BIRTHDAY] ✅ DOB updated successfully");
-             navigate("/onboard/aadhar");
-           },
-           onError: (error) => {
-             console.error("[BIRTHDAY] ❌ Failed to update DOB:", error);
-             setError("Failed to save your date of birth. Please try again.");
-           },
-         },
-       );
-     } catch (err: any) {
-       console.error("[BIRTHDAY] ❌ Error during DOB update:", err);
-       setError(
-         err.message || "An error occurred while updating your information. Please try again."
-       );
-     }
-   }, [day, month, year, mutate, navigate, phone]);
+      console.log("[BIRTHDAY] Updating learner DOB with phone:", {
+        phone,
+        dob,
+      });
+
+      // Update the existing learner record created during signup
+      mutate(
+        { dob },
+        {
+          onSuccess: () => {
+            console.log("[BIRTHDAY] ✅ DOB updated successfully");
+            navigate("/onboard/aadhar");
+          },
+          onError: (error) => {
+            console.error("[BIRTHDAY] ❌ Failed to update DOB:", error);
+            setError("Failed to save your date of birth. Please try again.");
+          },
+        },
+      );
+    } catch (err: any) {
+      console.error("[BIRTHDAY] ❌ Error during DOB update:", err);
+      setError(
+        err.message ||
+          "An error occurred while updating your information. Please try again.",
+      );
+    }
+  }, [day, month, year, mutate, navigate, phone]);
 
   return (
     <div className="flex h-full w-full flex-col rounded-md">

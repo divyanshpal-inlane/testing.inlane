@@ -153,7 +153,9 @@ export default function OnboardingSignature() {
       return;
     }
     if (!user?.id || !learner?.id) {
-      setError("Your learner account could not be loaded. Please log in again.");
+      setError(
+        "Your learner account could not be loaded. Please log in again.",
+      );
       return;
     }
 
@@ -161,12 +163,9 @@ export default function OnboardingSignature() {
     let storagePath: string | null = null;
     try {
       const signatureFile =
-        mode === "draw"
-          ? await canvasBlob(canvasRef.current!)
-          : uploadedFile!;
+        mode === "draw" ? await canvasBlob(canvasRef.current!) : uploadedFile!;
       const mimeType = mode === "draw" ? "image/png" : signatureFile.type;
-      const extension =
-        mimeType === "image/jpeg" ? "jpg" : "png";
+      const extension = mimeType === "image/jpeg" ? "jpg" : "png";
       storagePath = `${user.id}/${learner.id}/${crypto.randomUUID()}.${extension}`;
 
       const { error: uploadError } = await supabase.storage
@@ -232,7 +231,8 @@ export default function OnboardingSignature() {
         <div className="px-6 pb-7">
           <h1 className="mb-2 text-2xl font-semibold">RTO e-signature</h1>
           <p className="text-sm text-primary-foreground/90">
-            Complete your onboarding by submitting your signature for required RTO documentation.
+            Complete your onboarding by submitting your signature for required
+            RTO documentation.
           </p>
         </div>
       </div>
@@ -242,9 +242,12 @@ export default function OnboardingSignature() {
           <div className="flex gap-3">
             <FileText className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
             <div>
-              <h2 className="font-semibold text-gray-900">Why we need your signature</h2>
+              <h2 className="font-semibold text-gray-900">
+                Why we need your signature
+              </h2>
               <p className="mt-1">
-                Your signature is required for RTO documentation, including Form 14 and Form 15, and to comply with applicable RTO requirements.
+                Your signature is required for RTO documentation, including Form
+                14 and Form 15, and to comply with applicable RTO requirements.
               </p>
             </div>
           </div>
@@ -253,7 +256,8 @@ export default function OnboardingSignature() {
             <div>
               <h2 className="font-semibold text-gray-900">How we use it</h2>
               <p className="mt-1">
-                We will use your signature only for the stated documentation purpose and will handle it as sensitive personal information.
+                We will use your signature only for the stated documentation
+                purpose and will handle it as sensitive personal information.
               </p>
             </div>
           </div>
@@ -286,7 +290,9 @@ export default function OnboardingSignature() {
             onClick={() => setMode("draw")}
             className={cn(
               "flex items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium",
-              mode === "draw" ? "bg-white text-primary shadow" : "text-gray-600",
+              mode === "draw"
+                ? "bg-white text-primary shadow"
+                : "text-gray-600",
             )}
           >
             <PenLine className="h-4 w-4" /> Draw
@@ -296,7 +302,9 @@ export default function OnboardingSignature() {
             onClick={() => setMode("upload")}
             className={cn(
               "flex items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium",
-              mode === "upload" ? "bg-white text-primary shadow" : "text-gray-600",
+              mode === "upload"
+                ? "bg-white text-primary shadow"
+                : "text-gray-600",
             )}
           >
             <Upload className="h-4 w-4" /> Upload
@@ -308,7 +316,7 @@ export default function OnboardingSignature() {
             <div className="overflow-hidden rounded-xl border-2 border-dashed border-gray-300 bg-white">
               <canvas
                 ref={canvasRef}
-                className="h-48 w-full touch-none cursor-crosshair"
+                className="h-48 w-full cursor-crosshair touch-none"
                 aria-label="Draw your signature"
                 onPointerDown={startDrawing}
                 onPointerMove={draw}
@@ -318,7 +326,12 @@ export default function OnboardingSignature() {
             </div>
             <div className="flex items-center justify-between text-xs text-muted-foreground">
               <span>Sign inside the box using your finger or pointer.</span>
-              <Button type="button" size="sm" variant="ghost" onClick={prepareCanvas}>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={prepareCanvas}
+              >
                 <Eraser className="mr-1 h-4 w-4" /> Clear
               </Button>
             </div>
@@ -326,12 +339,18 @@ export default function OnboardingSignature() {
         ) : (
           <label className="flex min-h-48 cursor-pointer flex-col items-center justify-center overflow-hidden rounded-xl border-2 border-dashed border-gray-300 bg-gray-50 p-4 text-center">
             {previewUrl ? (
-              <img src={previewUrl} alt="Signature preview" className="max-h-40 object-contain" />
+              <img
+                src={previewUrl}
+                alt="Signature preview"
+                className="max-h-40 object-contain"
+              />
             ) : (
               <>
                 <Upload className="mb-2 h-8 w-8 text-primary" />
                 <span className="font-medium">Choose signature image</span>
-                <span className="mt-1 text-xs text-muted-foreground">PNG or JPG · maximum 5 MB</span>
+                <span className="mt-1 text-xs text-muted-foreground">
+                  PNG or JPG · maximum 5 MB
+                </span>
               </>
             )}
             <input
@@ -350,12 +369,17 @@ export default function OnboardingSignature() {
             className="mt-0.5"
           />
           <span>
-            I have read and accept the Terms and Conditions and Privacy Policy. I consent to InLane storing and using my signature only for RTO documentation, including Form 14 and Form 15.
+            I have read and accept the Terms and Conditions and Privacy Policy.
+            I consent to InLane storing and using my signature only for RTO
+            documentation, including Form 14 and Form 15.
           </span>
         </label>
 
         {error && (
-          <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700" role="alert">
+          <p
+            className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+            role="alert"
+          >
             {error}
           </p>
         )}
@@ -365,10 +389,17 @@ export default function OnboardingSignature() {
         <Button
           className="w-full"
           onClick={submit}
-          disabled={isSubmitting || !accepted || (mode === "draw" ? !hasDrawing : !uploadedFile)}
+          disabled={
+            isSubmitting ||
+            !accepted ||
+            (mode === "draw" ? !hasDrawing : !uploadedFile)
+          }
         >
           {isSubmitting ? (
-            <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving signature...</>
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving
+              signature...
+            </>
           ) : (
             "Submit and complete onboarding"
           )}

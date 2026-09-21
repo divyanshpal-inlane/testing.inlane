@@ -1,14 +1,15 @@
 /**
  * Learner Duplicate Detection Utility
- * 
+ *
  * Checks if a learner already exists in:
  * 1. Learner table (with any phone format)
  * 2. Supabase auth.users (with any phone format)
- * 
+ *
  * Prevents duplicate entries when a learner enters DOB during onboarding
  */
 
 import { supabase } from "@/lib/supabaseClient";
+
 import { getAllPhoneFormats, isSamePhone } from "./phoneNormalization";
 
 export interface DuplicateCheckResult {
@@ -22,19 +23,19 @@ export interface DuplicateCheckResult {
 
 /**
  * Check if a learner already exists in the database
- * 
+ *
  * Searches both:
  * - Learner table (in Supabase public schema)
  * - auth.users table (Supabase authentication)
- * 
+ *
  * Handles all phone number formats:
  * - 8344261941
  * - 918344261941
  * - +918344261941
- * 
+ *
  * @param phone - Phone number in any format
  * @returns DuplicateCheckResult with isDuplicate flag and details
- * 
+ *
  * @example
  * const result = await checkLearnerDuplicate("8344261941");
  * if (result.isDuplicate) {
@@ -42,7 +43,7 @@ export interface DuplicateCheckResult {
  * }
  */
 export async function checkLearnerDuplicate(
-  phone: string
+  phone: string,
 ): Promise<DuplicateCheckResult> {
   console.log("[DUPLICATE] Checking for duplicate learner with phone:", phone);
 
@@ -70,7 +71,7 @@ export async function checkLearnerDuplicate(
     }
 
     // ── Check auth.users table ──────────────────────────────────────────
-    let existsInAuthTable = false;
+    const existsInAuthTable = false;
     let authUserId: string | undefined;
     let authPhone: string | undefined;
 
@@ -78,10 +79,11 @@ export async function checkLearnerDuplicate(
     // For now, we'll use a more reliable approach with a Supabase function
     // or check against the current session
     try {
-      const { data: authUser, error: authError } = await supabase.auth.signInWithPassword({
-        phone: phoneFormats[2], // Try E.164 format first (+918344261941)
-        password: "dummy_check",
-      });
+      const { data: authUser, error: authError } =
+        await supabase.auth.signInWithPassword({
+          phone: phoneFormats[2], // Try E.164 format first (+918344261941)
+          password: "dummy_check",
+        });
 
       // This will fail, but we're just checking if the phone exists
       // A better approach: use Supabase's admin API or a custom function
@@ -93,7 +95,10 @@ export async function checkLearnerDuplicate(
     // For now, we'll check if a user with this phone exists
     // This requires a custom Supabase function or RLS bypass
 
-    console.log("[DUPLICATE] Learner table check: exists =", existsInLearnerTable);
+    console.log(
+      "[DUPLICATE] Learner table check: exists =",
+      existsInLearnerTable,
+    );
     console.log("[DUPLICATE] Auth table check: exists =", existsInAuthTable);
 
     // ── Build result ────────────────────────────────────────────────────
@@ -132,7 +137,7 @@ export async function checkLearnerDuplicate(
 /**
  * Check if a learner already has their DOB filled
  * (to prevent duplicate DOB entries)
- * 
+ *
  * @param phone - Phone number in any format
  * @returns true if learner already has DOB, false otherwise
  */
@@ -162,12 +167,12 @@ export async function learnerHasDOB(phone: string): Promise<boolean> {
 
 /**
  * Get learner ID by phone (any format)
- * 
+ *
  * @param phone - Phone number in any format
  * @returns Learner ID if found, null otherwise
  */
 export async function getLearnerIdByPhone(
-  phone: string
+  phone: string,
 ): Promise<string | null> {
   try {
     const phoneFormats = getAllPhoneFormats(phone);

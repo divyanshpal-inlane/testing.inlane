@@ -1174,8 +1174,7 @@ const TopupDialog = ({ enrollmentId, onClose }) => {
       {
         enabled: true,
         learner_id: addTopupLearnerId,
-        course_id:
-          addTopupSelectedLesson.course_id ?? addTopupCourseId ?? null,
+        course_id: addTopupSelectedLesson.course_id ?? addTopupCourseId ?? null,
         lesson_id: addTopupLessonId,
         status: "topup",
         otp: generateRandomOTP(),
@@ -1263,9 +1262,7 @@ const TopupDialog = ({ enrollmentId, onClose }) => {
               <Select
                 value={addTopupLessonId ?? ""}
                 onValueChange={(v) => setAddTopupLessonId(v)}
-                disabled={
-                  addTopupIsSubmitting || addTopupLessons.length === 0
-                }
+                disabled={addTopupIsSubmitting || addTopupLessons.length === 0}
               >
                 <SelectTrigger className="h-12 text-left">
                   <SelectValue

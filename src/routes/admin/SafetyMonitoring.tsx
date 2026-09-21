@@ -60,7 +60,10 @@ const sortIncidents = (rows: SafetyIncidentWithInstructor[]) =>
   [...rows].sort((a, b) => {
     const aOpen = a.status === "open" || a.status === "acknowledged";
     const bOpen = b.status === "open" || b.status === "acknowledged";
-    if ((a.incident_type === "sos" && aOpen) !== (b.incident_type === "sos" && bOpen))
+    if (
+      (a.incident_type === "sos" && aOpen) !==
+      (b.incident_type === "sos" && bOpen)
+    )
       return a.incident_type === "sos" && aOpen ? -1 : 1;
     if (aOpen !== bOpen) return aOpen ? -1 : 1;
     return (b.created_at ?? "").localeCompare(a.created_at ?? "");
@@ -103,7 +106,10 @@ function ReviewDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {INCIDENT_TYPE_LABEL[incident.incident_type]}
-            <Badge variant="outline" className={`capitalize ${STATUS_STYLE[incident.status]}`}>
+            <Badge
+              variant="outline"
+              className={`capitalize ${STATUS_STYLE[incident.status]}`}
+            >
               {incident.status}
             </Badge>
           </DialogTitle>
@@ -118,7 +124,9 @@ function ReviewDialog({
 
         <div className="space-y-3">
           {incident.description && (
-            <p className="rounded bg-gray-50 p-2 text-sm text-gray-700">{incident.description}</p>
+            <p className="rounded bg-gray-50 p-2 text-sm text-gray-700">
+              {incident.description}
+            </p>
           )}
           {incident.location && (
             <p className="flex items-center gap-1 text-xs text-muted-foreground">
@@ -145,8 +153,14 @@ function ReviewDialog({
                     Acknowledge
                   </Button>
                 )}
-                <Button className="flex-1" disabled={update.isPending} onClick={() => act("resolved")}>
-                  {update.isPending && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+                <Button
+                  className="flex-1"
+                  disabled={update.isPending}
+                  onClick={() => act("resolved")}
+                >
+                  {update.isPending && (
+                    <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                  )}
                   Resolve
                 </Button>
                 <Button
@@ -162,7 +176,8 @@ function ReviewDialog({
           ) : (
             incident.admin_response && (
               <p className="text-sm text-gray-600">
-                <span className="font-medium">Response:</span> {incident.admin_response}
+                <span className="font-medium">Response:</span>{" "}
+                {incident.admin_response}
                 {incident.resolved_by ? ` — ${incident.resolved_by}` : ""}
               </p>
             )
@@ -174,20 +189,28 @@ function ReviewDialog({
 }
 
 export default function SafetyMonitoring() {
-  const [statusFilter, setStatusFilter] = useState<IncidentStatus | "all">("all");
+  const [statusFilter, setStatusFilter] = useState<IncidentStatus | "all">(
+    "all",
+  );
   const [typeFilter, setTypeFilter] = useState<IncidentType | "all">("all");
   const { data, isLoading } = useAllSafetyIncidents();
-  const [selected, setSelected] = useState<SafetyIncidentWithInstructor | null>(null);
+  const [selected, setSelected] = useState<SafetyIncidentWithInstructor | null>(
+    null,
+  );
 
   const rows = useMemo(() => {
     let all = sortIncidents(data ?? []);
-    if (statusFilter !== "all") all = all.filter((r) => r.status === statusFilter);
-    if (typeFilter !== "all") all = all.filter((r) => r.incident_type === typeFilter);
+    if (statusFilter !== "all")
+      all = all.filter((r) => r.status === statusFilter);
+    if (typeFilter !== "all")
+      all = all.filter((r) => r.incident_type === typeFilter);
     return all;
   }, [data, statusFilter, typeFilter]);
 
   const activeSos = (data ?? []).filter(
-    (r) => r.incident_type === "sos" && (r.status === "open" || r.status === "acknowledged"),
+    (r) =>
+      r.incident_type === "sos" &&
+      (r.status === "open" || r.status === "acknowledged"),
   );
 
   return (
@@ -200,7 +223,9 @@ export default function SafetyMonitoring() {
             </Button>
           </Link>
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">Safety Monitoring</h1>
+            <h1 className="text-2xl font-bold tracking-tight">
+              Safety Monitoring
+            </h1>
             <p className="text-sm text-muted-foreground">
               Accidents, breakdowns, misconduct reports and SOS alerts.
             </p>
@@ -210,8 +235,8 @@ export default function SafetyMonitoring() {
         {activeSos.length > 0 && (
           <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-medium text-red-700">
             <Siren className="h-4 w-4 shrink-0 animate-pulse" />
-            {activeSos.length} active SOS alert{activeSos.length > 1 ? "s" : ""} — respond
-            immediately.
+            {activeSos.length} active SOS alert{activeSos.length > 1 ? "s" : ""}{" "}
+            — respond immediately.
           </div>
         )}
 
@@ -276,7 +301,9 @@ export default function SafetyMonitoring() {
                     <div className="flex min-w-0 items-center gap-3">
                       <span
                         className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
-                          isSosActive ? "bg-red-100 text-red-600" : "bg-gray-100 text-gray-600"
+                          isSosActive
+                            ? "bg-red-100 text-red-600"
+                            : "bg-gray-100 text-gray-600"
                         }`}
                       >
                         <Icon className="h-4 w-4" />
@@ -308,10 +335,16 @@ export default function SafetyMonitoring() {
                     </div>
                     <Button
                       size="sm"
-                      variant={isSosActive || r.status === "open" ? "default" : "outline"}
+                      variant={
+                        isSosActive || r.status === "open"
+                          ? "default"
+                          : "outline"
+                      }
                       onClick={() => setSelected(r)}
                     >
-                      {r.status === "open" || r.status === "acknowledged" ? "Respond" : "View"}
+                      {r.status === "open" || r.status === "acknowledged"
+                        ? "Respond"
+                        : "View"}
                     </Button>
                   </CardContent>
                 </Card>

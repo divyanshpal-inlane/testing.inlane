@@ -1,9 +1,10 @@
 import { useEffect, useRef } from "react";
+
 import { useLearningSession } from "@/hooks/useLearningSession";
 import {
   addRange,
-  playbackDelta,
   type LearningContext,
+  playbackDelta,
 } from "@/lib/learning-analytics/model";
 
 export default function TrackedVideo({
