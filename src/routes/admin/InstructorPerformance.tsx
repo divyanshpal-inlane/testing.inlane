@@ -1,6 +1,6 @@
 import { format, subDays } from "date-fns";
 import { ArrowLeft, Loader2, Search, Star } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
@@ -8,7 +8,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useInstructorPerformance } from "@/queries/instructorPerformance";
+import {
+  INSTRUCTOR_PERFORMANCE_PAGE_SIZE,
+  useInstructorPerformance,
+} from "@/queries/instructorPerformance";
 
 // Green ≥90, amber ≥75, red below — shared scale for the rate columns.
 const rateClass = (v: number | null) => {
@@ -34,20 +37,19 @@ export default function InstructorPerformance() {
   );
   const [toDate, setToDate] = useState(today);
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
 
-  const { data, isLoading } = useInstructorPerformance(fromDate, toDate);
-
-  const rows = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    let all = data ?? [];
-    if (q)
-      all = all.filter(
-        (r) =>
-          (r.name ?? "").toLowerCase().includes(q) ||
-          (r.phone ?? "").includes(q),
-      );
-    return all;
-  }, [data, search]);
+  const { data, isLoading, isFetching } = useInstructorPerformance(
+    fromDate,
+    toDate,
+    page,
+    search,
+  );
+  const rows = data?.rows ?? [];
+  const totalPages = Math.max(
+    1,
+    Math.ceil((data?.totalCount ?? 0) / INSTRUCTOR_PERFORMANCE_PAGE_SIZE),
+  );
 
   return (
     <div className="min-h-screen bg-muted/30 p-4 sm:p-6">
@@ -76,7 +78,10 @@ export default function InstructorPerformance() {
               type="date"
               max={toDate}
               value={fromDate}
-              onChange={(e) => setFromDate(e.target.value)}
+              onChange={(e) => {
+                setFromDate(e.target.value);
+                setPage(1);
+              }}
               className="w-[150px]"
             />
           </div>
@@ -87,7 +92,10 @@ export default function InstructorPerformance() {
               min={fromDate}
               max={today}
               value={toDate}
-              onChange={(e) => setToDate(e.target.value)}
+              onChange={(e) => {
+                setToDate(e.target.value);
+                setPage(1);
+              }}
               className="w-[150px]"
             />
           </div>
@@ -96,7 +104,10 @@ export default function InstructorPerformance() {
             <Input
               placeholder="Search name or phone…"
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setPage(1);
+              }}
               className="pl-8"
             />
           </div>
@@ -205,6 +216,28 @@ export default function InstructorPerformance() {
             </CardContent>
           </Card>
         )}
+
+        <div className="flex items-center justify-between gap-3">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={isFetching || !data || page <= 1}
+            onClick={() => setPage((current) => current - 1)}
+          >
+            Previous
+          </Button>
+          <span className="text-sm text-muted-foreground">
+            Page {page} of {totalPages}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={isFetching || !data || page >= totalPages}
+            onClick={() => setPage((current) => current + 1)}
+          >
+            Next
+          </Button>
+        </div>
 
         <p className="text-xs text-muted-foreground">
           Attendance = sessions that actually started (OTP) out of past booked

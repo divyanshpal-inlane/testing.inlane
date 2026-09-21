@@ -1,4 +1,4 @@
-﻿export type Json =
+export type Json =
   | string
   | number
   | boolean
@@ -1256,6 +1256,36 @@ export type Database = {
       get_car_lead_areas: {
         Args: Record<PropertyKey, never>;
         Returns: { area: string }[];
+       };
+      get_tentative_customers_paginated: {
+        Args: { p_start_date: string; p_search?: string; p_page?: number };
+                Returns: Json;
+      };
+get_daily_notification_schedules: {
+  Args: {
+    schedule_date: string;
+    recipient_tab?: string;
+    search_term?: string;
+    page_number?: number;
+  };
+  Returns: Json;
+};
+
+      get_instructors_by_performance: {
+        Args: {
+          from_date: string;
+          to_date: string;
+          current_local_time: string;
+          search_term: string;
+        };
+        Returns: {
+          id_instructor: string;
+          name: string | null;
+          phone: string | null;
+          enabled: boolean | null;
+          sessions: number;
+        }[];
+      };
       get_course_feedback: {
         Args: { search_term: string; checkpoint_filter: string };
         Returns: {
