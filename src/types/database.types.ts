@@ -1257,6 +1257,10 @@ export type Database = {
         Args: Record<PropertyKey, never>;
         Returns: { area: string }[];
        };
+      get_leave_requests_paginated: {
+        Args: { p_status: string; p_offset: number; p_limit: number };
+        Returns: Database["public"]["Tables"]["instructor_leave_request"]["Row"][];
+      };
       get_tentative_customers_paginated: {
         Args: { p_start_date: string; p_search?: string; p_page?: number };
                 Returns: Json;
