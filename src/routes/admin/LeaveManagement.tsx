@@ -8,7 +8,7 @@ import {
   UserCheck,
   XCircle,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
@@ -37,6 +37,8 @@ import {
   LeaveStatus,
   useAllLeaveRequests,
   useLeaveAffectedLessons,
+  useLeaveRequest,
+  usePendingLeaveRequestCount,
   useReassignLesson,
   useReplacementCandidates,
   useReviewLeaveRequest,
@@ -62,16 +64,6 @@ const fmtRange = (r: LeaveRequestWithInstructor) => {
     : `${r.start_time?.slice(0, 5) ?? ""}–${r.end_time?.slice(0, 5) ?? ""}`;
   return `${days} · ${time}`;
 };
-
-// Rank order: pending first, emergency before planned, then most recent.
-const sortRequests = (rows: LeaveRequestWithInstructor[]) =>
-  [...rows].sort((a, b) => {
-    if ((a.status === "pending") !== (b.status === "pending"))
-      return a.status === "pending" ? -1 : 1;
-    if ((a.leave_type === "emergency") !== (b.leave_type === "emergency"))
-      return a.leave_type === "emergency" ? -1 : 1;
-    return (b.created_at ?? "").localeCompare(a.created_at ?? "");
-  });
 
 // One affected booked lesson + its ranked replacement candidates.
 function AffectedLessonRow({
@@ -333,21 +325,85 @@ function ReviewDialog({
 
 export default function LeaveManagement() {
   const [statusFilter, setStatusFilter] = useState<LeaveStatus | "all">("all");
-  const { data, isLoading } = useAllLeaveRequests();
-  const [selected, setSelected] = useState<LeaveRequestWithInstructor | null>(
-    null,
-  );
+  const {
+    data,
+    error,
+    isLoading,
+    isFetching,
+    hasNextPage,
+    isFetchNextPageError,
+    fetchNextPage,
+  } = useAllLeaveRequests({
+    status: statusFilter === "all" ? undefined : statusFilter,
+  });
+  const [selected, setSelected] = useState<LeaveRequestWithInstructor | null>(null);
+  const { data: selectedRequest } = useLeaveRequest(selected?.id);
+  const { data: pendingCount = 0 } = usePendingLeaveRequestCount();
+  const { toast } = useToast();
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+  const hasScrolledRef = useRef(false);
+  const rows = data ?? [];
 
-  const rows = useMemo(() => {
-    const all = sortRequests(data ?? []);
-    return statusFilter === "all"
-      ? all
-      : all.filter((r) => r.status === statusFilter);
-  }, [data, statusFilter]);
+  useEffect(() => {
+    hasScrolledRef.current = false;
+  }, [statusFilter]);
 
-  const pendingCount = (data ?? []).filter(
-    (r) => r.status === "pending",
-  ).length;
+  useEffect(() => {
+    if (error) {
+      toast({
+        title: "Couldn't load leave requests",
+        description: error.message,
+        variant: "destructive",
+      });
+    }
+  }, [error, toast]);
+
+  useEffect(() => {
+    const sentinel = loadMoreRef.current;
+    if (!sentinel || !hasNextPage || isFetching) return;
+
+    let requested = false;
+    const loadMore = () => {
+      if (requested) return;
+      requested = true;
+      observer.disconnect();
+      void fetchNextPage({ cancelRefetch: false });
+    };
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        // Don't drain pages on open in a tall viewport, or loop on an error.
+        if (
+          entry.isIntersecting &&
+          hasScrolledRef.current &&
+          !isFetchNextPageError
+        )
+          loadMore();
+      },
+      { rootMargin: "0px 0px 200px" },
+    );
+    const onScroll = (event: Event) => {
+      // Ignore scrolling inside the filter picker or Review dialog.
+      if (event.target instanceof Element && !event.target.contains(sentinel))
+        return;
+      hasScrolledRef.current = true;
+      const bounds = sentinel.getBoundingClientRect();
+      if (bounds.top <= window.innerHeight + 200 && bounds.bottom >= 0)
+        loadMore();
+    };
+    window.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    observer.observe(sentinel);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [
+    data,
+    fetchNextPage,
+    hasNextPage,
+    isFetching,
+    isFetchNextPageError,
+    statusFilter,
+  ]);
 
   return (
     <div className="min-h-screen bg-muted/30 p-4 sm:p-6">
@@ -448,14 +504,18 @@ export default function LeaveManagement() {
             ))}
           </div>
         )}
+        {hasNextPage && (
+          <div ref={loadMoreRef} className="h-px" aria-hidden="true" />
+        )}
       </div>
 
       {selected && (
         <ReviewDialog
-          request={
+          request={{
             // keep the dialog in sync with the latest fetched row
-            (data ?? []).find((r) => r.id === selected.id) ?? selected
-          }
+            ...(rows.find((r) => r.id === selected.id) ?? selected),
+            ...selectedRequest,
+          }}
           onClose={() => setSelected(null)}
         />
       )}
