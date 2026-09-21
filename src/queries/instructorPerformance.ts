@@ -81,7 +81,9 @@ export function useInstructorPerformance(
         // instructor across all their lessons, including other pages.
         supabase
           .from("Schedule")
-          .select("id, instructor_id, learner_id, date, start_time, status, started_at")
+          .select(
+            "id, instructor_id, learner_id, date, start_time, status, started_at",
+          )
           .gte("date", fromDate)
           .lte("date", toDate)
           .abortSignal(signal),
@@ -104,12 +106,13 @@ export function useInstructorPerformance(
 
       const instructors = instrRes.data ?? [];
       const schedules = schedRes.data ?? [];
-      const feedback =
-        (feedbackRes.data ?? []) as unknown as Array<{
-          learner_id: string | null;
-          instructor_rating: number | null;
-        }>;
-      const noShows = (noShowRes.data ?? []).filter((n) => n.status !== "dismissed");
+      const feedback = (feedbackRes.data ?? []) as unknown as Array<{
+        learner_id: string | null;
+        instructor_rating: number | null;
+      }>;
+      const noShows = (noShowRes.data ?? []).filter(
+        (n) => n.status !== "dismissed",
+      );
 
       // Map each no-show back to its instructor via the schedule. Cases whose
       // schedule predates the window need a top-up fetch.
@@ -132,8 +135,10 @@ export function useInstructorPerformance(
       // most in this window (the feedback table doesn't store instructor_id).
       const lessonCount = new Map<string, Map<string, number>>();
       for (const s of schedules) {
-        if (!s.learner_id || !s.instructor_id || isCancelled(s.status)) continue;
-        if (!lessonCount.has(s.learner_id)) lessonCount.set(s.learner_id, new Map());
+        if (!s.learner_id || !s.instructor_id || isCancelled(s.status))
+          continue;
+        if (!lessonCount.has(s.learner_id))
+          lessonCount.set(s.learner_id, new Map());
         const m = lessonCount.get(s.learner_id)!;
         m.set(s.instructor_id, (m.get(s.instructor_id) ?? 0) + 1);
       }
@@ -176,7 +181,9 @@ export function useInstructorPerformance(
       for (const s of schedules) {
         if (!s.instructor_id || isCancelled(s.status)) continue;
         // Only sessions whose slot has passed count toward the rates.
-        const slotStart = s.start_time ? new Date(`${s.date}T${s.start_time}`) : null;
+        const slotStart = s.start_time
+          ? new Date(`${s.date}T${s.start_time}`)
+          : null;
         const isPast = s.date < today || (slotStart != null && slotStart < now);
         if (!isPast) continue;
         const a = get(s.instructor_id);

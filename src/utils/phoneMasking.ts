@@ -18,7 +18,9 @@ export function maskCarNumber(carNumber: string | null | undefined): string {
   return `${xMask}${visiblePart}`;
 }
 
-export function maskPhoneNumber(phoneNumber: string | null | undefined): string {
+export function maskPhoneNumber(
+  phoneNumber: string | null | undefined,
+): string {
   if (!phoneNumber) {
     return "XXXXXXXXXX";
   }
@@ -35,7 +37,7 @@ export function maskPhoneNumber(phoneNumber: string | null | undefined): string 
 
 export function maskPhoneNumberCustom(
   phoneNumber: string | null | undefined,
-  visibleDigits: number = 2
+  visibleDigits: number = 2,
 ): string {
   if (!phoneNumber) {
     return "XXXXXXXXXX";

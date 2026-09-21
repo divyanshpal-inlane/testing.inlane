@@ -7,8 +7,8 @@ import {
   LifeBuoy,
   Loader2,
   Siren,
-  UserX,
   Users,
+  UserX,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
@@ -27,15 +27,22 @@ import { formatINR } from "@/utils/earnings";
 
 const hhmm = (t: string | null) => t?.slice(0, 5) ?? "—";
 
-function StatusBadge({ status, started }: { status: string | null; started: boolean }) {
+function StatusBadge({
+  status,
+  started,
+}: {
+  status: string | null;
+  started: boolean;
+}) {
   const s = status ?? "unknown";
-  const cls = s === "completed"
-    ? "bg-emerald-100 text-emerald-800 border-emerald-200"
-    : s === "ongoing" || started
-      ? "bg-blue-100 text-blue-800 border-blue-200"
-      : s.includes("cancel")
-        ? "bg-gray-100 text-gray-500 border-gray-200"
-        : "bg-amber-100 text-amber-800 border-amber-200";
+  const cls =
+    s === "completed"
+      ? "bg-emerald-100 text-emerald-800 border-emerald-200"
+      : s === "ongoing" || started
+        ? "bg-blue-100 text-blue-800 border-blue-200"
+        : s.includes("cancel")
+          ? "bg-gray-100 text-gray-500 border-gray-200"
+          : "bg-amber-100 text-amber-800 border-amber-200";
   return (
     <Badge variant="outline" className={`text-[10px] capitalize ${cls}`}>
       {s === "booked" && started ? "started" : s}
@@ -147,11 +154,17 @@ function OverviewTab() {
               </span>
               <span className="flex items-center gap-2">
                 {k.llEscalated > 0 && (
-                  <Badge variant="outline" className="border-red-200 bg-red-50 text-[10px] text-red-700">
+                  <Badge
+                    variant="outline"
+                    className="border-red-200 bg-red-50 text-[10px] text-red-700"
+                  >
                     {k.llEscalated} escalated
                   </Badge>
                 )}
-                <Link to="/admin/ll-pipeline" className="text-xs font-normal text-primary">
+                <Link
+                  to="/admin/ll-pipeline"
+                  className="text-xs font-normal text-primary"
+                >
                   Open board <ArrowUpRight className="inline h-3 w-3" />
                 </Link>
               </span>
@@ -160,7 +173,9 @@ function OverviewTab() {
           <CardContent className="space-y-2 pt-0">
             {k.llByPhase.map((p) => (
               <div key={p.key} className="flex items-center gap-2 text-xs">
-                <span className="w-32 shrink-0 text-muted-foreground">{p.label}</span>
+                <span className="w-32 shrink-0 text-muted-foreground">
+                  {p.label}
+                </span>
                 <div className="h-4 flex-1 overflow-hidden rounded bg-muted">
                   <div
                     className="h-full rounded bg-primary/70"
@@ -187,9 +202,13 @@ function OverviewTab() {
                   count > 0 ? "border-amber-200 bg-amber-50/50" : ""
                 }`}
               >
-                <Icon className={`h-4 w-4 ${count > 0 ? "text-amber-600" : "text-muted-foreground"}`} />
+                <Icon
+                  className={`h-4 w-4 ${count > 0 ? "text-amber-600" : "text-muted-foreground"}`}
+                />
                 <span className="flex-1">{label}</span>
-                <span className={`font-bold tabular-nums ${count > 0 ? "text-amber-700" : ""}`}>
+                <span
+                  className={`font-bold tabular-nums ${count > 0 ? "text-amber-700" : ""}`}
+                >
                   {count}
                 </span>
               </Link>
@@ -244,7 +263,10 @@ function TodayTab() {
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.scheduleId} className="border-b last:border-0 hover:bg-muted/20">
+              <tr
+                key={r.scheduleId}
+                className="border-b last:border-0 hover:bg-muted/20"
+              >
                 <td className="p-3 tabular-nums">
                   {hhmm(r.startTime)}–{hhmm(r.endTime)}
                 </td>
@@ -264,7 +286,10 @@ function TodayTab() {
                 </td>
                 <td className="p-3">
                   {r.paymentStatus === "half_paid" ? (
-                    <Badge variant="outline" className="border-red-200 bg-red-50 text-[10px] text-red-700">
+                    <Badge
+                      variant="outline"
+                      className="border-red-200 bg-red-50 text-[10px] text-red-700"
+                    >
                       half paid
                     </Badge>
                   ) : (
@@ -278,7 +303,9 @@ function TodayTab() {
                 </td>
                 <td className="p-3 text-xs">
                   {r.nextAction ? (
-                    <span className="font-medium text-amber-700">{r.nextAction}</span>
+                    <span className="font-medium text-amber-700">
+                      {r.nextAction}
+                    </span>
                   ) : (
                     <span className="text-muted-foreground">—</span>
                   )}
@@ -364,7 +391,9 @@ function ExceptionsTab() {
             <div key={m.scheduleId} className="flex justify-between text-xs">
               <span>
                 {m.learnerName ?? "Learner"}{" "}
-                <span className="text-muted-foreground">w/ {m.instructorName ?? "—"}</span>
+                <span className="text-muted-foreground">
+                  w/ {m.instructorName ?? "—"}
+                </span>
               </span>
               <span className="tabular-nums text-muted-foreground">
                 {format(new Date(m.date), "d MMM")} {hhmm(m.startTime)}
@@ -385,7 +414,10 @@ function ExceptionsTab() {
             <div key={p.enrollmentId} className="flex justify-between text-xs">
               <span>
                 {p.learnerName ?? "Learner"}
-                <span className="text-muted-foreground"> · {p.learnerPhone ?? ""}</span>
+                <span className="text-muted-foreground">
+                  {" "}
+                  · {p.learnerPhone ?? ""}
+                </span>
               </span>
               <span className="font-medium tabular-nums text-red-600">
                 {formatINR(p.dueAmount)}
@@ -403,13 +435,19 @@ function ExceptionsTab() {
       >
         <div className="space-y-1.5">
           {cap(ex.stalledLL).map((a) => (
-            <div key={a.applicationId} className="flex justify-between gap-2 text-xs">
+            <div
+              key={a.applicationId}
+              className="flex justify-between gap-2 text-xs"
+            >
               <span className="min-w-0 truncate">
                 {a.escalated && (
                   <AlertTriangle className="mr-1 inline h-3 w-3 text-red-500" />
                 )}
                 {a.learnerName ?? "Learner"}
-                <span className="text-muted-foreground"> · {llStageLabel(a.status)}</span>
+                <span className="text-muted-foreground">
+                  {" "}
+                  · {llStageLabel(a.status)}
+                </span>
               </span>
               <span className="shrink-0 tabular-nums text-muted-foreground">
                 {a.daysStuck}d stuck
@@ -430,7 +468,10 @@ function ExceptionsTab() {
             <div key={s.learnerId} className="flex justify-between text-xs">
               <span>
                 {s.learnerName ?? "Learner"}
-                <span className="text-muted-foreground"> · {s.learnerPhone ?? ""}</span>
+                <span className="text-muted-foreground">
+                  {" "}
+                  · {s.learnerPhone ?? ""}
+                </span>
               </span>
               <span className="tabular-nums text-muted-foreground">
                 {s.lastClassDate
@@ -456,10 +497,12 @@ export default function ControlTower() {
             </Button>
           </Link>
           <div className="flex-1">
-            <h1 className="text-2xl font-bold tracking-tight">Operations Control Tower</h1>
+            <h1 className="text-2xl font-bold tracking-tight">
+              Operations Control Tower
+            </h1>
             <p className="text-sm text-muted-foreground">
-              Live view of students, classes, payments, LL/DL pipeline and exceptions —{" "}
-              {format(new Date(), "EEEE d MMMM")}.
+              Live view of students, classes, payments, LL/DL pipeline and
+              exceptions — {format(new Date(), "EEEE d MMMM")}.
             </p>
           </div>
         </div>

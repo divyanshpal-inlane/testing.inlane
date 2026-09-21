@@ -121,9 +121,8 @@ export default function InstructorLessonLog() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   // Check if user has permission to view unmasked phone numbers
-  const canViewUnmaskedPhoneNumbers = currentUser?.permissions?.includes(
-    "view_unmasked_phone_numbers"
-  ) || false;
+  const canViewUnmaskedPhoneNumbers =
+    currentUser?.permissions?.includes("view_unmasked_phone_numbers") || false;
 
   // ── fetch all instructors ──
   const { data: instructors, isLoading } = useQuery({
@@ -308,15 +307,17 @@ export default function InstructorLessonLog() {
                       <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10">
                         <User className="h-5 w-5 text-primary" />
                       </div>
-                       <div>
-                         <CardTitle className="text-base">
-                           {inst.name || "Unnamed"}
-                         </CardTitle>
-                         <CardDescription>
-                           {canViewUnmaskedPhoneNumbers ? inst.phone : maskPhoneNumber(inst.phone)}
-                           {inst.email ? ` · ${inst.email}` : ""}
-                         </CardDescription>
-                       </div>
+                      <div>
+                        <CardTitle className="text-base">
+                          {inst.name || "Unnamed"}
+                        </CardTitle>
+                        <CardDescription>
+                          {canViewUnmaskedPhoneNumbers
+                            ? inst.phone
+                            : maskPhoneNumber(inst.phone)}
+                          {inst.email ? ` · ${inst.email}` : ""}
+                        </CardDescription>
+                      </div>
                     </div>
                     {isOpen ? (
                       <ChevronUp className="h-5 w-5 text-muted-foreground" />
@@ -420,7 +421,7 @@ export default function InstructorLessonLog() {
                       <p className="py-8 text-center text-muted-foreground">
                         No lessons found
                       </p>
-                      ) : (
+                    ) : (
                       <div className="space-y-3">
                         {filteredSchedules.map((s: any) => (
                           <Card key={s.id} className="border shadow-sm">

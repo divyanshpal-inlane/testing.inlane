@@ -1,5 +1,3 @@
-import type { LearningContext } from "@/lib/learning-analytics/model";
-import { useQuizAnalytics } from "@/hooks/useQuizAnalytics";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 
@@ -8,6 +6,8 @@ import { InteractiveImageQuiz } from "@/components/lesson/quiz";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { PaintedText } from "@/components/ui/paint-text";
+import { useQuizAnalytics } from "@/hooks/useQuizAnalytics";
+import type { LearningContext } from "@/lib/learning-analytics/model";
 
 export type ImageGame = {
   type: "image";

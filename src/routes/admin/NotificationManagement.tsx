@@ -28,9 +28,9 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/use-toast";
 import { usePhoneVisibility } from "@/context/phone-visibility-context";
+import { supabase } from "@/lib/supabaseClient";
 import { useCurrentAdmin } from "@/queries/adminPermissions";
 import { useCurrentUser } from "@/queries/userManagement";
-import { supabase } from "@/lib/supabaseClient";
 import { maskPhoneNumber } from "@/utils/phoneMasking";
 
 export default function NotificationManagement() {
@@ -1163,7 +1163,9 @@ function InstructorTab({
                   <div className="font-medium">{instructor.name}</div>
                 </td>
                 <td className="px-2 py-2 text-sm text-gray-600">
-                  {canViewUnmaskedPhoneNumbers ? instructor.phone : maskPhoneNumber(instructor.phone)}
+                  {canViewUnmaskedPhoneNumbers
+                    ? instructor.phone
+                    : maskPhoneNumber(instructor.phone)}
                 </td>
                 <td className="px-2 py-2 text-center">
                   <Badge variant="secondary">

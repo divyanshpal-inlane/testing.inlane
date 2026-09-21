@@ -42,13 +42,14 @@ import {
   getLLAdvanceTargets,
   getLLFailureOptions,
   getLLRevertTargets,
+  isLLExpiryStatus,
   isLLFailureStatus,
   isLLSegregationRouteCode,
   LL_FAILURE_STAGES,
   LL_PHASES,
   LL_SEGREGATION_ROUTES,
   LL_SERVICES,
-  LL_STAGE_MAP,
+  LL_STAGES,
   LLPhaseKey,
   llSegregationRouteChecklist,
   llSegregationRouteLabel,
@@ -68,6 +69,7 @@ import {
   useLLLearnerSearch,
   useLLPipelineEvents,
   useLLQueueCounts,
+  useLLStageCounts,
   useRevertLLStatus,
   useUpdateLLFields,
   useUpdateLLStatus,
@@ -76,6 +78,40 @@ import {
 import { useCurrentUser } from "@/queries/userManagement";
 
 type QueueKey = "all" | LLPhaseKey | "escalations";
+
+interface StageFilterOption {
+  key: string;
+  label: string;
+  phase: LLPhaseKey;
+  isFailure: boolean;
+}
+
+const LL_BOARD_STAGE_FILTERS: StageFilterOption[] = (() => {
+  const seen = new Set<string>();
+  const stages: StageFilterOption[] = [];
+  for (const stage of LL_STAGES) {
+    if (!seen.has(stage.key)) {
+      seen.add(stage.key);
+      stages.push({
+        key: stage.key,
+        label: stage.label,
+        phase: stage.phase,
+        isFailure: isLLFailureStatus(stage.key),
+      });
+    }
+    for (const failure of stage.failures ?? []) {
+      if (seen.has(failure.key)) continue;
+      seen.add(failure.key);
+      stages.push({
+        key: failure.key,
+        label: failure.label,
+        phase: stage.phase,
+        isFailure: true,
+      });
+    }
+  }
+  return stages;
+})();
 
 export default function LLPipeline() {
   const queryClient = useQueryClient();
@@ -86,6 +122,7 @@ export default function LLPipeline() {
   const actorId = currentUser?.id ?? null;
 
   const [queue, setQueue] = useState<QueueKey>("all");
+  const [stageFilter, setStageFilter] = useState("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Date filter (feedback item 8): view entries created/updated in a range.
@@ -109,13 +146,22 @@ export default function LLPipeline() {
   const filters = useMemo<LLPipelineFilters>(
     () => ({
       queue,
+      stage: stageFilter,
       search: debouncedSearch,
       route: routeFilter,
       dateField,
       dateFrom,
       dateTo,
     }),
-    [queue, debouncedSearch, routeFilter, dateField, dateFrom, dateTo],
+    [
+      queue,
+      stageFilter,
+      debouncedSearch,
+      routeFilter,
+      dateField,
+      dateFrom,
+      dateTo,
+    ],
   );
 
   const pipeline = useLLApplicationsInfinite(filters);
@@ -126,6 +172,15 @@ export default function LLPipeline() {
   );
   const { data: queueCountsData } = useLLQueueCounts();
   const queueCounts: Record<string, number> = queueCountsData ?? {};
+  const { data: stageCountsData, isLoading: stageCountsLoading } =
+    useLLStageCounts(queue);
+  const stageCounts = stageCountsData ?? {};
+  const visibleStageFilters = useMemo(() => {
+    if (queue === "all" || queue === "escalations") {
+      return LL_BOARD_STAGE_FILTERS;
+    }
+    return LL_BOARD_STAGE_FILTERS.filter((stage) => stage.phase === queue);
+  }, [queue]);
 
   const selected = applications.find((a) => a.id === selectedId) ?? null;
 
@@ -213,6 +268,7 @@ export default function LLPipeline() {
                   },
                 );
                 setQueue("all");
+                setStageFilter("all");
                 setRouteFilter("all");
                 setDateFrom("");
                 setDateTo("");
@@ -233,7 +289,11 @@ export default function LLPipeline() {
         ].map((t) => (
           <button
             key={t.key}
-            onClick={() => setQueue(t.key)}
+            onClick={() => {
+              setQueue(t.key);
+              setStageFilter("all");
+              setSelectedId(null);
+            }}
             className={`rounded-full px-3 py-1 text-xs font-medium transition ${
               queue === t.key
                 ? t.key === "escalations"
@@ -302,11 +362,80 @@ export default function LLPipeline() {
         </div>
       </div>
 
+      {/* Exact board-stage counts and filters within the selected queue. */}
+      <div className="border-b bg-slate-50 px-4 py-2.5">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-600">
+            Stage visibility
+          </span>
+          <Badge variant="outline" className="bg-white text-[10px]">
+            {visibleStageFilters.length} stages
+          </Badge>
+          <span className="text-xs text-slate-500">
+            {queueCounts[queue] ?? 0} applications in this queue
+          </span>
+          {stageFilter !== "all" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="ml-auto h-6 px-2 text-xs"
+              onClick={() => {
+                setStageFilter("all");
+                setSelectedId(null);
+              }}
+            >
+              Clear stage filter
+            </Button>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {visibleStageFilters.map((stage) => {
+            const active = stageFilter === stage.key;
+            return (
+              <button
+                key={stage.key}
+                type="button"
+                onClick={() => {
+                  setStageFilter(active ? "all" : stage.key);
+                  setSelectedId(null);
+                }}
+                className={`rounded-md border px-2 py-1 text-left text-[11px] transition ${
+                  active
+                    ? stage.isFailure
+                      ? "border-red-600 bg-red-600 text-white"
+                      : "border-primary bg-primary text-primary-foreground"
+                    : stage.isFailure
+                      ? "border-red-200 bg-red-50 text-red-700 hover:bg-red-100"
+                      : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-100"
+                }`}
+                aria-pressed={active}
+              >
+                <span>{stage.label}</span>
+                <span
+                  className={`ml-1 font-semibold ${
+                    active ? "text-current" : "text-slate-900"
+                  }`}
+                >
+                  {stageCountsLoading ? "…" : (stageCounts[stage.key] ?? 0)}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       <div className="grid flex-1 grid-cols-1 gap-2 p-4 md:grid-cols-3">
         {/* Application list */}
         <Card className="md:col-span-1">
           <CardHeader className="p-3 pb-2">
-            <CardTitle className="text-sm">Applications</CardTitle>
+            <CardTitle className="text-sm">
+              Applications
+              {pipeline.data?.pages[0] ? (
+                <span className="ml-1 font-normal text-gray-500">
+                  · {pipeline.data.pages[0].total}
+                </span>
+              ) : null}
+            </CardTitle>
             <div className="relative mt-1">
               <Search className="absolute left-2 top-2 h-4 w-4 text-gray-500" />
               <Input
@@ -318,7 +447,10 @@ export default function LLPipeline() {
             </div>
           </CardHeader>
           <CardContent className="p-3 pt-0">
-            <ScrollArea ref={listScrollRef} className="h-[calc(100vh-300px)]">
+            <ScrollArea
+              ref={listScrollRef}
+              className="h-[calc(100vh-410px)] min-h-[360px]"
+            >
               {pipeline.isLoading ? (
                 <div className="py-10 text-center text-sm text-gray-500">
                   Loading…
@@ -498,7 +630,6 @@ function ApplicationDetail({
   onSaveFields: (fields: Partial<LLApplication>) => void;
   isBusy: boolean;
 }) {
-  const stage = LL_STAGE_MAP[application.status];
   const failure = LL_FAILURE_STAGES[application.status];
   const { data: events } = useLLPipelineEvents(application.id);
   const [note, setNote] = useState("");
@@ -602,7 +733,7 @@ function ApplicationDetail({
               className="mb-2 h-16 text-sm"
             />
             <div className="flex flex-wrap gap-2">
-              {failure ? (
+              {failure && !isLLExpiryStatus(application.status) ? (
                 <Button
                   size="sm"
                   disabled={isBusy}
@@ -657,6 +788,12 @@ function ApplicationDetail({
                     {llStageLabel(t)}
                   </Button>
                 ))
+              )}
+              {isLLExpiryStatus(application.status) && (
+                <p className="w-full rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  This expiry stage has no forward action. Use Revert stage to
+                  restart the application from the appropriate point.
+                </p>
               )}
               {failureOptions.map((f) => (
                 <Button
