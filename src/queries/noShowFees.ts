@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import { supabase } from "@/lib/supabaseClient";
 
@@ -6,6 +11,7 @@ import { supabase } from "@/lib/supabaseClient";
 // database.types.ts, so route their access through an untyped handle and expose
 // the explicit interfaces below (same approach noShow.ts uses for its own types).
 const sb = supabase as any;
+const NO_SHOW_FEE_BATCH_SIZE = 20;
 
 export const NO_SHOW_FEE_AMOUNT = 300; // ₹ — PRD-confirmed fee
 
@@ -117,7 +123,9 @@ async function enrichFees(rows: any[]): Promise<NoShowFee[]> {
       learnerPhone: learner?.phone ?? null,
       instructorName: instr?.name ?? null,
       lessonNumber: lesson?.number ?? null,
-      appeal: appealByFee.get(r.id) ?? null,
+      // The pending section must review the matching pending appeal, even if
+      // this fee also has an older, already-reviewed appeal.
+      appeal: first<NoShowAppeal>(r.pending_appeal) ?? appealByFee.get(r.id) ?? null,
     };
   });
 }
@@ -126,19 +134,49 @@ async function enrichFees(rows: any[]): Promise<NoShowFee[]> {
 // Admin-facing
 // ---------------------------------------------------------------------------
 
-export function useAllNoShowFees(filters?: { status?: FeeStatus }) {
-  return useQuery({
-    queryKey: ["no_show_fees", filters?.status ?? "any"],
-    queryFn: async (): Promise<NoShowFee[]> => {
+export function useAllNoShowFees(filters?: {
+  status?: FeeStatus;
+  pendingAppealsOnly?: boolean;
+}) {
+  return useInfiniteQuery({
+    queryKey: [
+      "no_show_fees",
+      "infinite",
+      filters?.status ?? "any",
+      filters?.pendingAppealsOnly ?? false,
+    ],
+    gcTime: 0,
+    initialPageParam: 0,
+    queryFn: async ({ pageParam, signal }) => {
       let q = sb
         .from("no_show_fee")
-        .select("*")
-        .order("marked_at", { ascending: false });
+        .select(
+          filters?.pendingAppealsOnly
+            ? "*, pending_appeal:no_show_appeal!inner(*)"
+            : "*",
+          { count: "exact" },
+        )
+        .order("marked_at", { ascending: false })
+        .order("id", { ascending: false })
+        .range(pageParam, pageParam + NO_SHOW_FEE_BATCH_SIZE - 1)
+        .abortSignal(signal);
       if (filters?.status) q = q.eq("status", filters.status);
-      const { data, error } = await q;
+      if (filters?.pendingAppealsOnly)
+        q = q.eq("pending_appeal.status", "pending");
+      const { data, error, count } = await q;
       if (error) throw error;
-      return enrichFees(data ?? []);
+      const rows = data ?? [];
+      return {
+        rows: await enrichFees(rows),
+        total: count ?? 0,
+        nextOffset:
+          rows.length === NO_SHOW_FEE_BATCH_SIZE &&
+          (count == null || pageParam + rows.length < count)
+            ? pageParam + rows.length
+            : undefined,
+      };
     },
+    getNextPageParam: (lastPage) => lastPage.nextOffset,
   });
 }
 

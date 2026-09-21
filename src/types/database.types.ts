@@ -1,4 +1,4 @@
-﻿export type Json =
+export type Json =
   | string
   | number
   | boolean
@@ -1245,13 +1245,72 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
-      get_earnings_instructors: {
+            get_earnings_instructors: {
         Args: { p_search?: string };
         Returns: {
           id_instructor: string;
           name: string | null;
           phone: string | null;
         }[];
+      };
+      get_lessons_dashboard_page: {
+        Args: {
+          p_from: string;
+          p_to: string;
+          p_page?: number;
+          p_kam_ids?: string[] | null;
+          p_instructor_ids?: string[] | null;
+          p_class_numbers?: number[] | null;
+          p_statuses?: string[] | null;
+          p_search?: string | null;
+        };
+        Returns: Json;
+      };
+      get_car_leads: {
+        Args: {
+          search_term?: string;
+          area_filter?: string;
+          planning_filter?: string;
+        };
+        Returns: Database["public"]["Tables"]["Learner"]["Row"][];
+      };
+      get_car_lead_areas: {
+        Args: Record<PropertyKey, never>;
+        Returns: { area: string }[];
+       };
+      get_leave_requests_paginated: {
+        Args: { p_status: string; p_offset: number; p_limit: number };
+        Returns: Database["public"]["Tables"]["instructor_leave_request"]["Row"][];
+      };
+      get_tentative_customers_paginated: {
+        Args: { p_start_date: string; p_search?: string; p_page?: number };
+                Returns: Json;
+      };
+get_daily_notification_schedules: {
+  Args: {
+    schedule_date: string;
+    recipient_tab?: string;
+    search_term?: string;
+    page_number?: number;
+  };
+  Returns: Json;
+};
+
+      get_instructors_by_performance: {
+        Args: {
+          from_date: string;
+          to_date: string;
+          current_local_time: string;
+          search_term: string;
+        };
+        Returns: {
+          id_instructor: string;
+          name: string | null;
+          phone: string | null;
+          enabled: boolean | null;
+          sessions: number;
+        }[];
+      };
       get_course_feedback: {
         Args: { search_term: string; checkpoint_filter: string };
         Returns: {

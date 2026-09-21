@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { format, subDays } from "date-fns";
 
 import { supabase } from "@/lib/supabaseClient";
@@ -55,6 +60,7 @@ const first = <T>(v: T | T[] | null | undefined): T | null =>
   Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
 
 const today = () => format(new Date(), "yyyy-MM-dd");
+const NO_SHOW_BATCH_SIZE = 20;
 
 // ---------------------------------------------------------------------------
 // Instructor-facing
@@ -198,60 +204,71 @@ export function useNoShowCases(filters?: {
   status?: NoShowStatus;
   party?: NoShowParty;
 }) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: [
       "no_show_cases",
+      "infinite",
       filters?.status ?? "any",
       filters?.party ?? "any",
     ],
-    queryFn: async (): Promise<NoShowCase[]> => {
+    gcTime: 0,
+    initialPageParam: 0,
+    queryFn: async ({ pageParam, signal }) => {
       let q = supabase
         .from("schedule_no_show")
         .select("*")
-        .order("created_at", { ascending: false });
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        // One extra row tells us whether another batch exists.
+        .range(pageParam, pageParam + NO_SHOW_BATCH_SIZE)
+        .abortSignal(signal);
       if (filters?.status) q = q.eq("status", filters.status);
       if (filters?.party) q = q.eq("no_show_party", filters.party);
       const { data, error } = await q;
       if (error) throw error;
-      return enrichNoShows((data ?? []) as never);
+      const rows = data ?? [];
+      return {
+        rows: await enrichNoShows(rows.slice(0, NO_SHOW_BATCH_SIZE) as never),
+        nextOffset:
+          rows.length > NO_SHOW_BATCH_SIZE
+            ? pageParam + NO_SHOW_BATCH_SIZE
+            : undefined,
+      };
     },
+    getNextPageParam: (lastPage) => lastPage.nextOffset,
   });
 }
 
 // Past 'booked' lessons that never started (no OTP) — likely instructor
 // no-shows the admin can confirm. Derived, not persisted.
 export function usePotentialInstructorNoShows() {
-  return useQuery({
-    queryKey: ["potential_instructor_no_shows"],
-    queryFn: async (): Promise<PotentialInstructorNoShow[]> => {
+  return useInfiniteQuery({
+    queryKey: ["potential_instructor_no_shows", "infinite"],
+    gcTime: 0,
+    initialPageParam: 0,
+    queryFn: async ({ pageParam, signal }) => {
       const from = format(subDays(new Date(), 30), "yyyy-MM-dd");
       const { data, error } = await supabase
         .from("Schedule")
         .select(
-          "id, date, start_time, end_time, instructor_id, started_at, status, Instructor(name), Learner(name), Lesson(number)",
+          "id, date, start_time, end_time, instructor_id, started_at, status, Instructor(name), Learner(name), Lesson(number), flagged:schedule_no_show()",
         )
         .eq("status", "booked")
         .is("started_at", null)
         .gte("date", from)
         .lt("date", today())
-        .order("date", { ascending: false });
+        // Anti-join before applying the range, not after fetching a page.
+        .eq("flagged.no_show_party", "instructor")
+        .is("flagged", null)
+        .order("date", { ascending: false })
+        .order("id", { ascending: false })
+        .range(pageParam, pageParam + NO_SHOW_BATCH_SIZE)
+        .abortSignal(signal);
       if (error) throw error;
       const rows = data ?? [];
 
-      // Exclude ones already flagged as an instructor no-show.
-      const ids = rows.map((r) => r.id);
-      const flagged = new Set<number>();
-      if (ids.length) {
-        const { data: ns } = await supabase
-          .from("schedule_no_show")
-          .select("schedule_id")
-          .eq("no_show_party", "instructor")
-          .in("schedule_id", ids);
-        for (const n of ns ?? []) flagged.add(n.schedule_id);
-      }
-
-      return rows
-        .filter((r) => !flagged.has(r.id))
+      const cases: PotentialInstructorNoShow[] = rows
+        .slice(0, NO_SHOW_BATCH_SIZE)
         .map((s) => {
           const instr = first<{ name: string | null }>(s.Instructor as never);
           const learner = first<{ name: string | null }>(s.Learner as never);
@@ -267,7 +284,15 @@ export function usePotentialInstructorNoShows() {
             lessonNumber: lesson?.number ?? null,
           };
         });
+      return {
+        rows: cases,
+        nextOffset:
+          rows.length > NO_SHOW_BATCH_SIZE
+            ? pageParam + NO_SHOW_BATCH_SIZE
+            : undefined,
+      };
     },
+    getNextPageParam: (lastPage) => lastPage.nextOffset,
   });
 }
 
