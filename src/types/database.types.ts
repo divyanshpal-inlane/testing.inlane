@@ -1245,6 +1245,16 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+get_daily_notification_schedules: {
+  Args: {
+    schedule_date: string;
+    recipient_tab?: string;
+    search_term?: string;
+    page_number?: number;
+  };
+  Returns: Json;
+};
+
       get_instructors_by_performance: {
         Args: {
           from_date: string;
