@@ -1245,6 +1245,10 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      get_tentative_customers_paginated: {
+        Args: { p_start_date: string; p_search?: string; p_page?: number };
+                Returns: Json;
+      };
 get_daily_notification_schedules: {
   Args: {
     schedule_date: string;
