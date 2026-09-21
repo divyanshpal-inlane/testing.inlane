@@ -20,7 +20,10 @@ export function useLearner() {
       // Try all phone formats since auth context may return phone without +
       // e.g., auth returns "917368948038" but DB has "+917368948038"
       const phoneFormats = getAllPhoneFormats(phone);
-      console.log("[LEARNER] Trying phone formats to fetch learner:", phoneFormats);
+      console.log(
+        "[LEARNER] Trying phone formats to fetch learner:",
+        phoneFormats,
+      );
 
       for (const format of phoneFormats) {
         const { data: Learner, error } = await supabase
@@ -32,17 +35,32 @@ export function useLearner() {
           .maybeSingle();
 
         if (error) {
-          console.warn("[LEARNER] Error with format", format, ":", error.message);
+          console.warn(
+            "[LEARNER] Error with format",
+            format,
+            ":",
+            error.message,
+          );
           continue;
         }
 
         if (Learner) {
-          console.log("[LEARNER] ✅ Found learner with format:", format, "onboarding_completed:", Learner.onboarding_completed, "dob:", Learner.dob);
+          console.log(
+            "[LEARNER] ✅ Found learner with format:",
+            format,
+            "onboarding_completed:",
+            Learner.onboarding_completed,
+            "dob:",
+            Learner.dob,
+          );
           return Learner;
         }
       }
 
-      console.log("[LEARNER] No learner found with any phone format for:", phone);
+      console.log(
+        "[LEARNER] No learner found with any phone format for:",
+        phone,
+      );
       return null;
     },
     staleTime: Infinity,
@@ -265,19 +283,30 @@ export function useLearnerUpdate() {
           .select();
 
         if (result.error) {
-          console.warn("[LEARNER_UPDATE] Error with format", format, ":", result.error.message);
+          console.warn(
+            "[LEARNER_UPDATE] Error with format",
+            format,
+            ":",
+            result.error.message,
+          );
           continue;
         }
 
         if (result.data && result.data.length > 0) {
-          console.log("[LEARNER_UPDATE] ✅ Learner updated successfully with format:", format, result.data[0]);
+          console.log(
+            "[LEARNER_UPDATE] ✅ Learner updated successfully with format:",
+            format,
+            result.data[0],
+          );
           return result.data[0];
         }
       }
 
       // If no existing record found with any format, create one as fallback
       // This handles users who signed up before the trigger was in place
-      console.warn("[LEARNER_UPDATE] No existing record found. Creating new Learner record.");
+      console.warn(
+        "[LEARNER_UPDATE] No existing record found. Creating new Learner record.",
+      );
       const e164Phone = `+91${phone.replace(/\D/g, "").slice(-10)}`;
       const insertResult = await (supabase as any)
         .from("Learner")
@@ -286,11 +315,17 @@ export function useLearnerUpdate() {
 
       if (insertResult.error) {
         // If insert fails due to unique constraint (already exists), try once more with correct format
-        console.error("[LEARNER_UPDATE] Insert failed:", insertResult.error.message);
+        console.error(
+          "[LEARNER_UPDATE] Insert failed:",
+          insertResult.error.message,
+        );
         throw new Error("Failed to update your profile. Please try again.");
       }
 
-      console.log("[LEARNER_UPDATE] ✅ Learner created as fallback:", insertResult.data?.[0]);
+      console.log(
+        "[LEARNER_UPDATE] ✅ Learner created as fallback:",
+        insertResult.data?.[0],
+      );
       return insertResult.data?.[0] ?? null;
     },
     onSuccess: () => {

@@ -4,6 +4,11 @@ import { defineConfig } from "vite";
 
 // https://vitejs.dev/config/
 export default defineConfig({
+  // Only set for the GitHub Pages test-deploy workflow (VITE_BASE_PATH env
+  // var, e.g. "/sales-requirement-dashboard/"), which serves the app from a
+  // sub-path instead of domain root. Left unset everywhere else (local dev,
+  // the production Vercel build) so those keep using "/" exactly as before.
+  base: process.env.VITE_BASE_PATH || "/",
   plugins: [react()],
   resolve: {
     alias: {

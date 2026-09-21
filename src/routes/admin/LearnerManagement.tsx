@@ -192,19 +192,14 @@ export default function LearnerManagement() {
 
   // Recompute the custom-course amount (sum of per-module prices) and keep the
   // installment split + display name in sync.
-  const syncCustomAmount = (
-    sel: string[],
-    prices: Record<string, number>,
-  ) => {
+  const syncCustomAmount = (sel: string[], prices: Record<string, number>) => {
     const total = sel.reduce((sum, id) => sum + (Number(prices[id]) || 0), 0);
     const moduleNames = sel.map(
       (id) => SKILL_MODULES.find((m) => m.id === id)?.name || "",
     );
     setLearnerData((prev) => {
       const inst1 =
-        prev.installmentType === "installment"
-          ? Math.round(total / 2)
-          : total;
+        prev.installmentType === "installment" ? Math.round(total / 2) : total;
       const inst2 = prev.installmentType === "installment" ? total - inst1 : 0;
       return {
         ...prev,
@@ -476,62 +471,59 @@ export default function LearnerManagement() {
       // Close the dialog before sending to backend to disable multiple clicks
       setIsCreateLearnerDialogOpen(false); // Close the create learner dialog
 
-       // send to backend
-       let responseData: any = null;
-       
-       try {
-         const response = await supabase.functions.invoke(
-           "create-learner-and-enrollment",
-           {
-             body: JSON.stringify(dataToSend),
-           },
-         );
+      // send to backend
+      let responseData: any = null;
 
+      try {
+        const response = await supabase.functions.invoke(
+          "create-learner-and-enrollment",
+          {
+            body: JSON.stringify(dataToSend),
+          },
+        );
 
-         // Check if there was an error in the response
-         if (response.error) {
-           // Re-throw the Supabase FunctionsHttpError to be caught below
-           throw response.error;
-         }
+        // Check if there was an error in the response
+        if (response.error) {
+          // Re-throw the Supabase FunctionsHttpError to be caught below
+          throw response.error;
+        }
 
-         const { data } = response;
-         // If data is null, something went wrong
-         if (!data) {
-           throw new Error("No data received from server");
-         }
-         
-         // Check if data has learner (success case)
-         if (!data.learner) {
-           throw new Error("Learner data missing from response");
-         }
+        const { data } = response;
+        // If data is null, something went wrong
+        if (!data) {
+          throw new Error("No data received from server");
+        }
 
-         responseData = data;
-       } catch (error: any) {
-         
-         // Try to extract error message from the edge function error
-         let errorMessage = "Failed to create learner";
-         
-         // Check if context.response exists (Supabase FunctionsHttpError format)
-         if (error && error.context && error.context.response) {
-           try {
-             let errorData = error.context.response;
-             
-             if (typeof errorData === "string") {
-               errorData = JSON.parse(errorData);
-             }
-             
-             if (errorData && errorData.error) {
-               errorMessage = errorData.error;
-             }
-           } catch (parseError) {
-           }
-         } else if (error && error.message) {
-           // Fallback: Use the error message directly
-           errorMessage = error.message;
-         }
-         
-         throw new Error(errorMessage);
-       }
+        // Check if data has learner (success case)
+        if (!data.learner) {
+          throw new Error("Learner data missing from response");
+        }
+
+        responseData = data;
+      } catch (error: any) {
+        // Try to extract error message from the edge function error
+        let errorMessage = "Failed to create learner";
+
+        // Check if context.response exists (Supabase FunctionsHttpError format)
+        if (error && error.context && error.context.response) {
+          try {
+            let errorData = error.context.response;
+
+            if (typeof errorData === "string") {
+              errorData = JSON.parse(errorData);
+            }
+
+            if (errorData && errorData.error) {
+              errorMessage = errorData.error;
+            }
+          } catch (parseError) {}
+        } else if (error && error.message) {
+          // Fallback: Use the error message directly
+          errorMessage = error.message;
+        }
+
+        throw new Error(errorMessage);
+      }
 
       // Ensure we set the created learner ID and enrollment ID
       if (responseData && responseData.learner && responseData.learner.id) {
@@ -587,13 +579,13 @@ export default function LearnerManagement() {
     } catch (err) {
       // Reopen the dialog so user can try again
       setIsCreateLearnerDialogOpen(true);
-      
+
       // Get the error message
       let errorDescription = "An error occurred";
       if (err instanceof Error) {
         errorDescription = err.message;
       }
-      
+
       toast({
         title: "Error",
         description: errorDescription,
