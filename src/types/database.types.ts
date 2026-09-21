@@ -1245,6 +1245,14 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+            get_earnings_instructors: {
+        Args: { p_search?: string };
+        Returns: {
+          id_instructor: string;
+          name: string | null;
+          phone: string | null;
+        }[];
+      };
       get_lessons_dashboard_page: {
         Args: {
           p_from: string;
