@@ -597,10 +597,7 @@ export const useUpdateScheduleStatus = () => {
         try {
           await runLLAutoPromoteDL(data.learner_id as string);
         } catch (e) {
-          console.error(
-            "[useUpdateScheduleStatus] LL auto-promote failed:",
-            e,
-          );
+          console.error("[useUpdateScheduleStatus] LL auto-promote failed:", e);
         }
       }
 

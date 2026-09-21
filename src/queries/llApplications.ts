@@ -10,6 +10,7 @@ import {
   classifyLLStatusTransition,
   fieldsToClearOnLLRevert,
   isLLSegregationRouteCode,
+  LL_ESCALATION_STATUSES,
   LL_FAILURE_STAGES,
   LL_PHASES,
   LL_SEGREGATION_ROUTES,
@@ -104,6 +105,8 @@ export type LLPipelineQueueKey = "all" | LLPhaseKey | "escalations";
 
 export interface LLPipelineFilters {
   queue: LLPipelineQueueKey;
+  /** Exact board stage ("all" = every stage in the selected queue). */
+  stage: string;
   /** Matches learner name/phone/email, application no., LL no., batch/route. */
   search: string;
   /** Segregation route ("all" = no filter). */
@@ -127,16 +130,44 @@ function llStatusesInPhase(phase: LLPhaseKey): string[] {
   return [...statuses];
 }
 
-/** Expand the existing derived route labels into database batch-code matches. */
+const ALL_LL_PIPELINE_STATUSES = [
+  ...LL_STAGES.map((stage) => stage.key),
+  ...Object.keys(LL_FAILURE_STAGES),
+];
+
+function llStatusesForQueue(queue: LLPipelineQueueKey): string[] {
+  if (queue !== "all" && queue !== "escalations") {
+    return llStatusesInPhase(queue);
+  }
+  return ALL_LL_PIPELINE_STATUSES;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyLLQueueFilter(query: any, queue: LLPipelineQueueKey) {
+  if (queue === "escalations") {
+    return query.or(
+      `escalated.is.true,status.in.(${LL_ESCALATION_STATUSES.join(",")})`,
+    );
+  }
+
+  if (queue !== "all") {
+    return query.in("status", llStatusesInPhase(queue));
+  }
+
+  return query;
+}
+
+/** Expand derived route labels into database batch-code matches. */
 function llPipelineSearchRoutes(term: string): string[] {
   const t = term.trim().toLowerCase();
   if (!t) return [];
+
   return LL_SEGREGATION_ROUTES.filter(
-    (r) =>
-      r.code.toLowerCase() === t ||
-      r.name.toLowerCase().includes(t) ||
-      llSegregationRouteLabel(r.code).toLowerCase().includes(t),
-  ).map((r) => r.code);
+    (route) =>
+      route.code.toLowerCase() === t ||
+      route.name.toLowerCase().includes(t) ||
+      llSegregationRouteLabel(route.code).toLowerCase().includes(t),
+  ).map((route) => route.code);
 }
 
 async function fetchLLApplicationsPage(opts: {
@@ -256,7 +287,6 @@ export function useLLQueueCounts() {
   return useQuery({
     queryKey: ["ll-queue-counts"],
     queryFn: async (): Promise<Record<LLPipelineQueueKey, number>> => {
-      const failureStatuses = Object.keys(LL_FAILURE_STAGES);
       const tabs: { key: LLPipelineQueueKey; statuses: string[] | null }[] = [
         { key: "all", statuses: null },
         ...LL_PHASES.map((p) => ({
@@ -273,7 +303,7 @@ export function useLLQueueCounts() {
           });
           if (key === "escalations") {
             q = q.or(
-              `escalated.is.true,status.in.(${failureStatuses.join(",")})`,
+              `escalated.is.true,status.in.(${LL_ESCALATION_STATUSES.join(",")})`,
             );
           } else if (statuses) {
             q = q.in("status", statuses);
@@ -292,10 +322,34 @@ export function useLLQueueCounts() {
   });
 }
 
+/** Exact counts for every stage shown in the selected pipeline queue. */
+export function useLLStageCounts(queue: LLPipelineQueueKey) {
+  return useQuery({
+    queryKey: ["ll-stage-counts", queue],
+    queryFn: async (): Promise<Record<string, number>> => {
+      const rows = await Promise.all(
+        llStatusesForQueue(queue).map(async (status) => {
+          let q = sb.from("ll_applications").select("id", {
+            count: "exact",
+            head: true,
+          });
+          q = applyLLQueueFilter(q, queue).eq("status", status);
+          const { error, count } = await q;
+          if (error) throw error;
+          return [status, count ?? 0] as const;
+        }),
+      );
+      return Object.fromEntries(rows);
+    },
+    staleTime: 30 * 1000,
+  });
+}
+
 /** Refresh the pipeline lists + tab counts after any LL application change. */
 function invalidateLLPipeline(queryClient: QueryClient) {
   queryClient.invalidateQueries({ queryKey: ["ll-applications"] });
   queryClient.invalidateQueries({ queryKey: ["ll-queue-counts"] });
+  queryClient.invalidateQueries({ queryKey: ["ll-stage-counts"] });
 }
 
 export function useLLPipelineEvents(applicationId: string | null) {
@@ -852,6 +906,149 @@ export function useReviewLLDocument() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["ll-documents"] });
       queryClient.invalidateQueries({ queryKey: ["ll-pipeline-events"] });
+    },
+  });
+}
+
+/** RTO team replaces a rejected customer document collected offline. */
+export function useAdminReplaceLLDocument() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      application,
+      doc,
+      file,
+      actorName,
+      docLabel,
+    }: {
+      application: LLApplication;
+      doc: LLDocument;
+      file: File;
+      actorName?: string | null;
+      docLabel: string;
+    }) => {
+      if (doc.status !== "rejected") {
+        throw new Error("Only rejected documents can be replaced here.");
+      }
+
+      const ext = file.name.split(".").pop()?.toLowerCase() || "bin";
+      const slot = doc.doc_slot || "primary";
+      const path = `${application.learner_id}/${doc.doc_type}-${slot}-admin-${Date.now()}.${ext}`;
+      const { error: uploadError } = await supabase.storage
+        .from("ll-documents")
+        .upload(path, file, { cacheControl: "3600", upsert: false });
+      if (uploadError) {
+        throw new Error(`Document upload failed: ${uploadError.message}`);
+      }
+
+      const { data: replaced, error: updateError } = await sb
+        .from("ll_documents")
+        .update({
+          storage_path: path,
+          file_name: file.name,
+          mime_type: file.type,
+          status: "pending",
+          rejection_reason: null,
+          reviewed_by: null,
+          reviewed_at: null,
+          created_at: new Date().toISOString(),
+        })
+        .eq("id", doc.id)
+        .eq("application_id", application.id)
+        .eq("status", "rejected")
+        .select("id")
+        .maybeSingle();
+      if (updateError) throw updateError;
+      if (!replaced) {
+        throw new Error(
+          "This document is no longer rejected. Refresh and try again.",
+        );
+      }
+
+      await appendEvent({
+        application_id: application.id,
+        learner_id: application.learner_id,
+        event_type: "note",
+        actor_name: actorName,
+        note: `Document replaced by RTO team: ${docLabel} — ${file.name}`,
+      });
+
+      const { data: remainingRejected, error: remainingError } = await sb
+        .from("ll_documents")
+        .select("id")
+        .eq("application_id", application.id)
+        .eq("status", "rejected")
+        .limit(1);
+      if (remainingError) throw remainingError;
+
+      let returnedToReview = false;
+      if (
+        application.status === "docs_rejected" &&
+        (remainingRejected ?? []).length === 0
+      ) {
+        const { data: submitted, error: submitError } = await sb
+          .from("ll_applications")
+          .update({
+            status: "docs_submitted",
+            rejection_reason: null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", application.id)
+          .eq("status", "docs_rejected")
+          .select("id")
+          .maybeSingle();
+        if (submitError) throw submitError;
+
+        if (submitted) {
+          await appendEvent({
+            application_id: application.id,
+            learner_id: application.learner_id,
+            event_type: "status_change",
+            from_status: "docs_rejected",
+            to_status: "docs_submitted",
+            actor_name: actorName,
+            note: "All rejected documents were replaced by the RTO team",
+          });
+
+          const { data: underReview, error: reviewError } = await sb
+            .from("ll_applications")
+            .update({
+              status: "docs_under_review",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", application.id)
+            .eq("status", "docs_submitted")
+            .select("id")
+            .maybeSingle();
+          if (reviewError) throw reviewError;
+          if (!underReview) {
+            throw new Error(
+              "The documents were replaced, but the application status changed at the same time. Refresh to see its current stage.",
+            );
+          }
+
+          returnedToReview = true;
+          await appendEvent({
+            application_id: application.id,
+            learner_id: application.learner_id,
+            event_type: "status_change",
+            from_status: "docs_submitted",
+            to_status: "docs_under_review",
+            actor_name: actorName,
+            note: "RTO team replacement submitted — documents returned to review",
+          });
+        }
+      }
+
+      return { returnedToReview };
+    },
+    onSuccess: (_result, { application }) => {
+      queryClient.invalidateQueries({ queryKey: ["ll-documents"] });
+      invalidateLLPipeline(queryClient);
+      queryClient.invalidateQueries({ queryKey: ["ll-pipeline-events"] });
+      queryClient.invalidateQueries({
+        queryKey: ["my-ll-application", application.learner_id],
+      });
     },
   });
 }

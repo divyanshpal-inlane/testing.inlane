@@ -1,11 +1,4 @@
-import {
-  Loader2,
-  Plus,
-  Search,
-  Shield,
-  Trash2,
-  Users,
-} from "lucide-react";
+import { Loader2, Plus, Search, Shield, Trash2, Users } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -36,17 +29,17 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import {
-  useCurrentAdmin,
   PermissionKey,
   useAllAdmins,
+  useCurrentAdmin,
 } from "@/queries/adminPermissions";
 import {
-  USER_PERMISSIONS,
-  USERS_PAGE_SIZE,
-  UserWithPermissions,
   useCreateUser,
   useDeleteUser,
   usePaginatedUsers,
+  USER_PERMISSIONS,
+  USERS_PAGE_SIZE,
+  UserWithPermissions,
   useUpdateUserPermissions,
 } from "@/queries/userManagement";
 
@@ -82,7 +75,7 @@ export default function UserManagement() {
   // Regular admin: always scoped to their own users (User.created_by_admin_id).
   const effectiveAdminId = isSuperAdmin
     ? selectedAdminId || null
-    : currentAdmin?.id ?? null;
+    : (currentAdmin?.id ?? null);
 
   // The list is only fetched once we know who the current admin is
   const canViewUsers =
@@ -125,8 +118,9 @@ export default function UserManagement() {
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
-  const [selectedUser, setSelectedUser] =
-    useState<UserWithPermissions | null>(null);
+  const [selectedUser, setSelectedUser] = useState<UserWithPermissions | null>(
+    null,
+  );
   const [newUserForm, setNewUserForm] = useState({
     name: "",
     phone: "",
@@ -147,7 +141,7 @@ export default function UserManagement() {
       ...prev,
       phone: value,
     }));
-    
+
     if (value && !isValidPhone(value)) {
       setPhoneError("Phone number must be exactly 10 digits");
     } else {
@@ -577,38 +571,45 @@ export default function UserManagement() {
                   {Object.values(USER_PERMISSIONS)
                     .filter((perm) => {
                       // Exclude unwanted permissions
-                      const excludedPermissions = ["kam_management", "instructor_matrix", "lessons_dashboard", "admin_management"];
+                      const excludedPermissions = [
+                        "kam_management",
+                        "instructor_matrix",
+                        "lessons_dashboard",
+                        "admin_management",
+                      ];
                       if (excludedPermissions.includes(perm.key)) return false;
                       // Only show permissions that admin has
-                      return currentAdmin?.permissions?.includes(perm.key as PermissionKey);
+                      return currentAdmin?.permissions?.includes(
+                        perm.key as PermissionKey,
+                      );
                     })
                     .map((perm) => (
-                    <div
-                      key={perm.key}
-                      className="flex items-start space-x-3 rounded p-2 hover:bg-gray-50"
-                    >
-                      <Checkbox
-                        id={`new-${perm.key}`}
-                        checked={newUserForm.permissions.includes(
-                          perm.key as PermissionKey,
-                        )}
-                        onCheckedChange={() =>
-                          toggleNewPermission(perm.key as PermissionKey)
-                        }
-                      />
-                      <div className="flex-1">
-                        <label
-                          htmlFor={`new-${perm.key}`}
-                          className="cursor-pointer text-sm font-medium"
-                        >
-                          {perm.label}
-                        </label>
-                        <p className="text-xs text-muted-foreground">
-                          {perm.description}
-                        </p>
+                      <div
+                        key={perm.key}
+                        className="flex items-start space-x-3 rounded p-2 hover:bg-gray-50"
+                      >
+                        <Checkbox
+                          id={`new-${perm.key}`}
+                          checked={newUserForm.permissions.includes(
+                            perm.key as PermissionKey,
+                          )}
+                          onCheckedChange={() =>
+                            toggleNewPermission(perm.key as PermissionKey)
+                          }
+                        />
+                        <div className="flex-1">
+                          <label
+                            htmlFor={`new-${perm.key}`}
+                            className="cursor-pointer text-sm font-medium"
+                          >
+                            {perm.label}
+                          </label>
+                          <p className="text-xs text-muted-foreground">
+                            {perm.description}
+                          </p>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
                 </div>
               </div>
             </div>
@@ -673,38 +674,45 @@ export default function UserManagement() {
                 {Object.values(USER_PERMISSIONS)
                   .filter((perm) => {
                     // Exclude unwanted permissions
-                    const excludedPermissions = ["kam_management", "instructor_matrix", "lessons_dashboard", "admin_management"];
+                    const excludedPermissions = [
+                      "kam_management",
+                      "instructor_matrix",
+                      "lessons_dashboard",
+                      "admin_management",
+                    ];
                     if (excludedPermissions.includes(perm.key)) return false;
                     // Only show permissions that admin has
-                    return currentAdmin?.permissions?.includes(perm.key as PermissionKey);
+                    return currentAdmin?.permissions?.includes(
+                      perm.key as PermissionKey,
+                    );
                   })
                   .map((perm) => (
-                  <div
-                    key={perm.key}
-                    className="flex items-start space-x-3 rounded p-2 hover:bg-gray-50"
-                  >
-                    <Checkbox
-                      id={`edit-${perm.key}`}
-                      checked={editPermissions.includes(
-                        perm.key as PermissionKey,
-                      )}
-                      onCheckedChange={() =>
-                        toggleEditPermission(perm.key as PermissionKey)
-                      }
-                    />
-                    <div className="flex-1">
-                      <label
-                        htmlFor={`edit-${perm.key}`}
-                        className="cursor-pointer text-sm font-medium"
-                      >
-                        {perm.label}
-                      </label>
-                      <p className="text-xs text-muted-foreground">
-                        {perm.description}
-                      </p>
+                    <div
+                      key={perm.key}
+                      className="flex items-start space-x-3 rounded p-2 hover:bg-gray-50"
+                    >
+                      <Checkbox
+                        id={`edit-${perm.key}`}
+                        checked={editPermissions.includes(
+                          perm.key as PermissionKey,
+                        )}
+                        onCheckedChange={() =>
+                          toggleEditPermission(perm.key as PermissionKey)
+                        }
+                      />
+                      <div className="flex-1">
+                        <label
+                          htmlFor={`edit-${perm.key}`}
+                          className="cursor-pointer text-sm font-medium"
+                        >
+                          {perm.label}
+                        </label>
+                        <p className="text-xs text-muted-foreground">
+                          {perm.description}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
               </div>
             </div>
             <DialogFooter>

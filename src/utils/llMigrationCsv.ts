@@ -155,12 +155,18 @@ const normalisePhone = (v: string | undefined): string => {
 const courseByLabel = new Map(
   Object.values(COURSES_DATA).map((c) => [c.label.toLowerCase(), c.id]),
 );
-function resolveCourse(v: string | undefined): { id: string | null; label: string | null; known: boolean } {
+function resolveCourse(v: string | undefined): {
+  id: string | null;
+  label: string | null;
+  known: boolean;
+} {
   const raw = (v ?? "").trim();
   if (!raw) return { id: null, label: null, known: true }; // blank = no course
-  if (COURSES_DATA[raw]) return { id: raw, label: COURSES_DATA[raw].label, known: true };
+  if (COURSES_DATA[raw])
+    return { id: raw, label: COURSES_DATA[raw].label, known: true };
   const byLabel = courseByLabel.get(raw.toLowerCase());
-  if (byLabel) return { id: byLabel, label: COURSES_DATA[byLabel].label, known: true };
+  if (byLabel)
+    return { id: byLabel, label: COURSES_DATA[byLabel].label, known: true };
   return { id: null, label: raw, known: false };
 }
 
@@ -414,7 +420,9 @@ export function buildEnrollmentInsert(
 ): Record<string, unknown> {
   const total = row.totalAmount ?? 0;
   const paid = row.amountPaid ?? total;
-  const totalLessons = row.courseId ? (COURSES_DATA[row.courseId]?.hours ?? 0) : 0;
+  const totalLessons = row.courseId
+    ? (COURSES_DATA[row.courseId]?.hours ?? 0)
+    : 0;
   const completed = Math.min(row.completedLessons, totalLessons);
   return {
     learner_id: learnerId,
@@ -428,7 +436,11 @@ export function buildEnrollmentInsert(
     // Must be full_paid / half_paid / pending — "completed" is payment.status only.
     // Issue Fixer and the learner app key off enrollment.payment_status === "full_paid".
     payment_status:
-      paid >= total && total > 0 ? "full_paid" : paid > 0 ? "half_paid" : "pending",
+      paid >= total && total > 0
+        ? "full_paid"
+        : paid > 0
+          ? "half_paid"
+          : "pending",
     // Migrated customers get full lesson access.
     unlocked_lessons: Array.from({ length: totalLessons }, (_, i) => i + 1),
     progress: {
@@ -442,7 +454,9 @@ export function buildEnrollmentInsert(
 
 // Downloadable template: header + two sample rows (one has_ll + course, one not_started).
 export function buildTemplateCsv(): string {
-  const beginner = Object.values(COURSES_DATA).find((c) => c.key === "BEGINNER");
+  const beginner = Object.values(COURSES_DATA).find(
+    (c) => c.key === "BEGINNER",
+  );
   const sampleCourse = beginner?.label ?? "Beginner course";
   const header = LL_MIGRATION_COLUMNS.join(",");
   const sample1 = [
@@ -489,6 +503,9 @@ export function buildTemplateCsv(): string {
     "0",
     "",
   ];
-  const esc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
-  return [header, sample1.map(esc).join(","), sample2.map(esc).join(",")].join("\n");
+  const esc = (v: string) =>
+    /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  return [header, sample1.map(esc).join(","), sample2.map(esc).join(",")].join(
+    "\n",
+  );
 }

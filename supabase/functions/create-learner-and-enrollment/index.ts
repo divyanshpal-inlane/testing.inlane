@@ -168,11 +168,12 @@ serve(async (req) => {
   } catch (error) {
     console.error("Error creating learner and enrollment:", error);
     const errorMessage = error.message || "An error occurred";
-    
+
     // Return 400 for "Learner already registered" error (validation error)
     // Return 500 for other errors (server errors)
-    const statusCode = errorMessage === "Learner already registered" ? 400 : 500;
-    
+    const statusCode =
+      errorMessage === "Learner already registered" ? 400 : 500;
+
     return new Response(JSON.stringify({ error: errorMessage }), {
       status: statusCode,
       headers: { ...corsHeaders, "Content-Type": "application/json" },

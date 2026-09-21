@@ -14,7 +14,6 @@ import { useNavigate, useParams } from "react-router-dom";
 import invariant from "tiny-invariant";
 
 import TrackedVideo from "@/components/lesson/tracked-video";
-import { videoId, quizId } from "@/lib/learning-analytics/model";
 import TriviaCard from "@/components/lesson/trivia";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -24,10 +23,10 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
-import { usePhoneVisibility } from "@/context/phone-visibility-context";
 import { COURSES_DATA } from "@/constants/courses";
+import { usePhoneVisibility } from "@/context/phone-visibility-context";
+import { quizId, videoId } from "@/lib/learning-analytics/model";
 import { numberToText } from "@/lib/utils";
-import { maskCarNumber, maskPhoneNumber } from "@/utils/phoneMasking";
 import {
   useLearner,
   useLearnerEnrollment,
@@ -35,6 +34,7 @@ import {
   useSchedule,
 } from "@/queries/learner";
 import { Database } from "@/types/database.types";
+import { maskCarNumber, maskPhoneNumber } from "@/utils/phoneMasking";
 
 import Signature from "./signature";
 

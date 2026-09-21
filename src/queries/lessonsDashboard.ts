@@ -195,9 +195,7 @@ export function useLessonsDashboard(filters: LessonsDashboardFilters) {
         // the filter logic never depends on the join working correctly).
         // This is non-fatal: if the KAM table query fails (e.g. transient
         // error or RLS) the filter still works by ID; names just won't show.
-        const uniqueKamIds = Array.from(
-          new Set(linkRows.map((r) => r.kam_id)),
-        );
+        const uniqueKamIds = Array.from(new Set(linkRows.map((r) => r.kam_id)));
         const kamNameById = new Map<string, string>();
         if (uniqueKamIds.length > 0) {
           const { data: kamData } = await supabase

@@ -3,11 +3,11 @@ import { ExternalLinkIcon, IdCardIcon, Loader2, Phone } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { useMaskedCall } from "@/hooks/useMaskedCall";
 import { usePhoneVisibility } from "@/context/phone-visibility-context";
+import { useMaskedCall } from "@/hooks/useMaskedCall";
 import { useLearner } from "@/queries/learner";
-import { maskCarNumber, maskPhoneNumber } from "@/utils/phoneMasking";
 import { Database } from "@/types/database.types";
+import { maskCarNumber, maskPhoneNumber } from "@/utils/phoneMasking";
 
 type ScheduleType = "course" | "demo" | "topup";
 
