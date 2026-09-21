@@ -1,4 +1,4 @@
-import { type InfiniteData, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { addDays, format } from "date-fns";
 import {
   AlertTriangle,
@@ -11,7 +11,7 @@ import {
   Undo2,
   XCircle,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import LLDocumentsReview from "@/components/admin/LLDocumentsReview";
@@ -57,14 +57,14 @@ import {
 } from "@/constants/llPipeline";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import {
-  DEFAULT_LL_PIPELINE_FILTERS,
+  LL_PIPELINE_PAGE_SIZE,
   LLApplication,
   llDocumentUrl,
   LLPipelineFilters,
-  LLPipelineQueryPage,
   useActiveLLApplication,
   useCreateLLApplication,
-  useLLApplicationsInfinite,
+  useLLApplication,
+  useLLApplicationsPage,
   useLLDocuments,
   useLLLearnerSearch,
   useLLPipelineEvents,
@@ -122,6 +122,10 @@ export default function LLPipeline() {
   const actorId = currentUser?.id ?? null;
 
   const [queue, setQueue] = useState<QueueKey>("all");
+  const [pagesByQueue, setPagesByQueue] = useState<
+    Partial<Record<QueueKey, number>>
+  >({});
+  const page = pagesByQueue[queue] ?? 1;
   const [stageFilter, setStageFilter] = useState("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -140,9 +144,10 @@ export default function LLPipeline() {
 
   // Debounced search: each keystroke must not fire its own DB request.
   const debouncedSearch = useDebouncedValue(searchTerm, 300);
+  const isSearchPending = searchTerm !== debouncedSearch;
 
   // Queue/search/route/date filters are applied in the DB (PostgREST WHERE),
-  // never client-side. A change resets pagination via a fresh query key.
+  // never client-side. Tabs retain separate pages; filter changes reset them.
   const filters = useMemo<LLPipelineFilters>(
     () => ({
       queue,
@@ -164,11 +169,14 @@ export default function LLPipeline() {
     ],
   );
 
-  const pipeline = useLLApplicationsInfinite(filters);
-  const { fetchNextPage, hasNextPage, isFetchingNextPage } = pipeline;
-  const applications = useMemo(
-    () => pipeline.data?.pages.flatMap((p) => p.data) ?? [],
-    [pipeline.data],
+  // While typing, don't request page 1 with the OLD search term. Fetch once
+  // the debounce settles, using the new search and already-reset page.
+  const pipeline = useLLApplicationsPage(filters, page, !isSearchPending);
+  const applications = pipeline.data?.data ?? [];
+  const totalRecords = pipeline.data?.total ?? 0;
+  const totalPages = Math.max(
+    1,
+    Math.ceil(totalRecords / LL_PIPELINE_PAGE_SIZE),
   );
   const { data: queueCountsData } = useLLQueueCounts();
   const queueCounts: Record<string, number> = queueCountsData ?? {};
@@ -182,32 +190,19 @@ export default function LLPipeline() {
     return LL_BOARD_STAGE_FILTERS.filter((stage) => stage.phase === queue);
   }, [queue]);
 
-  const selected = applications.find((a) => a.id === selectedId) ?? null;
+  const pageApplication = applications.find((a) => a.id === selectedId);
+  const { data: selectedApplication } = useLLApplication(
+    selectedId,
+    pageApplication,
+  );
+  const selected = pageApplication ?? selectedApplication ?? null;
 
-  // Infinite scroll: fetch the next 10 rows when the list nears the bottom.
-  const loadMore = useCallback(() => {
-    if (hasNextPage && !isFetchingNextPage) {
-      void fetchNextPage();
-    }
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
-
-  const listScrollRef = useRef<HTMLDivElement | null>(null);
+  // A status change/deletion may remove the last row of the last page.
   useEffect(() => {
-    const viewport = listScrollRef.current?.querySelector(
-      "[data-radix-scroll-area-viewport]",
-    ) as HTMLElement | null;
-    if (!viewport) return;
-    const onScroll = () => {
-      if (
-        viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <
-        240
-      ) {
-        loadMore();
-      }
-    };
-    viewport.addEventListener("scroll", onScroll);
-    return () => viewport.removeEventListener("scroll", onScroll);
-  }, [loadMore]);
+    if (pipeline.data && !isSearchPending && page > totalPages) {
+      setPagesByQueue((current) => ({ ...current, [queue]: totalPages }));
+    }
+  }, [pipeline.data, isSearchPending, page, totalPages, queue]);
 
   return (
     <div
@@ -242,32 +237,14 @@ export default function LLPipeline() {
             <NewApplicationButton
               actorName={actorName}
               onOpenApplication={(application) => {
-                // Prepend the freshly-created application into the default
-                // (unfiltered) list so it appears instantly at the top.
-                queryClient.setQueryData<InfiniteData<LLPipelineQueryPage>>(
-                  ["ll-applications", DEFAULT_LL_PIPELINE_FILTERS],
-                  (current) => {
-                    if (!current) return current;
-                    return {
-                      ...current,
-                      pages: current.pages.map((page, index) =>
-                        index === 0
-                          ? {
-                              ...page,
-                              data: [
-                                application,
-                                ...page.data.filter(
-                                  (item) => item.id !== application.id,
-                                ),
-                              ],
-                              total: Math.max(page.total + 1, page.data.length),
-                            }
-                          : page,
-                      ),
-                    };
-                  },
+                // Open an existing journey without inserting it into an
+                // unrelated page or changing the database's list ordering.
+                queryClient.setQueryData(
+                  ["ll-applications", "detail", application.id],
+                  application,
                 );
                 setQueue("all");
+                setPagesByQueue({});
                 setStageFilter("all");
                 setRouteFilter("all");
                 setDateFrom("");
@@ -306,7 +283,13 @@ export default function LLPipeline() {
           </button>
         ))}
         <div className="ml-auto flex flex-wrap items-center gap-1">
-          <Select value={routeFilter} onValueChange={setRouteFilter}>
+          <Select
+            value={routeFilter}
+            onValueChange={(value) => {
+              setRouteFilter(value);
+              setPagesByQueue({});
+            }}
+          >
             <SelectTrigger className="h-7 w-44 text-xs">
               <SelectValue placeholder="Route" />
             </SelectTrigger>
@@ -321,9 +304,10 @@ export default function LLPipeline() {
           </Select>
           <Select
             value={dateField}
-            onValueChange={(v) =>
-              setDateField(v as "created_at" | "updated_at")
-            }
+            onValueChange={(v) => {
+              setDateField(v as "created_at" | "updated_at");
+              setPagesByQueue({});
+            }}
           >
             <SelectTrigger className="h-7 w-28 text-xs">
               <SelectValue />
@@ -337,14 +321,20 @@ export default function LLPipeline() {
             type="date"
             className="h-7 w-32 text-xs"
             value={dateFrom}
-            onChange={(e) => setDateFrom(e.target.value)}
+            onChange={(e) => {
+              setDateFrom(e.target.value);
+              setPagesByQueue({});
+            }}
           />
           <span className="text-xs text-gray-400">–</span>
           <Input
             type="date"
             className="h-7 w-32 text-xs"
             value={dateTo}
-            onChange={(e) => setDateTo(e.target.value)}
+            onChange={(e) => {
+              setDateTo(e.target.value);
+              setPagesByQueue({});
+            }}
           />
           {(dateFrom || dateTo) && (
             <Button
@@ -354,6 +344,7 @@ export default function LLPipeline() {
               onClick={() => {
                 setDateFrom("");
                 setDateTo("");
+                setPagesByQueue({});
               }}
             >
               Clear
@@ -442,18 +433,31 @@ export default function LLPipeline() {
                 placeholder="Name, phone, application no…"
                 className="h-8 pl-8 text-sm"
                 value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
+                onChange={(e) => {
+                  setSearchTerm(e.target.value);
+                  setPagesByQueue({});
+                }}
               />
             </div>
           </CardHeader>
           <CardContent className="p-3 pt-0">
-            <ScrollArea
-              ref={listScrollRef}
-              className="h-[calc(100vh-410px)] min-h-[360px]"
-            >
-              {pipeline.isLoading ? (
+            <ScrollArea className="h-[calc(100vh-300px)]">
+              {pipeline.isLoading || isSearchPending ? (
                 <div className="py-10 text-center text-sm text-gray-500">
                   Loading…
+                </div>
+              ) : pipeline.isError ? (
+                <div className="py-10 text-center text-sm text-red-500">
+                  <p>{pipeline.error.message}</p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-2"
+                    onClick={() => void pipeline.refetch()}
+                    disabled={pipeline.isFetching}
+                  >
+                    Retry
+                  </Button>
                 </div>
               ) : applications.length === 0 ? (
                 <div className="py-10 text-center text-sm text-gray-500">
@@ -490,16 +494,55 @@ export default function LLPipeline() {
                   </button>
                 ))
               )}
-              {pipeline.isFetchingNextPage ? (
-                <div className="py-4 text-center text-sm text-gray-400">
-                  Loading more…
-                </div>
-              ) : !pipeline.hasNextPage && applications.length > 0 ? (
-                <div className="py-4 text-center text-xs text-gray-400">
-                  End of list
-                </div>
-              ) : null}
             </ScrollArea>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t pt-3">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setPagesByQueue((current) => ({
+                    ...current,
+                    [queue]: Math.max(1, page - 1),
+                  }))
+                }
+                disabled={page <= 1 || pipeline.isFetching || isSearchPending}
+              >
+                Previous
+              </Button>
+              <div
+                className="text-center text-xs text-gray-500"
+                aria-live="polite"
+              >
+                <div>
+                  Page {page}
+                  {pipeline.data && !isSearchPending && ` of ${totalPages}`}
+                </div>
+                <div>
+                  {pipeline.data && !isSearchPending
+                    ? `${totalRecords} records`
+                    : "Loading…"}
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setPagesByQueue((current) => ({
+                    ...current,
+                    [queue]: Math.min(totalPages, page + 1),
+                  }))
+                }
+                disabled={
+                  !pipeline.data ||
+                  page >= totalPages ||
+                  pipeline.isFetching ||
+                  pipeline.isError ||
+                  isSearchPending
+                }
+              >
+                Next
+              </Button>
+            </div>
           </CardContent>
         </Card>
 

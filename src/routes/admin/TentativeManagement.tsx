@@ -10,7 +10,7 @@ import {
   UserPlus,
 } from "lucide-react";
 import { ArrowLeft } from "lucide-react";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -39,10 +39,36 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { supabase } from "@/lib/supabaseClient";
 
 import Schedule from "../schedule";
 import { IncompletePaymentsCard } from "./IncompletePaymentsCard";
+
+const TENTATIVE_CUSTOMERS_PAGE_SIZE = 10;
+
+type TentativeCustomerPage = {
+  customers: {
+    groupId: string;
+    schedulesStartDate: string;
+    schedulesStartTime: string;
+    schedules: {
+      id: number;
+      date: string;
+      start_time: string;
+      end_time: string;
+      tentative_details: {
+        name?: string;
+        email?: string;
+        pickup_location?: string;
+        leadName?: string;
+        description?: string;
+      };
+    }[];
+  }[];
+  total_count: number;
+  page: number;
+};
 
 function TentativeSchedules() {
   const [learnerData, setLearnerData] = useState({
@@ -324,6 +350,12 @@ export default function TentativeScheduleInfo2() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [searchQuery, setSearchQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [startDate] = useState(
+    () => subDays(new Date(), 30).toISOString().split("T")[0],
+  );
+  const debouncedSearch = useDebouncedValue(searchQuery.toLowerCase());
+  const isSearchPending = debouncedSearch !== searchQuery.toLowerCase();
   const [selectedLearner, setSelectedLearner] = useState<LearnerInfo | null>(
     null,
   );
@@ -379,139 +411,43 @@ export default function TentativeScheduleInfo2() {
     setSchedulesDialogOpen(true);
   };
 
-  // Fetch all learners whose payment status is completed
-  // in descending order of signup time
+  // Select customer groups in the database, then load all slots for that page.
   const {
-    data: tentativeSchedulesByLearners,
-    isLoadingTentativeSchedulesByLearners,
+    data: customerPage,
+    isLoading: isLoadingTentativeSchedulesByLearners,
+    isFetching,
+    isError,
+    refetch,
   } = useQuery({
-    queryKey: ["learnersWithTentative"],
-    queryFn: async () => {
-      // Fetch ALL tentative schedules using pagination to bypass 1000 row limit
-      const startDate = subDays(new Date(), 30);
-      let allData: any[] = [];
-      let pageStart = 0;
-      const pageSize = 1000;
-      let hasMore = true;
+    queryKey: ["learnersWithTentative", startDate, debouncedSearch, page],
+    queryFn: async ({ signal }) => {
+      const { data, error } = await supabase
+        .rpc("get_tentative_customers_paginated", {
+          p_start_date: startDate,
+          p_search: debouncedSearch,
+          p_page: page,
+        })
+        .abortSignal(signal);
 
-      while (hasMore) {
-        const { data, error } = await supabase
-          .from("Schedule")
-          .select(`*`)
-          .gte("date", startDate.toISOString().split("T")[0])
-          .eq("isTentative", true)
-          .order("date", { ascending: true })
-          .order("start_time", { ascending: true })
-          .range(pageStart, pageStart + pageSize - 1);
-
-        if (error) throw error;
-
-        if (!data || data.length === 0) {
-          hasMore = false;
-        } else {
-          allData = [...allData, ...data];
-          if (data.length < pageSize) {
-            hasMore = false;
-          } else {
-            pageStart += pageSize;
-          }
-        }
-      }
-
-      console.log("📊 TOTAL SCHEDULES FROM DB:", allData.length);
-      if (allData.length > 0) {
-        const dates = allData.map((s) => s.date).sort();
-        console.log("📅 Date range:", dates[0], "to", dates[dates.length - 1]);
-        const months = new Set(allData.map((s) => s.date.substring(0, 7)));
-        console.log("🗓️ Months present:", Array.from(months).sort());
-      }
-      console.log("tentativeSchedulesByLearners:", allData);
-      return allData; //as LearnerInfo[];
+      if (error) throw error;
+      return data as unknown as TentativeCustomerPage;
     },
+    // Search and page reset happen together; wait for the final search term
+    // so page 1 is never fetched with the previous search while typing.
+    enabled: !isSearchPending,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
 
-  function groupSchedules(schedules) {
-    if (!schedules) return;
-    // Use a Map to maintain insertion order, which respects the original array's sort order (date)
-    const groupsMap = schedules.reduce((acc, schedule) => {
-      // Safely access the group key
-      const groupId = schedule?.tentative_details?.phone;
-
-      if (!groupId) {
-        return acc;
-      }
-
-      if (!acc.has(groupId)) {
-        // Initialize the group on first encounter
-        acc.set(groupId, {
-          groupId: groupId,
-          schedulesStartDate: schedule.date, // Captures the earliest date for implicit group sorting
-          schedulesStartTime: schedule.start_time, // Captures the earliest start_time for implicit group sorting
-          schedules: [],
-        });
-      }
-
-      // Add the current schedule to its respective group, maintaining chronological order
-      acc.get(groupId).schedules.push(schedule);
-
-      return acc;
-    }, new Map());
-
-    // Convert the Map values back into a chronologically ordered Array of groups
-    return Array.from(groupsMap.values());
-  }
-
-  // Group the fetched tentative schedules
-  const schedulesGrouped = useMemo(() => {
-    if (!tentativeSchedulesByLearners) {
-      return [];
-    }
-    const groupedData = groupSchedules(tentativeSchedulesByLearners);
-    console.log("The grouped schedules are", groupedData);
-    return groupedData;
-  }, [tentativeSchedulesByLearners]);
-
-  const filteredScheduleGroups = useMemo(() => {
-    // If the initial data isn't ready or the search query is empty, return the original data
-    if (!schedulesGrouped || searchQuery === "") {
-      return schedulesGrouped;
-    }
-
-    const lowerCaseQuery = searchQuery.toLowerCase();
-
-    return schedulesGrouped.filter((group) => {
-      // 1. Check if the Group ID (groupId) matches the search query
-      const groupIdMatch = group.groupId.toLowerCase().includes(lowerCaseQuery);
-
-      // 2. Check if ANY schedule within the group matches the search query on common fields
-      // not working currently
-      const scheduleMatch = group.schedules.some((schedule) => {
-        const details = schedule.tentative_details;
-        console.log("Seraching", lowerCaseQuery, "on details", details);
-        // Check key fields inside the schedule object for a match
-        return (
-          details.name?.toLowerCase().includes(lowerCaseQuery) ||
-          details.pickup_location?.toLowerCase().includes(lowerCaseQuery) ||
-          details.leadName?.toLowerCase().includes(lowerCaseQuery) ||
-          // Assuming date or time might be searched (useful if formatted search is implemented)
-          schedule.date.includes(searchQuery) ||
-          schedule.start_time.includes(searchQuery)
-        );
-      });
-
-      // Return the group if EITHER the Group ID matches OR any schedule matches
-      return groupIdMatch || scheduleMatch;
-    });
-  }, [schedulesGrouped, searchQuery]);
-
-  // Filter learners based on search query
-  // const filteredLearners = groupSchedules?.filter(
-  //   (schedule) =>
-  //     schedule.tentative_details.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-  //     schedule.tentative_details.phone.includes(searchQuery) ||
-  //     schedule.tentative_details.email?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-  //     schedule.tentative_details.area?.toLowerCase().includes(searchQuery.toLowerCase()),
-  // );
+  const schedulesGrouped = customerPage?.customers ?? [];
+  const totalCount = customerPage?.total_count ?? 0;
+  const totalPages = Math.max(
+    1,
+    Math.ceil(totalCount / TENTATIVE_CUSTOMERS_PAGE_SIZE),
+  );
+  const currentPage = customerPage?.page ?? page;
+  const isPagePending = isFetching || isSearchPending;
 
   const handleLearnerSelect = (learner: LearnerInfo) => {
     setSelectedLearner(learner);
@@ -582,7 +518,10 @@ export default function TentativeScheduleInfo2() {
                 placeholder="Search by name, phone, email or area..."
                 className="pl-10"
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setPage(1);
+                }}
               />
             </div>
             <Button
@@ -602,23 +541,35 @@ export default function TentativeScheduleInfo2() {
                 <div>
                   <CardTitle>Customers</CardTitle>
                   <CardDescription>
-                    {filteredScheduleGroups?.length || 0} customers found
+                    {totalCount} customers found
                   </CardDescription>
                 </div>
               </div>
             </CardHeader>
             <CardContent className="p-4">
-              {isLoadingTentativeSchedulesByLearners ? (
+              {isLoadingTentativeSchedulesByLearners || isSearchPending ? (
                 <div className="flex items-center justify-center p-8">
                   <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent"></div>
                 </div>
-              ) : filteredScheduleGroups?.length === 0 ? (
+              ) : isError ? (
+                <div className="p-8 text-center text-gray-500">
+                  <p>Failed to fetch tentative schedules.</p>
+                  <Button
+                    variant="outline"
+                    className="mt-4"
+                    onClick={() => refetch()}
+                    disabled={isPagePending}
+                  >
+                    Retry
+                  </Button>
+                </div>
+              ) : schedulesGrouped.length === 0 ? (
                 <div className="p-8 text-center text-gray-500">
                   No customers found matching your search
                 </div>
               ) : (
                 <div className="grid grid-cols-1 gap-4">
-                  {filteredScheduleGroups?.map((schedulesGroup) => {
+                  {schedulesGrouped.map((schedulesGroup) => {
                     // 1. Safely access the first schedule and its details
                     const firstSchedule = schedulesGroup.schedules?.[0];
                     const details = firstSchedule?.tentative_details;
@@ -752,6 +703,29 @@ export default function TentativeScheduleInfo2() {
                   })}
                 </div>
               )}
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-4 border-t pt-4">
+                <p className="text-sm text-muted-foreground" aria-live="polite">
+                  Page {currentPage} of {totalPages} ({totalCount} customers)
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => setPage(currentPage - 1)}
+                    disabled={isPagePending || isError || currentPage <= 1}
+                  >
+                    Previous
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => setPage(currentPage + 1)}
+                    disabled={
+                      isPagePending || isError || currentPage >= totalPages
+                    }
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
             </CardContent>
           </Card>
         </div>
