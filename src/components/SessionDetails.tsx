@@ -1,13 +1,12 @@
 import { format } from "date-fns";
-import { ExternalLinkIcon, IdCardIcon, Loader2, Phone } from "lucide-react";
+import { ExternalLinkIcon, IdCardIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { MaskedCallButton } from "@/components/MaskedCallButton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { usePhoneVisibility } from "@/context/phone-visibility-context";
-import { useMaskedCall } from "@/hooks/useMaskedCall";
 import { useLearner } from "@/queries/learner";
+import { maskCarNumber } from "@/utils/phoneMasking";
 import { Database } from "@/types/database.types";
-import { maskCarNumber, maskPhoneNumber } from "@/utils/phoneMasking";
 
 type ScheduleType = "course" | "demo" | "topup";
 
@@ -53,9 +52,7 @@ export function SessionDetails({
   scheduleType = "course",
 }: SessionDetailsProps) {
   const { data } = useLearner();
-  const { initiateCall, isCallLoading } = useMaskedCall();
-  const { canViewUnmaskedPhoneNumbers, canViewUnmaskedCarNumbers } =
-    usePhoneVisibility();
+  const { canViewUnmaskedCarNumbers } = usePhoneVisibility();
   const pickupLocation = data?.pick_up_location;
   const lat = data?.address_lat;
   const lng = data?.address_lng;
@@ -101,27 +98,15 @@ export function SessionDetails({
             <p className="text-sm font-light">Instructor Name</p>
             <p className="text-sm font-medium">{instructor.name}</p>
           </div>
-          <div className="flex flex-col gap-1">
-            <p className="text-sm font-light">Call Instructor</p>
-            <div className="flex items-center gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={isCallLoading}
-                onClick={() =>
-                  initiateCall(data?.phone ?? "", instructor.phone ?? "")
-                }
+            <div className="flex flex-col gap-1">
+              <p className="text-sm font-light">Call Instructor</p>
+              <MaskedCallButton
+                callerPhone={data?.phone}
+                calleePhone={instructor.phone}
+                label="Call Now"
                 className="flex w-fit items-center gap-1.5 text-sm font-medium"
-              >
-                {isCallLoading ? (
-                  <Loader2 size={14} className="animate-spin" />
-                ) : (
-                  <Phone size={14} />
-                )}
-                {isCallLoading ? "Connecting..." : "Call Now"}
-              </Button>
+              />
             </div>
-          </div>
           <div className="flex flex-col gap-0">
             <p className="text-sm font-light">Car Model</p>
             <p className="text-sm font-medium">{instructor.car_make}</p>
