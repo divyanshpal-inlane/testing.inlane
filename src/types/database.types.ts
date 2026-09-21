@@ -1245,6 +1245,19 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      get_lessons_dashboard_page: {
+        Args: {
+          p_from: string;
+          p_to: string;
+          p_page?: number;
+          p_kam_ids?: string[] | null;
+          p_instructor_ids?: string[] | null;
+          p_class_numbers?: number[] | null;
+          p_statuses?: string[] | null;
+          p_search?: string | null;
+        };
+        Returns: Json;
+      };
       get_car_leads: {
         Args: {
           search_term?: string;
