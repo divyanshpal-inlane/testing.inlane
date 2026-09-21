@@ -421,9 +421,9 @@ export default function LLPipeline() {
           <CardHeader className="p-3 pb-2">
             <CardTitle className="text-sm">
               Applications
-              {pipeline.data?.pages[0] ? (
+              {pipeline.data ? (
                 <span className="ml-1 font-normal text-gray-500">
-                  · {pipeline.data.pages[0].total}
+                  · {totalRecords}
                 </span>
               ) : null}
             </CardTitle>
