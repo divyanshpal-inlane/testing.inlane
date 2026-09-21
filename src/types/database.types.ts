@@ -1245,6 +1245,16 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      get_payment_tracker_page: {
+        Args: {
+          p_tab: string;
+          p_page: number;
+          p_search: string;
+          p_course: string;
+          p_urgency: string;
+        };
+        Returns: Json;
+      };
             get_earnings_instructors: {
         Args: { p_search?: string };
         Returns: {
