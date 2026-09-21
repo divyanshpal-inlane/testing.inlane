@@ -1,5 +1,7 @@
-import { ExternalLinkIcon, PhoneOutgoing } from "lucide-react";
+import { ExternalLinkIcon } from "lucide-react";
 
+import { MaskedCallButton } from "@/components/MaskedCallButton";
+import { useUser } from "@/context/auth-context";
 import {
   Card,
   CardContent,
@@ -14,6 +16,8 @@ interface LessonListProps {
 }
 
 const LessonList = ({ instructorData, LESSON_CONTENT }: LessonListProps) => {
+  const { phone: instructorPhone } = useUser();
+
   function formatTimeRange(start_time: string, end_time: string): string {
     const formatTime = (time: string): string => {
       const [hours, minutes] = time.split(":");
@@ -154,14 +158,14 @@ const LessonList = ({ instructorData, LESSON_CONTENT }: LessonListProps) => {
                     <p className="text-muted-foreground">Learner name :</p>
                     <p>{learner.name}</p>
                   </div>
-                  <div className="flex flex-row items-center gap-1">
-                    <p className="text-muted-foreground">Contact Learner : </p>
-                    <p>{learner.phone}</p>
-                    <div className="ml-1">
-                      <a href={`tel:+91${learner.phone}`}>
-                        <PhoneOutgoing size={14} />
-                      </a>
-                    </div>
+                  <div className="flex flex-row items-center gap-2">
+                    <p className="text-muted-foreground">Contact Learner :</p>
+                    <MaskedCallButton
+                      callerPhone={instructorPhone}
+                      calleePhone={learner.phone}
+                      label="Call Learner"
+                      className="flex h-8 items-center gap-1.5 text-xs"
+                    />
                   </div>
 
                   {lessonSchedule && lessonSchedule.status && (

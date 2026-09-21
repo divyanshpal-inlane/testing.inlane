@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useUser } from "@/context/auth-context";
 import { usePhoneVisibility } from "@/context/phone-visibility-context";
 import { supabase } from "@/lib/supabaseClient";
+import { maskCarNumber } from "@/utils/phoneMasking";
 import {
   useLearner,
   useLearnerEnrollment,
@@ -14,7 +15,6 @@ import {
 } from "@/queries/learner";
 import { usePaymentsByLearner } from "@/queries/payment";
 import { useRescheduleLearnerLessonRequests } from "@/queries/schedule-requests";
-import { maskCarNumber } from "@/utils/phoneMasking";
 
 interface Message {
   role: "user" | "assistant";
@@ -109,7 +109,6 @@ function useLearnerContext() {
           : null,
         status: s.status,
         instructorName: s.Instructor?.name ?? null,
-        instructorPhone: s.Instructor?.phone ?? null,
         instructorCar: s.Instructor?.car_make
           ? `${s.Instructor.car_make} (${canViewUnmaskedCarNumbers ? s.Instructor.car_number : maskCarNumber(s.Instructor.car_number)})`
           : null,
@@ -221,7 +220,6 @@ function useInstructorContext() {
           : null,
         status: s.status,
         learnerName: s.Learner?.name ?? null,
-        learnerPhone: s.Learner?.phone ?? null,
         pickupLocation: s.Learner?.pick_up_location ?? null,
         area: s.Learner?.area ?? null,
         courseName: s.Courses?.name ?? null,
@@ -244,7 +242,6 @@ function useInstructorContext() {
           : null,
         status: s.status,
         learnerName: s.Learner?.name ?? null,
-        learnerPhone: s.Learner?.phone ?? null,
         pickupLocation: s.Learner?.pick_up_location ?? null,
         area: s.Learner?.area ?? null,
         courseName: s.Courses?.name ?? null,

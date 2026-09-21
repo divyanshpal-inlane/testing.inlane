@@ -1,12 +1,8 @@
-import {
-  Calendar,
-  Clock,
-  ExternalLinkIcon,
-  PhoneOutgoing,
-  User,
-} from "lucide-react";
+import { Calendar, Clock, ExternalLinkIcon, User } from "lucide-react";
 
+import { MaskedCallButton } from "@/components/MaskedCallButton";
 import { Button } from "@/components/ui/button";
+import { useUser } from "@/context/auth-context";
 import {
   Dialog,
   DialogContent,
@@ -29,6 +25,8 @@ const ScheduleDetailDialog = ({
   learner,
   onClose,
 }: ScheduleDetailDialogProps) => {
+  const { phone: instructorPhone } = useUser();
+
   function formatTimeRange(start_time: string, end_time: string): string {
     const formatTime = (time: string): string => {
       const [hours, minutes] = time.split(":");
@@ -125,18 +123,12 @@ const ScheduleDetailDialog = ({
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-gray-500">
-                      Phone:
-                    </span>
-                    <span className="text-sm text-gray-700">
-                      {learner.phone}
-                    </span>
-                    <a
-                      href={`tel:+91${learner.phone}`}
-                      className="text-blue-600 hover:text-blue-800"
-                    >
-                      <PhoneOutgoing className="h-4 w-4" />
-                    </a>
+                    <MaskedCallButton
+                      callerPhone={instructorPhone}
+                      calleePhone={learner.phone}
+                      label="Call Learner"
+                      className="flex items-center gap-1.5 text-xs"
+                    />
                   </div>
                   <div className="flex items-start gap-2">
                     <span className="text-sm font-medium text-gray-500">
