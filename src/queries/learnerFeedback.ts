@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import { supabase } from "@/lib/supabaseClient";
 
@@ -194,18 +199,71 @@ export interface AdminFeedbackRow {
   } | null;
 }
 
-export function useAdminLearnerFeedbackList() {
-  return useQuery<AdminFeedbackRow[]>({
-    queryKey: ["admin-learner-feedback"],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("learner_course_feedback" as any)
+const ADMIN_FEEDBACK_PAGE_SIZE = 20;
+
+export function useAdminLearnerFeedbackList(
+  search = "",
+  checkpointFilter: "all" | FeedbackCheckpoint = "all",
+) {
+  return useInfiniteQuery({
+    queryKey: ["admin-learner-feedback", "list", search, checkpointFilter],
+    // Returning to an earlier search/filter must restart at the first batch.
+    gcTime: 0,
+    initialPageParam: 0,
+    queryFn: async ({ pageParam, signal }) => {
+      const { data, count, error } = await supabase
+        .rpc(
+          "get_course_feedback",
+          {
+            search_term: search.trim().toLowerCase(),
+            checkpoint_filter: checkpointFilter,
+          },
+          { count: "exact" },
+        )
         .select(
           "*, Learner(id, name, phone), enrollment(id, course_id, Courses(id, name, total_lessons))",
         )
-        .order("created_at", { ascending: false });
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .range(pageParam, pageParam + ADMIN_FEEDBACK_PAGE_SIZE - 1)
+        .abortSignal(signal)
+        .returns<AdminFeedbackRow[]>();
+      // Deletions between batches can move the offset past the final record.
+      if (error?.code === "PGRST103") {
+        return { rows: [], nextOffset: pageParam, hasMore: false };
+      }
       if (error) throw error;
-      return (data || []) as unknown as AdminFeedbackRow[];
+      const rows = data || [];
+      const nextOffset = pageParam + rows.length;
+      return {
+        rows,
+        nextOffset,
+        hasMore:
+          rows.length === ADMIN_FEEDBACK_PAGE_SIZE &&
+          nextOffset < (count ?? Infinity),
+      };
+    },
+    getNextPageParam: (lastPage) =>
+      lastPage.hasMore ? lastPage.nextOffset : undefined,
+  });
+}
+
+export interface AdminFeedbackStats {
+  total: number;
+  mid: number;
+  final: number;
+  avgOverall: number;
+}
+
+export function useAdminLearnerFeedbackStats() {
+  return useQuery({
+    queryKey: ["admin-learner-feedback", "stats"],
+    queryFn: async ({ signal }): Promise<AdminFeedbackStats> => {
+      const { data, error } = await supabase
+        .rpc("get_course_feedback_stats")
+        .abortSignal(signal);
+      if (error) throw error;
+      return data as unknown as AdminFeedbackStats;
     },
   });
 }

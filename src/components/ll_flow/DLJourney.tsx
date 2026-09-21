@@ -208,6 +208,25 @@ export function DLPhaseCard({
 }) {
   const status = application.status;
 
+  if (status === "ll_expired") {
+    return (
+      <JourneyCard title="Learner's Licence Expired">
+        <div className="flex items-center gap-3">
+          <AlertTriangle className="h-8 w-8 shrink-0 text-red-500" />
+          <p className="text-base">
+            Your Learner&apos;s Licence expired
+            {application.ll_expiry_date
+              ? ` on ${format(new Date(application.ll_expiry_date), "dd MMM yyyy")}`
+              : ""}
+            . Our team will contact you to restart the required application
+            steps before your journey can continue.
+          </p>
+        </div>
+        <SupportCallButton label="Contact Lane Support" />
+      </JourneyCard>
+    );
+  }
+
   // ── Pick a DL test date (LL matured / classes completed) ───────────────
   if (status === "ll_matured" || status === "dl_date_selection") {
     const classesTrack =

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { supabase } from "@/lib/supabaseClient";
 import type { TicketCategory, TicketStatus } from "@/constants/support";
+import { supabase } from "@/lib/supabaseClient";
 
 export type TicketPriority = "normal" | "urgent";
 
@@ -79,7 +79,12 @@ export function useAllSupportTickets(filters?: {
   category?: TicketCategory;
 }) {
   return useQuery({
-    queryKey: ["support_tickets", "all", filters?.status ?? "any", filters?.category ?? "any"],
+    queryKey: [
+      "support_tickets",
+      "all",
+      filters?.status ?? "any",
+      filters?.category ?? "any",
+    ],
     queryFn: async (): Promise<SupportTicketWithInstructor[]> => {
       let q = supabase
         .from("support_ticket")
@@ -92,9 +97,14 @@ export function useAllSupportTickets(filters?: {
       const rows = (data ?? []) as SupportTicket[];
 
       const ids = Array.from(
-        new Set(rows.map((r) => r.instructor_id).filter((id): id is string => !!id)),
+        new Set(
+          rows.map((r) => r.instructor_id).filter((id): id is string => !!id),
+        ),
       );
-      const byId = new Map<string, { name: string | null; phone: string | null }>();
+      const byId = new Map<
+        string,
+        { name: string | null; phone: string | null }
+      >();
       if (ids.length) {
         const { data: instrs } = await supabase
           .from("Instructor")
@@ -105,8 +115,12 @@ export function useAllSupportTickets(filters?: {
       }
       return rows.map((r) => ({
         ...r,
-        instructorName: r.instructor_id ? (byId.get(r.instructor_id)?.name ?? null) : null,
-        instructorPhone: r.instructor_id ? (byId.get(r.instructor_id)?.phone ?? null) : null,
+        instructorName: r.instructor_id
+          ? (byId.get(r.instructor_id)?.name ?? null)
+          : null,
+        instructorPhone: r.instructor_id
+          ? (byId.get(r.instructor_id)?.phone ?? null)
+          : null,
       }));
     },
   });
@@ -123,7 +137,8 @@ export function useUpdateSupportTicket() {
     }) => {
       const patch: Record<string, unknown> = {};
       if (input.status) patch.status = input.status;
-      if (input.adminResponse !== undefined) patch.admin_response = input.adminResponse;
+      if (input.adminResponse !== undefined)
+        patch.admin_response = input.adminResponse;
       if (input.status === "resolved" || input.status === "closed") {
         patch.resolved_by = input.resolverName ?? null;
         patch.resolved_at = new Date().toISOString();
