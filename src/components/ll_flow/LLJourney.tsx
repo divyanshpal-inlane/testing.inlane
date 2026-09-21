@@ -3,17 +3,17 @@ import { differenceInCalendarDays, format } from "date-fns";
 import {
   AlertTriangle,
   BadgeCheck,
+  BookOpen,
   CalendarClock,
   CalendarDays,
   Clock,
   Download,
-  BookOpen,
   ExternalLink,
   FileWarning,
   Home,
-  PlayCircle,
   Hourglass,
   PartyPopper,
+  PlayCircle,
   ShieldCheck,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";

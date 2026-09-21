@@ -110,7 +110,9 @@ export default function Fees() {
   return (
     <div className="flex h-full w-full p-6 pb-24">
       <div className="flex h-full w-full flex-col">
-        <h1 className="mb-2 text-3xl font-bold text-gray-800">Fees & charges</h1>
+        <h1 className="mb-2 text-3xl font-bold text-gray-800">
+          Fees & charges
+        </h1>
         <p className="mb-6 text-sm text-muted-foreground">
           No-show and late-reschedule fees on your account.
         </p>
@@ -156,7 +158,9 @@ export default function Fees() {
                         {f.fee_type === "late_reschedule"
                           ? "Late reschedule"
                           : "Missed lesson"}
-                        {f.lessonNumber != null ? ` · Lesson ${f.lessonNumber}` : ""}
+                        {f.lessonNumber != null
+                          ? ` · Lesson ${f.lessonNumber}`
+                          : ""}
                       </p>
                       <p className="text-xs text-muted-foreground">
                         {fmtWhen(f)}

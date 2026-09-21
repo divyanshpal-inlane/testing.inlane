@@ -84,7 +84,10 @@ serve(async (req) => {
 
     if (!paymentEntity) {
       return new Response(
-        JSON.stringify({ success: true, message: "No payment entity; ignored" }),
+        JSON.stringify({
+          success: true,
+          message: "No payment entity; ignored",
+        }),
         {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         },

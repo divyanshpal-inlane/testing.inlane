@@ -4,11 +4,11 @@ import {
   CheckCircle,
   ChevronRight,
   Copy,
+  FileSignature,
   History,
   Link2,
-  Lock,
-  FileSignature,
   Loader2,
+  Lock,
   MessageCircle,
   RefreshCw,
   Save,
@@ -20,10 +20,9 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { supabase } from "@/lib/supabaseClient";
 
-import { Badge } from "@/components/ui/badge";
 import Form14Generator from "@/components/admin/Form14Generator";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -49,6 +48,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/components/ui/use-toast";
+import { supabase } from "@/lib/supabaseClient";
 import {
   EnrollmentPlanAuditChange,
   LEARNER_ISSUE_PAGE_SIZE,
@@ -77,16 +77,40 @@ type Payment = Database["public"]["Tables"]["payment"]["Row"];
 // the create-learner flow in LearnerManagement.tsx so an edited plan offers the
 // same packages a learner could have been created with. `duration` = lessons.
 const PREDEFINED_COURSES: { id: string; name: string; duration: number }[] = [
-  { id: "e129f667-0510-4f07-9847-edb58356dc74", name: "Beginner Course", duration: 10 },
+  {
+    id: "e129f667-0510-4f07-9847-edb58356dc74",
+    name: "Beginner Course",
+    duration: 10,
+  },
   { id: "f60e5fdb-787a-4b40-844d-4e66416a6c8f", name: "Flyover", duration: 2 },
   { id: "0ce6680f-6e12-49d7-8cf9-4388e81d2e27", name: "Parking", duration: 2 },
   { id: "cc5fb06a-419f-4766-a79b-221c81bf9826", name: "Slopes", duration: 2 },
   { id: "7ff8818e-5b52-4030-bc2d-f54071e8ed7f", name: "Traffic", duration: 4 },
-  { id: "05a5f57f-c3e2-48ac-b29f-4299e30442eb", name: "Parking + Flyover", duration: 4 },
-  { id: "abddddb8-3f54-41ea-a64b-5ba55988b12a", name: "Slopes + Parking", duration: 4 },
-  { id: "ddbbfbbf-2222-4742-947b-ccd4e25e7936", name: "Traffic + Parking", duration: 6 },
-  { id: "14552c29-e7e5-4e76-a350-1ae7d8ffc7f3", name: "Traffic + Flyover", duration: 6 },
-  { id: "b991363c-6791-411e-9cb8-6723e40d0a0a", name: "Traffic + Parking + Flyover", duration: 8 },
+  {
+    id: "05a5f57f-c3e2-48ac-b29f-4299e30442eb",
+    name: "Parking + Flyover",
+    duration: 4,
+  },
+  {
+    id: "abddddb8-3f54-41ea-a64b-5ba55988b12a",
+    name: "Slopes + Parking",
+    duration: 4,
+  },
+  {
+    id: "ddbbfbbf-2222-4742-947b-ccd4e25e7936",
+    name: "Traffic + Parking",
+    duration: 6,
+  },
+  {
+    id: "14552c29-e7e5-4e76-a350-1ae7d8ffc7f3",
+    name: "Traffic + Flyover",
+    duration: 6,
+  },
+  {
+    id: "b991363c-6791-411e-9cb8-6723e40d0a0a",
+    name: "Traffic + Parking + Flyover",
+    duration: 8,
+  },
 ];
 
 const PAYMENT_LINK_BASE = "https://inlane-web-app.vercel.app/payment";
@@ -190,7 +214,8 @@ function detectIssues(
       type: "learner",
       severity: "info",
       title: "Missing Learner Signature",
-      description: "This learner does not have a signature available for Form 15",
+      description:
+        "This learner does not have a signature available for Form 15",
       fix: "Upload the learner's signature in the Learner tab",
     });
   }
@@ -293,20 +318,22 @@ export default function LearnerIssueFixer() {
   // Real-time subscription: Auto-refresh when payments complete
   useEffect(() => {
     const channel = supabase
-      .channel('learners-payment-updates')
+      .channel("learners-payment-updates")
       .on(
-        'postgres_changes',
+        "postgres_changes",
         {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'payment',
-          filter: 'status=eq.completed'
+          event: "UPDATE",
+          schema: "public",
+          table: "payment",
+          filter: "status=eq.completed",
         },
         () => {
-          console.log('[LearnerIssueFixer] Payment completed, refreshing data...');
+          console.log(
+            "[LearnerIssueFixer] Payment completed, refreshing data...",
+          );
           refetch();
           if (selectedLearnerId) refetchSelectedLearner();
-        }
+        },
       )
       .subscribe();
 
@@ -770,7 +797,11 @@ const LEARNER_FIELD_GROUPS: LearnerFieldGroup[] = [
         type: "boolean",
       },
       { key: "enabled", label: "Enabled", type: "boolean" },
-      { key: "has_lesson10_booked", label: "Lesson 10 Booked", type: "boolean" },
+      {
+        key: "has_lesson10_booked",
+        label: "Lesson 10 Booked",
+        type: "boolean",
+      },
       { key: "start_date", label: "Start Date", type: "date" },
       {
         key: "preferred_start_date",
@@ -805,7 +836,11 @@ const LEARNER_FIELD_GROUPS: LearnerFieldGroup[] = [
     title: "Car Commerce / Intent",
     fields: [
       { key: "car_intent_type", label: "Car Intent Type", type: "text" },
-      { key: "car_intent_planning", label: "Car Intent Planning", type: "text" },
+      {
+        key: "car_intent_planning",
+        label: "Car Intent Planning",
+        type: "text",
+      },
       {
         key: "car_intent_condition",
         label: "Car Intent Condition",
@@ -1038,10 +1073,7 @@ function LearnerEditor({ learner }: { learner: Learner }) {
     try {
       for (const field of EDITABLE_LEARNER_FIELDS) {
         if (changedKeys.includes(field.key)) {
-          updates[field.key] = learnerFormValueToDb(
-            field,
-            formData[field.key],
-          );
+          updates[field.key] = learnerFormValueToDb(field, formData[field.key]);
         }
       }
     } catch {
@@ -1112,9 +1144,12 @@ function LearnerEditor({ learner }: { learner: Learner }) {
     setIsUploadingSignature(true);
     let newStoragePath: string | null = null;
     try {
-      const { data: authData, error: authError } = await supabase.auth.getUser();
+      const { data: authData, error: authError } =
+        await supabase.auth.getUser();
       if (authError || !authData.user) {
-        throw authError || new Error("You must be signed in to upload a signature.");
+        throw (
+          authError || new Error("You must be signed in to upload a signature.")
+        );
       }
 
       const extension = signatureFile.type === "image/png" ? "png" : "jpg";
@@ -1143,11 +1178,14 @@ function LearnerEditor({ learner }: { learner: Learner }) {
       if (signatureInputRef.current) signatureInputRef.current.value = "";
       toast({
         title: "Signature uploaded",
-        description: "Future Form 15 downloads will include this learner signature.",
+        description:
+          "Future Form 15 downloads will include this learner signature.",
       });
     } catch (error: any) {
       if (newStoragePath) {
-        await supabase.storage.from("learner-signatures").remove([newStoragePath]);
+        await supabase.storage
+          .from("learner-signatures")
+          .remove([newStoragePath]);
       }
       toast({
         title: "Signature upload failed",
@@ -1323,7 +1361,9 @@ function LearnerEditor({ learner }: { learner: Learner }) {
             type="file"
             accept="image/png,image/jpeg"
             className="h-9 max-w-md text-xs"
-            onChange={(event) => setSignatureFile(event.target.files?.[0] || null)}
+            onChange={(event) =>
+              setSignatureFile(event.target.files?.[0] || null)
+            }
             disabled={isUploadingSignature}
           />
           <Button
@@ -1351,7 +1391,8 @@ function LearnerEditor({ learner }: { learner: Learner }) {
           )}
         </div>
         <p className="text-[10px] text-muted-foreground">
-          PNG or JPG, maximum 5 MB. Admin uploads do not record learner terms consent.
+          PNG or JPG, maximum 5 MB. Admin uploads do not record learner terms
+          consent.
         </p>
       </div>
 
@@ -1378,9 +1419,7 @@ function LearnerEditor({ learner }: { learner: Learner }) {
             {group.fields.map((field) => (
               <div
                 key={String(field.key)}
-                className={
-                  field.full ? "col-span-2 space-y-1" : "space-y-1"
-                }
+                className={field.full ? "col-span-2 space-y-1" : "space-y-1"}
               >
                 {renderField(field)}
               </div>
@@ -1976,7 +2015,9 @@ function PaymentEditor({
       if (error) throw error;
       if (data?.success && data.captured) {
         toast({
-          title: data.alreadyCompleted ? "Already completed" : "Payment recovered",
+          title: data.alreadyCompleted
+            ? "Already completed"
+            : "Payment recovered",
           description: data.alreadyCompleted
             ? "This payment was already marked completed."
             : `Marked completed via Razorpay payment ${data.razorpayPaymentId}.`,
@@ -2317,7 +2358,9 @@ function PaymentPlanEditor({
   const [courseId, setCourseId] = useState(initCourseId);
   const [plan, setPlan] = useState<PaymentPlan>(initialPlan);
   const [totalAmount, setTotalAmount] = useState<number>(initAmount);
-  const [customDueNow, setCustomDueNow] = useState<number>(initI1 || initAmount);
+  const [customDueNow, setCustomDueNow] = useState<number>(
+    initI1 || initAmount,
+  );
   const [reason, setReason] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [generatedLink, setGeneratedLink] = useState<string | null>(null);
@@ -2398,7 +2441,11 @@ function PaymentPlanEditor({
         description: "Payment link copied to clipboard.",
       });
     } catch {
-      toast({ title: "Copy failed", description: link, variant: "destructive" });
+      toast({
+        title: "Copy failed",
+        description: link,
+        variant: "destructive",
+      });
     }
   };
 
@@ -2413,7 +2460,10 @@ function PaymentPlanEditor({
       return;
     }
     if (!hasChanges) {
-      toast({ title: "No changes detected", description: "Nothing to update." });
+      toast({
+        title: "No changes detected",
+        description: "Nothing to update.",
+      });
       return;
     }
     setConfirmOpen(true);
@@ -2574,10 +2624,7 @@ function PaymentPlanEditor({
         </div>
         <div className="space-y-1">
           <Label className="text-xs font-medium">Payment Plan</Label>
-          <Select
-            value={plan}
-            onValueChange={(v) => setPlan(v as PaymentPlan)}
-          >
+          <Select value={plan} onValueChange={(v) => setPlan(v as PaymentPlan)}>
             <SelectTrigger className="h-8 text-sm">
               <SelectValue />
             </SelectTrigger>
@@ -2704,7 +2751,10 @@ function PaymentPlanEditor({
                   <span className="text-red-600 line-through">
                     {String(c.old)}
                   </span>{" "}
-                  → <span className="font-medium text-green-700">{String(c.new)}</span>
+                  →{" "}
+                  <span className="font-medium text-green-700">
+                    {String(c.new)}
+                  </span>
                 </span>
               </div>
             ))}

@@ -1,6 +1,6 @@
 import { format } from "date-fns";
 import { ArrowLeft, Loader2, MessageSquare, Search, Star } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
@@ -24,6 +24,7 @@ import {
   AdminFeedbackRow,
   FeedbackCheckpoint,
   useAdminLearnerFeedbackList,
+  useAdminLearnerFeedbackStats,
 } from "@/queries/learnerFeedback";
 
 const Stars = ({ value }: { value: number }) => (
@@ -104,44 +105,77 @@ const FeedbackCard = ({ row }: { row: AdminFeedbackRow }) => {
 
 export default function FeedbackManagement() {
   const navigate = useNavigate();
-  const { data, isLoading, error } = useAdminLearnerFeedbackList();
   const [search, setSearch] = useState("");
   const [checkpointFilter, setCheckpointFilter] = useState<
     "all" | FeedbackCheckpoint
   >("all");
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+  const hasScrolledRef = useRef(false);
+  const {
+    data,
+    isLoading,
+    isFetching,
+    isFetchingNextPage,
+    error: listError,
+    hasNextPage,
+    fetchNextPage,
+  } = useAdminLearnerFeedbackList(search, checkpointFilter);
+  const {
+    data: stats = { total: 0, mid: 0, final: 0, avgOverall: 0 },
+    error: statsError,
+  } = useAdminLearnerFeedbackStats();
+  const error = listError || statsError;
 
-  const filtered = useMemo(() => {
-    if (!data) return [];
-    const term = search.trim().toLowerCase();
-    return data.filter((row) => {
-      if (checkpointFilter !== "all" && row.checkpoint !== checkpointFilter) {
-        return false;
-      }
-      if (!term) return true;
-      const haystack = [
-        row.Learner?.name,
-        row.Learner?.phone,
-        row.enrollment?.Courses?.name,
-        row.comment,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return haystack.includes(term);
-    });
-  }, [data, search, checkpointFilter]);
-
-  const stats = useMemo(() => {
-    if (!data) return { total: 0, mid: 0, final: 0, avgOverall: 0 };
-    const total = data.length;
-    const mid = data.filter((r) => r.checkpoint === "mid").length;
-    const final = data.filter((r) => r.checkpoint === "final").length;
-    const avgOverall =
-      total === 0
-        ? 0
-        : data.reduce((sum, r) => sum + r.overall_rating, 0) / total;
-    return { total, mid, final, avgOverall };
+  const rows = useMemo(() => {
+    // Keep cards unique if records move between offset pages during loading.
+    const byId = new Map<string, AdminFeedbackRow>();
+    for (const page of data?.pages || []) {
+      for (const row of page.rows) byId.set(row.id, row);
+    }
+    return Array.from(byId.values());
   }, [data]);
+
+  useEffect(() => {
+    hasScrolledRef.current = false;
+  }, [search, checkpointFilter]);
+
+  useEffect(() => {
+    const sentinel = loadMoreRef.current;
+    if (!sentinel || !hasNextPage || isFetching || listError) return;
+
+    let requested = false;
+    const loadMore = () => {
+      if (requested) return;
+      requested = true;
+      observer.disconnect();
+      void fetchNextPage({ cancelRefetch: false });
+    };
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting && hasScrolledRef.current) loadMore();
+      },
+      { rootMargin: "0px 0px 200px" },
+    );
+    const onScroll = (event: Event) => {
+      // Ignore scrolling menus or other elements outside the feedback list.
+      if (event.target instanceof Element && !event.target.contains(sentinel))
+        return;
+      hasScrolledRef.current = true;
+      const bounds = sentinel.getBoundingClientRect();
+      if (bounds.top <= window.innerHeight + 200 && bounds.bottom >= 0)
+        loadMore();
+    };
+    // Do not automatically drain batches when the initial page fits the viewport.
+    window.addEventListener("scroll", onScroll, {
+      capture: true,
+      passive: true,
+    });
+    observer.observe(sentinel);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [fetchNextPage, hasNextPage, isFetching, listError]);
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
@@ -229,7 +263,7 @@ export default function FeedbackManagement() {
           </Card>
         )}
 
-        {!isLoading && !error && filtered.length === 0 && (
+        {!isLoading && !error && rows.length === 0 && (
           <Card>
             <CardContent className="py-12 text-center text-muted-foreground">
               No feedback yet.
@@ -238,10 +272,16 @@ export default function FeedbackManagement() {
         )}
 
         <div className="space-y-3">
-          {filtered.map((row) => (
+          {rows.map((row) => (
             <FeedbackCard key={row.id} row={row} />
           ))}
         </div>
+        <div ref={loadMoreRef} className="h-px" />
+        {isFetchingNextPage && (
+          <div className="flex justify-center py-4">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" />
+          </div>
+        )}
       </div>
     </div>
   );

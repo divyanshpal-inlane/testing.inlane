@@ -1,10 +1,10 @@
-import type { LearningContext } from "@/lib/learning-analytics/model";
-import { useQuizAnalytics } from "@/hooks/useQuizAnalytics";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { QuestionGame } from "@/components/lesson/trivia";
 import { Button } from "@/components/ui/button";
 import { PaintedText } from "@/components/ui/paint-text";
+import { useQuizAnalytics } from "@/hooks/useQuizAnalytics";
+import type { LearningContext } from "@/lib/learning-analytics/model";
 import { prepareLessonQuestions } from "@/utils/prepareLessonQuestions";
 
 export default function QuestionTrivia({
