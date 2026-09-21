@@ -38,10 +38,9 @@ export const TICKET_CATEGORIES: { value: TicketCategory; label: string }[] = [
 ];
 
 export const TICKET_CATEGORY_LABEL: Record<TicketCategory, string> =
-  Object.fromEntries(TICKET_CATEGORIES.map((c) => [c.value, c.label])) as Record<
-    TicketCategory,
-    string
-  >;
+  Object.fromEntries(
+    TICKET_CATEGORIES.map((c) => [c.value, c.label]),
+  ) as Record<TicketCategory, string>;
 
 export type TicketStatus = "open" | "in_progress" | "resolved" | "closed";
 

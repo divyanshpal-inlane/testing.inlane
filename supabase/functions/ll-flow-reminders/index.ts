@@ -4,7 +4,7 @@
 //   * appointment not booked   -> 24h / 48h nudges; 48h flags Action Required
 //   * LL test not taken        -> day-3 office-slot offer, day-5 home-visit
 //                                 offer + escalation (day-7 expiry itself is
-//                                 handled by the ll_expire_scrutiny pg_cron)
+//                                 handled by the ll_process_expiries pg_cron)
 //   * scrutiny expired         -> one-time "pay fresh govt fee & reapply"
 //   * LL expiring in <=30 days -> one-time DL-test warning
 //
@@ -141,7 +141,7 @@ function dueReminders(app: any): DueReminder[] {
     }
   }
 
-  // 5. Scrutiny expired (status set by the ll_expire_scrutiny pg_cron).
+  // 5. Scrutiny expired (status set by the combined expiry sweep).
   if (app.status === "scrutiny_expired" && !sent.scrutiny_expired) {
     due.push({
       key: "scrutiny_expired",
@@ -177,11 +177,13 @@ Deno.serve(async (req) => {
     // V1 item 9: promote matured / classes−1 learners before sending nudges,
     // and notify them to pick a DL test date.
     try {
-      const { data: promoted, error: promoteError } = await supabase.rpc(
-        "ll_auto_promote_dl",
-      );
+      const { data: promoted, error: promoteError } =
+        await supabase.rpc("ll_auto_promote_dl");
       if (promoteError) {
-        console.error("[ll-flow-reminders] ll_auto_promote_dl failed:", promoteError);
+        console.error(
+          "[ll-flow-reminders] ll_auto_promote_dl failed:",
+          promoteError,
+        );
       } else {
         for (const row of promoted ?? []) {
           const messageType =

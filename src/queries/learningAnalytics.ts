@@ -1,8 +1,8 @@
-import { supabase } from "@/lib/supabaseClient";
 import type {
   LearningContext,
   LearningSnapshot,
 } from "@/lib/learning-analytics/model";
+import { supabase } from "@/lib/supabaseClient";
 import type { Json } from "@/types/database.types";
 
 export function saveLearningSession(

@@ -1,6 +1,7 @@
 # Manual Changes Still Needed for Infinite Scroll
 
 ## What's Already Done ✅
+
 - Infinite query hooks created and integrated
 - Pagination state removed
 - Sentinel hooks added
@@ -14,6 +15,7 @@
 Search for these patterns and add the sentinel code BEFORE `</ScrollArea>`:
 
 #### Pattern to find:
+
 ```tsx
                     ))}
                   </ScrollArea>
@@ -22,23 +24,35 @@ Search for these patterns and add the sentinel code BEFORE `</ScrollArea>`:
 #### Code to add (adjust the ref and data check for each tab):
 
 **For New/Reschedule/10th Lesson tabs (use requestsSentinelRef):**
+
 ```tsx
-                    {hasNextRequestsPage && (
-                      <div ref={requestsSentinelRef} className="py-4 text-center text-sm text-gray-500">
-                        <Loader2 className="mx-auto h-4 w-4 animate-spin" />
-                        <p className="mt-1">Loading more...</p>
-                      </div>
-                    )}
+{
+  hasNextRequestsPage && (
+    <div
+      ref={requestsSentinelRef}
+      className="py-4 text-center text-sm text-gray-500"
+    >
+      <Loader2 className="mx-auto h-4 w-4 animate-spin" />
+      <p className="mt-1">Loading more...</p>
+    </div>
+  );
+}
 ```
 
 **For Active/Completed tabs (use learnersSentinelRef):**
+
 ```tsx
-                    {hasNextLearnersPage && (
-                      <div ref={learnersSentinelRef} className="py-4 text-center text-sm text-gray-500">
-                        <Loader2 className="mx-auto h-4 w-4 animate-spin" />
-                        <p className="mt-1">Loading more learners...</p>
-                      </div>
-                    )}
+{
+  hasNextLearnersPage && (
+    <div
+      ref={learnersSentinelRef}
+      className="py-4 text-center text-sm text-gray-500"
+    >
+      <Loader2 className="mx-auto h-4 w-4 animate-spin" />
+      <p className="mt-1">Loading more learners...</p>
+    </div>
+  );
+}
 ```
 
 ### 2. Remove Pagination Controls
@@ -47,13 +61,15 @@ Find lines with `currentPage` and `itemsPerPage` in render code.
 Delete the entire pagination button sections.
 
 Replace with simple count:
+
 ```tsx
-`Showing ${items.length} of ${totalCount}`
+`Showing ${items.length} of ${totalCount}`;
 ```
 
 ### 3. Remove setCurrentPage calls
 
 Find and remove any:
+
 ```typescript
 setCurrentPage(0);
 ```
@@ -61,6 +77,7 @@ setCurrentPage(0);
 The infinite query auto-resets when filters change.
 
 ## Test After Changes
+
 ```bash
 npm run dev
 ```

@@ -204,14 +204,22 @@ export function useInfiniteSchedulingRequests() {
         .range(from, to);
 
       if (learnersError) throw learnersError;
-      if (!learners || learners.length === 0) return [];
+
+      // Track raw fetched count to determine if there are more pages
+      const rawFetchedCount = learners?.length ?? 0;
+
+      if (!learners || learners.length === 0) {
+        return { data: [], hasMoreInDb: false };
+      }
 
       // Apply the same schedule-checking logic as the original query
       const learnerIds = learners
         .map((r) => r.learner_id)
         .filter((id): id is string => !!id);
 
-      if (learnerIds.length === 0) return [];
+      if (learnerIds.length === 0) {
+        return { data: [], hasMoreInDb: rawFetchedCount >= BATCH_SIZE };
+      }
 
       // Check which learners already have schedules
       const { data: existingSchedules, error: scheduleError } = await supabase
@@ -222,7 +230,7 @@ export function useInfiniteSchedulingRequests() {
 
       if (scheduleError) {
         console.error("Error checking existing schedules:", scheduleError);
-        return learners;
+        return { data: learners, hasMoreInDb: rawFetchedCount >= BATCH_SIZE };
       }
 
       // Group each learner's non-paused schedule creation times
@@ -261,12 +269,18 @@ export function useInfiniteSchedulingRequests() {
         return fulfillingCount < Math.max(1, lessonsNeeded);
       });
 
-      return filteredLearners;
+      // Return both the filtered data and whether there are more records in the DB
+      // We determine hasMoreInDb based on the RAW fetched count, not filtered count
+      return {
+        data: filteredLearners,
+        hasMoreInDb: rawFetchedCount >= BATCH_SIZE,
+      };
     },
     getNextPageParam: (lastPage, allPages) => {
       const BATCH_SIZE = 25;
-      // If last page has fewer records than batch size, no more pages
-      if (!lastPage || lastPage.length < BATCH_SIZE) return undefined;
+      // Check hasMoreInDb flag based on RAW database count, not filtered results
+      // This ensures we keep fetching even when many records are filtered out
+      if (!lastPage || !lastPage.hasMoreInDb) return undefined;
       // Next offset is number of pages * batch size
       return allPages.length * BATCH_SIZE;
     },

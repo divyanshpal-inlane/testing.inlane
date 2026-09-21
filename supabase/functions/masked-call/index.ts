@@ -68,8 +68,7 @@ Deno.serve(async (req) => {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
-        Authorization:
-          "Basic " + btoa(`${EXOTEL_API_KEY}:${EXOTEL_API_TOKEN}`),
+        Authorization: "Basic " + btoa(`${EXOTEL_API_KEY}:${EXOTEL_API_TOKEN}`),
       },
       body: body.toString(),
     });
@@ -79,9 +78,7 @@ Deno.serve(async (req) => {
     console.log(`[masked-call] Exotel response: ${responseText}`);
 
     if (!response.ok) {
-      throw new Error(
-        `Exotel API error: ${response.status} - ${responseText}`,
-      );
+      throw new Error(`Exotel API error: ${response.status} - ${responseText}`);
     }
 
     let data: Record<string, unknown>;

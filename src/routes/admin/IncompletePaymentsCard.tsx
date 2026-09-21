@@ -69,15 +69,23 @@ type EditPlan = "full" | "half" | "custom";
 export function IncompletePaymentsCard() {
   const [incompletePayments, setIncompletePayments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [sendingPaymentLink, setSendingPaymentLink] = useState<Record<string, boolean>>({});
-  const [deleteLearnerRequests, setDeleteLearnerRequests] = useState<Record<string, boolean>>({});
-  const [deleteLearnerConfirmedList, setDeleteLearnerConfirmedList] = useState<Record<string, boolean>>(
-    {},
-  );
+  const [sendingPaymentLink, setSendingPaymentLink] = useState<
+    Record<string, boolean>
+  >({});
+  const [deleteLearnerRequests, setDeleteLearnerRequests] = useState<
+    Record<string, boolean>
+  >({});
+  const [deleteLearnerConfirmedList, setDeleteLearnerConfirmedList] = useState<
+    Record<string, boolean>
+  >({});
   const [deleteLearnerProcessingList, setDeleteLearnerProcessingList] =
     useState<Record<string, boolean>>({});
-  const [updatingPaidInfo, setUpdatingPaidInfo] = useState<Record<string, boolean>>({});
-  const [addingPaidInfo, setAddingPaidInfo] = useState<Record<string, boolean>>({});
+  const [updatingPaidInfo, setUpdatingPaidInfo] = useState<
+    Record<string, boolean>
+  >({});
+  const [addingPaidInfo, setAddingPaidInfo] = useState<Record<string, boolean>>(
+    {},
+  );
   const [paidInfoDialogOpen, setPaidInfoDialogOpen] = useState(false);
   const [paidInfoDialogData, setPaidInfoDialogData] = useState<any>(null);
   const [manualAmount, setManualAmount] = useState<number>(0);
@@ -124,7 +132,7 @@ export function IncompletePaymentsCard() {
     setLoading(true);
     try {
       // Build the base query with database-level filter for NULL payment_id (most incomplete payments)
-      // Note: This captures payments that haven't been created yet. 
+      // Note: This captures payments that haven't been created yet.
       // Failed payments (payment exists but status != completed) will need separate handling if needed.
       let query = supabase
         .from("enrollment")
@@ -162,21 +170,21 @@ export function IncompletePaymentsCard() {
             payment_type
           )
         `,
-          { count: 'exact' }
+          { count: "exact" },
         )
-        .is('payment_id', null);  // Filter for enrollments without payment record
+        .is("payment_id", null); // Filter for enrollments without payment record
 
       // Apply search filter at database level if search query exists
       if (searchQuery.trim()) {
         // Search by Learner name only
         const searchPattern = `%${searchQuery}%`;
-        query = query.ilike('Learner.name', searchPattern);
+        query = query.ilike("Learner.name", searchPattern);
       }
 
       // Apply pagination at database level
       const from = (currentPage - 1) * itemsPerPage;
       const to = from + itemsPerPage - 1;
-      
+
       const { data, error, count } = await query
         .order("created_at", { ascending: false })
         .range(from, to);
@@ -856,7 +864,7 @@ export function IncompletePaymentsCard() {
   return (
     <Card className="mt-6 transition-all hover:shadow-lg">
       <CardHeader className="flex flex-row items-center justify-between gap-4">
-        <div className="flex items-center gap-4 flex-1">
+        <div className="flex flex-1 items-center gap-4">
           <CardTitle className="text-xl">Incomplete Payments</CardTitle>
           <Input
             type="text"
@@ -888,246 +896,263 @@ export function IncompletePaymentsCard() {
               </p>
             ) : (
               <>
-            <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b">
-                  <th className="px-2 py-2 text-left">Learner</th>
-                  <th className="px-2 py-2 text-left">Course</th>
-                  <th className="px-2 py-2 text-left">Payment Type</th>
-                  <th className="px-2 py-2 text-right">Payable Amount</th>
-                  <th className="px-2 py-2 text-center">Status</th>
-                  <th className="px-2 py-2 text-right">
-                    {/* Column header that explains the date meaning */}
-                    Created Date
-                  </th>
-                  <th className="px-2 py-2 text-center">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {incompletePayments
-                  .sort((a, b) => {
-                    // Use the existing getRelevantDate function
-                    const dateA = getRelevantDate(a);
-                    const dateB = getRelevantDate(b);
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="border-b">
+                        <th className="px-2 py-2 text-left">Learner</th>
+                        <th className="px-2 py-2 text-left">Course</th>
+                        <th className="px-2 py-2 text-left">Payment Type</th>
+                        <th className="px-2 py-2 text-right">Payable Amount</th>
+                        <th className="px-2 py-2 text-center">Status</th>
+                        <th className="px-2 py-2 text-right">
+                          {/* Column header that explains the date meaning */}
+                          Created Date
+                        </th>
+                        <th className="px-2 py-2 text-center">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {incompletePayments
+                        .sort((a, b) => {
+                          // Use the existing getRelevantDate function
+                          const dateA = getRelevantDate(a);
+                          const dateB = getRelevantDate(b);
 
-                    // Sort in descending order (newest first)
-                    return dateB - dateA;
-                  })
-                  .map((enrollment) => (
-                    <tr
-                      key={enrollment.id}
-                      className="border-b hover:bg-muted/50"
-                    >
-                      <td className="px-2 py-2">
-                        <div className="font-medium">
-                          {enrollment.Learner?.name || "Unknown"}
-                        </div>
-                        <div className="text-sm text-muted-foreground">
-                          {enrollment.Learner?.phone}
-                        </div>
-                      </td>
-                      <td className="px-2 py-2">{getCourseName(enrollment)}</td>
-                      <td className="px-2 py-2">
-                        {enrollment.installment_mode === "installment"
-                          ? "first_half"
-                          : enrollment.installment_mode}
-                      </td>
-                      <td className="px-2 py-2 text-right">
-                        ₹{getPayableAmount(enrollment)?.toLocaleString()}
-                      </td>
-                      <td className="px-2 py-2 text-center">
-                        <span
-                          className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium`}
-                        >
-                          {getPaymentStatus(enrollment)}
-                        </span>
-                      </td>
-                      <td className="whitespace-nowrap px-2 py-2 text-right">
-                        {/* Show date with tooltip explaining what it represents */}
-                        <div className="group relative">
-                          <span>
-                            {new Intl.DateTimeFormat("en-GB", {
-                              day: "2-digit",
-                              month: "2-digit",
-                              year: "numeric",
-                            }).format(getRelevantDate(enrollment))}
-                          </span>
-                          <span className="invisible absolute -top-8 left-0 z-10 w-48 whitespace-normal rounded bg-black p-1 text-xs text-white group-hover:visible">
-                            {enrollment.installment_mode === "second_half"
-                              ? "Date when first installment was completed"
-                              : "Enrollment creation date"}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="px-2 py-2 text-center">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => sendPaymentLink(enrollment)}
-                          disabled={sendingPaymentLink[enrollment.id]}
-                          className="whitespace-nowrap"
-                        >
-                          {sendingPaymentLink[enrollment.id] ? (
-                            <RefreshCcw
-                              size={14}
-                              className="mr-1 animate-spin"
-                            />
-                          ) : (
-                            <Send size={14} className="mr-1" />
-                          )}
-                          Send Payment Link
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => openEditDialog(enrollment)}
-                          className="whitespace-nowrap"
-                        >
-                          <Pencil size={14} className="mr-1" />
-                          Edit
-                        </Button>
-                        {deleteLearnerRequests[enrollment.learner_id] ? (
-                          <>
-                            {/* Request phase confirmation pending */}
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              // onClick={() => setShowDeleteDialog(true); enrollment.learner_id)}
-                              onClick={() =>
-                                handleDeleteLearnerConfirm(
-                                  enrollment.learner_id,
-                                  enrollment.Learner.phone,
-                                )
-                              }
-                              disabled={
-                                deleteLearnerProcessingList[
-                                  enrollment.learner_id
-                                ]
-                              }
-                              className="whitespace-nowrap"
-                            >
-                              {deleteLearnerProcessingList[
-                                enrollment.learner_id
-                              ] ? (
-                                <RefreshCcw
-                                  size={14}
-                                  className="mr-1 animate-spin"
-                                />
-                              ) : (
-                                <Delete size={14} className="mr-1" />
-                              )}
-                              Confirm
-                            </Button>
-
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() =>
-                                handleDeleteLearnerCancel(enrollment.learner_id)
-                              }
-                              disabled={
-                                deleteLearnerProcessingList[
-                                  enrollment.learner_id
-                                ]
-                              }
-                              className="whitespace-nowrap"
-                            >
-                              {deleteLearnerProcessingList[
-                                enrollment.learner_id
-                              ] ? (
-                                <RefreshCcw
-                                  size={14}
-                                  className="mr-1 animate-spin"
-                                />
-                              ) : (
-                                <ArrowBigLeft size={14} className="mr-1" />
-                              )}
-                              Cancel
-                            </Button>
-                          </>
-                        ) : (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() =>
-                              handleDeleteLearnerRequest(enrollment.learner_id)
-                            }
-                            disabled={
-                              deleteLearnerProcessingList[enrollment.learner_id]
-                            }
-                            className="whitespace-nowrap"
+                          // Sort in descending order (newest first)
+                          return dateB - dateA;
+                        })
+                        .map((enrollment) => (
+                          <tr
+                            key={enrollment.id}
+                            className="border-b hover:bg-muted/50"
                           >
-                            {deleteLearnerProcessingList[
-                              enrollment.learner_id
-                            ] ? (
-                              <RefreshCcw
-                                size={14}
-                                className="mr-1 animate-spin"
-                              />
-                            ) : (
-                              <Delete size={14} className="mr-1" />
-                            )}
-                            Delete
-                          </Button>
-                        )}
+                            <td className="px-2 py-2">
+                              <div className="font-medium">
+                                {enrollment.Learner?.name || "Unknown"}
+                              </div>
+                              <div className="text-sm text-muted-foreground">
+                                {enrollment.Learner?.phone}
+                              </div>
+                            </td>
+                            <td className="px-2 py-2">
+                              {getCourseName(enrollment)}
+                            </td>
+                            <td className="px-2 py-2">
+                              {enrollment.installment_mode === "installment"
+                                ? "first_half"
+                                : enrollment.installment_mode}
+                            </td>
+                            <td className="px-2 py-2 text-right">
+                              ₹{getPayableAmount(enrollment)?.toLocaleString()}
+                            </td>
+                            <td className="px-2 py-2 text-center">
+                              <span
+                                className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium`}
+                              >
+                                {getPaymentStatus(enrollment)}
+                              </span>
+                            </td>
+                            <td className="whitespace-nowrap px-2 py-2 text-right">
+                              {/* Show date with tooltip explaining what it represents */}
+                              <div className="group relative">
+                                <span>
+                                  {new Intl.DateTimeFormat("en-GB", {
+                                    day: "2-digit",
+                                    month: "2-digit",
+                                    year: "numeric",
+                                  }).format(getRelevantDate(enrollment))}
+                                </span>
+                                <span className="invisible absolute -top-8 left-0 z-10 w-48 whitespace-normal rounded bg-black p-1 text-xs text-white group-hover:visible">
+                                  {enrollment.installment_mode === "second_half"
+                                    ? "Date when first installment was completed"
+                                    : "Enrollment creation date"}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="px-2 py-2 text-center">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => sendPaymentLink(enrollment)}
+                                disabled={sendingPaymentLink[enrollment.id]}
+                                className="whitespace-nowrap"
+                              >
+                                {sendingPaymentLink[enrollment.id] ? (
+                                  <RefreshCcw
+                                    size={14}
+                                    className="mr-1 animate-spin"
+                                  />
+                                ) : (
+                                  <Send size={14} className="mr-1" />
+                                )}
+                                Send Payment Link
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => openEditDialog(enrollment)}
+                                className="whitespace-nowrap"
+                              >
+                                <Pencil size={14} className="mr-1" />
+                                Edit
+                              </Button>
+                              {deleteLearnerRequests[enrollment.learner_id] ? (
+                                <>
+                                  {/* Request phase confirmation pending */}
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    // onClick={() => setShowDeleteDialog(true); enrollment.learner_id)}
+                                    onClick={() =>
+                                      handleDeleteLearnerConfirm(
+                                        enrollment.learner_id,
+                                        enrollment.Learner.phone,
+                                      )
+                                    }
+                                    disabled={
+                                      deleteLearnerProcessingList[
+                                        enrollment.learner_id
+                                      ]
+                                    }
+                                    className="whitespace-nowrap"
+                                  >
+                                    {deleteLearnerProcessingList[
+                                      enrollment.learner_id
+                                    ] ? (
+                                      <RefreshCcw
+                                        size={14}
+                                        className="mr-1 animate-spin"
+                                      />
+                                    ) : (
+                                      <Delete size={14} className="mr-1" />
+                                    )}
+                                    Confirm
+                                  </Button>
 
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            setPaidInfoDialogData(enrollment);
-                            setPaidInfoDialogOpen(true);
-                          }}
-                          disabled={updatingPaidInfo[enrollment?.id]}
-                          className="whitespace-nowrap"
-                        >
-                          {updatingPaidInfo[enrollment?.id] ? (
-                            <RefreshCcw
-                              size={14}
-                              className="mr-1 animate-spin"
-                            />
-                          ) : (
-                            <Send size={14} className="mr-1" />
-                          )}
-                          Add paid info
-                        </Button>
-                      </td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() =>
+                                      handleDeleteLearnerCancel(
+                                        enrollment.learner_id,
+                                      )
+                                    }
+                                    disabled={
+                                      deleteLearnerProcessingList[
+                                        enrollment.learner_id
+                                      ]
+                                    }
+                                    className="whitespace-nowrap"
+                                  >
+                                    {deleteLearnerProcessingList[
+                                      enrollment.learner_id
+                                    ] ? (
+                                      <RefreshCcw
+                                        size={14}
+                                        className="mr-1 animate-spin"
+                                      />
+                                    ) : (
+                                      <ArrowBigLeft
+                                        size={14}
+                                        className="mr-1"
+                                      />
+                                    )}
+                                    Cancel
+                                  </Button>
+                                </>
+                              ) : (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() =>
+                                    handleDeleteLearnerRequest(
+                                      enrollment.learner_id,
+                                    )
+                                  }
+                                  disabled={
+                                    deleteLearnerProcessingList[
+                                      enrollment.learner_id
+                                    ]
+                                  }
+                                  className="whitespace-nowrap"
+                                >
+                                  {deleteLearnerProcessingList[
+                                    enrollment.learner_id
+                                  ] ? (
+                                    <RefreshCcw
+                                      size={14}
+                                      className="mr-1 animate-spin"
+                                    />
+                                  ) : (
+                                    <Delete size={14} className="mr-1" />
+                                  )}
+                                  Delete
+                                </Button>
+                              )}
 
-          {/* Pagination Controls */}
-          <div className="mt-4 flex items-center justify-between">
-            <div className="text-sm text-muted-foreground">
-              Showing {Math.min((currentPage - 1) * itemsPerPage + 1, totalCount)} to{" "}
-              {Math.min(currentPage * itemsPerPage, totalCount)} of {totalCount} results
-            </div>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
-                disabled={currentPage === 1}
-              >
-                Previous
-              </Button>
-              <span className="text-sm">
-                Page {currentPage} of {totalPages}
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
-                disabled={currentPage === totalPages}
-              >
-                Next
-              </Button>
-            </div>
-          </div>
-          </>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  setPaidInfoDialogData(enrollment);
+                                  setPaidInfoDialogOpen(true);
+                                }}
+                                disabled={updatingPaidInfo[enrollment?.id]}
+                                className="whitespace-nowrap"
+                              >
+                                {updatingPaidInfo[enrollment?.id] ? (
+                                  <RefreshCcw
+                                    size={14}
+                                    className="mr-1 animate-spin"
+                                  />
+                                ) : (
+                                  <Send size={14} className="mr-1" />
+                                )}
+                                Add paid info
+                              </Button>
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Pagination Controls */}
+                <div className="mt-4 flex items-center justify-between">
+                  <div className="text-sm text-muted-foreground">
+                    Showing{" "}
+                    {Math.min((currentPage - 1) * itemsPerPage + 1, totalCount)}{" "}
+                    to {Math.min(currentPage * itemsPerPage, totalCount)} of{" "}
+                    {totalCount} results
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        setCurrentPage((prev) => Math.max(1, prev - 1))
+                      }
+                      disabled={currentPage === 1}
+                    >
+                      Previous
+                    </Button>
+                    <span className="text-sm">
+                      Page {currentPage} of {totalPages}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        setCurrentPage((prev) => Math.min(totalPages, prev + 1))
+                      }
+                      disabled={currentPage === totalPages}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              </>
             )}
           </>
         )}
@@ -1213,7 +1238,9 @@ export function IncompletePaymentsCard() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
-                  <Label className="text-xs font-medium">Course / Package</Label>
+                  <Label className="text-xs font-medium">
+                    Course / Package
+                  </Label>
                   <Select value={editCourseId} onValueChange={setEditCourseId}>
                     <SelectTrigger className="h-9 text-sm">
                       <SelectValue placeholder="Select course" />
@@ -1244,7 +1271,9 @@ export function IncompletePaymentsCard() {
                   </Select>
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-xs font-medium">Total Amount (₹)</Label>
+                  <Label className="text-xs font-medium">
+                    Total Amount (₹)
+                  </Label>
                   <Input
                     type="number"
                     min={1}
