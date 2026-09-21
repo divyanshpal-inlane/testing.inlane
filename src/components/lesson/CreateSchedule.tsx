@@ -27,7 +27,6 @@ import {
   LearnerInfoDialog,
 } from "@/components/admin/LearnerInfoCard";
 import MapWithRoute from "@/components/mapWithRoute";
-import { demoLessonOffsetFor } from "@/constants/courses";
 import InstructorSelectionDialog from "@/components/scheduling/InstructorSelectionDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -47,6 +46,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
+import { demoLessonOffsetFor } from "@/constants/courses";
 import { fetchInstructorDynamicLocation } from "@/hooks/useInstructorLocations";
 import { useTentativeScheduleData } from "@/hooks/useScheduleData";
 import { sendMultiEventCalendarInvite } from "@/lib/calendarUtils";

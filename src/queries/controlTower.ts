@@ -1,7 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { format, subDays } from "date-fns";
 
-import { LL_PHASES, LL_STAGE_MAP, LLPhaseKey, llStagePhase } from "@/constants/llPipeline";
+import {
+  LL_PHASES,
+  LL_STAGE_MAP,
+  LLPhaseKey,
+  llStagePhase,
+} from "@/constants/llPipeline";
 import { supabase } from "@/lib/supabaseClient";
 
 // Data layer for the Operations Control Tower (WAI-73). Everything is
@@ -16,7 +21,7 @@ const sb = supabase as any;
 const today = () => format(new Date(), "yyyy-MM-dd");
 const daysAgo = (n: number) => format(subDays(new Date(), n), "yyyy-MM-dd");
 
-const first = <T,>(v: T | T[] | null | undefined): T | null =>
+const first = <T>(v: T | T[] | null | undefined): T | null =>
   Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
 
 const isCancelled = (status: string | null) =>
@@ -28,7 +33,12 @@ const isCancelled = (status: string | null) =>
 export interface OpsKpis {
   activeStudents: number;
   newLearners7d: number;
-  classesToday: { total: number; completed: number; upcoming: number; cancelled: number };
+  classesToday: {
+    total: number;
+    completed: number;
+    upcoming: number;
+    cancelled: number;
+  };
   collectionsToday: number;
   outstanding: { count: number; amount: number };
   llByPhase: { key: LLPhaseKey; label: string; count: number }[];
@@ -68,10 +78,7 @@ export function useOpsKpis() {
           .from("Learner")
           .select("id", { count: "exact", head: true })
           .gte("created_at", `${daysAgo(7)}T00:00:00`),
-        supabase
-          .from("Schedule")
-          .select("status, isTentative")
-          .eq("date", t),
+        supabase.from("Schedule").select("status, isTentative").eq("date", t),
         supabase
           .from("payment")
           .select("amount, status, updated_at")
@@ -121,7 +128,10 @@ export function useOpsKpis() {
         if (due > 0) outstandingAmount += due;
       }
 
-      const llRows = (llRes.data ?? []) as { status: string; escalated: boolean }[];
+      const llRows = (llRes.data ?? []) as {
+        status: string;
+        escalated: boolean;
+      }[];
       const phaseCount = new Map<LLPhaseKey, number>();
       let llDone = 0;
       for (const r of llRows) {
@@ -227,7 +237,10 @@ export function useDailyOps() {
         for (const e of enrRes.data ?? [])
           if (!payByLearner.has(e.learner_id))
             payByLearner.set(e.learner_id, e.payment_status);
-        for (const a of (llRes.data ?? []) as { learner_id: string; status: string }[])
+        for (const a of (llRes.data ?? []) as {
+          learner_id: string;
+          status: string;
+        }[])
           llByLearner.set(a.learner_id, a.status);
       }
 
@@ -245,13 +258,21 @@ export function useDailyOps() {
         const paymentStatus = s.learner_id
           ? (payByLearner.get(s.learner_id) ?? null)
           : null;
-        const slotStart = s.start_time ? new Date(`${s.date}T${s.start_time}`) : null;
+        const slotStart = s.start_time
+          ? new Date(`${s.date}T${s.start_time}`)
+          : null;
 
         let nextAction: string | null = null;
         if (isCancelled(s.status)) nextAction = "Rebook slot";
-        else if (s.status === "booked" && !started && slotStart && slotStart < now)
+        else if (
+          s.status === "booked" &&
+          !started &&
+          slotStart &&
+          slotStart < now
+        )
           nextAction = "Chase attendance — not started";
-        else if (paymentStatus === "half_paid") nextAction = "Collect balance payment";
+        else if (paymentStatus === "half_paid")
+          nextAction = "Collect balance payment";
 
         return {
           scheduleId: s.id,
@@ -266,7 +287,9 @@ export function useDailyOps() {
           instructorName: instr?.name ?? null,
           lessonNumber: lesson?.number ?? null,
           paymentStatus,
-          llStatus: s.learner_id ? (llByLearner.get(s.learner_id) ?? null) : null,
+          llStatus: s.learner_id
+            ? (llByLearner.get(s.learner_id) ?? null)
+            : null,
           nextAction,
         };
       });
@@ -328,9 +351,7 @@ export function useOpsExceptions() {
         await Promise.all([
           supabase
             .from("Schedule")
-            .select(
-              "id, date, start_time, Learner(name), Instructor(name)",
-            )
+            .select("id, date, start_time, Learner(name), Instructor(name)")
             .eq("status", "booked")
             .is("started_at", null)
             .gte("date", daysAgo(7))
@@ -355,14 +376,17 @@ export function useOpsExceptions() {
             .gte("date", daysAgo(60)),
         ]);
 
-      const missedClasses: MissedClassRow[] = (missedRes.data ?? []).map((s) => ({
-        scheduleId: s.id,
-        date: s.date,
-        startTime: s.start_time,
-        learnerName: first<{ name: string | null }>(s.Learner as never)?.name ?? null,
-        instructorName:
-          first<{ name: string | null }>(s.Instructor as never)?.name ?? null,
-      }));
+      const missedClasses: MissedClassRow[] = (missedRes.data ?? []).map(
+        (s) => ({
+          scheduleId: s.id,
+          date: s.date,
+          startTime: s.start_time,
+          learnerName:
+            first<{ name: string | null }>(s.Learner as never)?.name ?? null,
+          instructorName:
+            first<{ name: string | null }>(s.Instructor as never)?.name ?? null,
+        }),
+      );
 
       const overduePayments: OverduePaymentRow[] = (halfPaidRes.data ?? [])
         .map((e) => {
@@ -397,7 +421,8 @@ export function useOpsExceptions() {
           const stage = LL_STAGE_MAP[a.status];
           const terminal = stage ? stage.next.length === 0 : false;
           if (terminal) return false;
-          const daysStuck = (now - new Date(a.updated_at).getTime()) / 86_400_000;
+          const daysStuck =
+            (now - new Date(a.updated_at).getTime()) / 86_400_000;
           return a.escalated || daysStuck >= STALL_DAYS;
         })
         .map((a) => ({
@@ -406,9 +431,15 @@ export function useOpsExceptions() {
           learnerPhone: a.Learner?.phone ?? null,
           status: a.status,
           escalated: a.escalated,
-          daysStuck: Math.floor((now - new Date(a.updated_at).getTime()) / 86_400_000),
+          daysStuck: Math.floor(
+            (now - new Date(a.updated_at).getTime()) / 86_400_000,
+          ),
         }))
-        .sort((a, b) => Number(b.escalated) - Number(a.escalated) || b.daysStuck - a.daysStuck);
+        .sort(
+          (a, b) =>
+            Number(b.escalated) - Number(a.escalated) ||
+            b.daysStuck - a.daysStuck,
+        );
 
       // Active students with no lesson in the last INACTIVE_DAYS days.
       const lastClass = new Map<string, string>();

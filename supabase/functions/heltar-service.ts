@@ -99,7 +99,7 @@ export const TEMPLATES = {
     language: "en",
     content:
       "Hey {{1}},\n\nWe hope you are having the best day. Your have a lesson tomorrow 📔🚗. Do check the details below:\n\n*Date:* {{2}}\n*Time:* {{3}}\n*Driving Buddy:* {{4}}\n\nTo contact your Driving buddy, please use the Lane App\n\nIncase of any queries please feel free to reach out to us via mail at support@inlane.in or via call at 07316914676 (please ensure there is 0 before 731)\n\nCheck the *Lane App* for more details 🥳\n\nThank you,\nLane Team 🚗🚗",
-},
+  },
   DAILY_NOTIFICATION_SCHEDULE: {
     name: "daily_notification_schedule_",
     language: "en",
@@ -618,9 +618,10 @@ class HeltarMessageService {
           );
         }
         case "PASSWORD_RESET_OTP": {
-          const { learner_id, otp, user_type, user_id, user_name, user_phone } = data;
-          
-          // Support both new format (user_type, user_id, user_name, user_phone) 
+          const { learner_id, otp, user_type, user_id, user_name, user_phone } =
+            data;
+
+          // Support both new format (user_type, user_id, user_name, user_phone)
           // and legacy format (learner_id only)
           if (user_type && user_id && user_name && user_phone) {
             // New format: directly use provided user details
@@ -640,7 +641,9 @@ class HeltarMessageService {
               `password-reset-otp-${learner_id}-${Date.now()}`,
             );
           } else {
-            throw new Error("PASSWORD_RESET_OTP requires either (user_type, user_id, user_name, user_phone) or learner_id");
+            throw new Error(
+              "PASSWORD_RESET_OTP requires either (user_type, user_id, user_name, user_phone) or learner_id",
+            );
           }
         }
 

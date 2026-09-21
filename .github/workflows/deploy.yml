@@ -1,0 +1,75 @@
+name: Deploy to GitHub Pages
+
+# Test-only static deploy of the full inlane-web-app to GitHub Pages, for
+# external testers. This is NOT the production deployment (that's Vercel,
+# auto-deployed from main — see DEPLOYMENT.md). Because GitHub Pages is
+# static-only, anything depending on the Go backend (/go-api/* — most auth,
+# payments, scheduling calls) will not work here; only flows that talk to
+# Supabase directly from the client will function.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build (static test deploy)
+        env:
+          # Serves the app from /sales-requirement-dashboard/ instead of
+          # domain root — see vite.config.ts / App.tsx's BrowserRouter
+          # basename, both of which key off this.
+          VITE_BASE_PATH: /sales-requirement-dashboard/
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+          VITE_GOOGLE_MAPS_API_KEY: ${{ vars.VITE_GOOGLE_MAPS_API_KEY }}
+          # NOT the real service-role key — deliberately a placeholder.
+          # src/context/auth-context.tsx does
+          # `createClient(supabaseUrl, import.meta.env.VITE_SUPABASE_SERVICE_ROLE_KEY!)`
+          # at module top level, which throws synchronously (crashing the
+          # whole app before React can mount — a blank white page) if this
+          # is unset. The real key must never ship in a public static build;
+          # this placeholder only exists so that constructor call doesn't
+          # throw. Any admin/service-role Supabase call will correctly fail
+          # with an auth error here, same as every other backend-dependent
+          # flow on this static test deploy.
+          VITE_SUPABASE_SERVICE_ROLE_KEY: "not-a-real-key-placeholder-for-static-test-deploy"
+        run: pnpm run build
+      - name: SPA fallback for client-side routing
+        # GitHub Pages has no server-side rewrite rules, so a direct link or
+        # refresh on any client-side route (e.g. /admin/sales-dashboard)
+        # would 404. Serving the same index.html for unknown paths lets
+        # BrowserRouter take over and resolve the route client-side.
+        run: cp dist/index.html dist/404.html
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,9 +1,9 @@
-import LearningAnalytics from "@/components/admin/LearningAnalytics";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, ChevronDown, RefreshCw } from "lucide-react";
 import { Fragment, useState } from "react";
 import { Link } from "react-router-dom";
 
+import LearningAnalytics from "@/components/admin/LearningAnalytics";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PREP_GAMES } from "@/constants/prepGames";

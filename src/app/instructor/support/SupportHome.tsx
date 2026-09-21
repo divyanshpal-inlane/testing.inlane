@@ -34,10 +34,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/components/ui/use-toast";
 import {
   SUPPORT_PHONE_DISPLAY,
+  telHref,
   TICKET_CATEGORIES,
   TICKET_CATEGORY_LABEL,
   TicketCategory,
-  telHref,
   whatsappHref,
 } from "@/constants/support";
 import { useUser } from "@/context/auth-context";

@@ -246,9 +246,10 @@ function PaymentPage() {
               enrollment?.progress?.total_hours || 1,
             );
             // Use enrollment amount if set (admin-configured), otherwise fall back to hours × default price
-            const topupAmount = enrollment?.amount && enrollment.amount > 0
-              ? enrollment.amount
-              : topupHours * DEMO_COURSE.price;
+            const topupAmount =
+              enrollment?.amount && enrollment.amount > 0
+                ? enrollment.amount
+                : topupHours * DEMO_COURSE.price;
             setPaymentDetails((prev) => ({
               ...prev,
               email: learner.email || "",
@@ -443,7 +444,11 @@ function PaymentPage() {
   // Update payment amount when payment option changes
   useEffect(() => {
     // Skip for demo, test, and topup - fixed price set by admin/URL
-    if (courseSelectionType === "demo" || courseSelectionType === "test" || courseSelectionType === "topup")
+    if (
+      courseSelectionType === "demo" ||
+      courseSelectionType === "test" ||
+      courseSelectionType === "topup"
+    )
       return;
 
     // Use functional update to get the latest state values
@@ -1072,7 +1077,8 @@ function PaymentPage() {
               <div className="space-y-3">
                 <Alert className="border-blue-200 bg-blue-50">
                   <AlertDescription>
-                    <strong>Topup Class</strong> - {paymentDetails.totalHours ?? 1} hour(s)
+                    <strong>Topup Class</strong> -{" "}
+                    {paymentDetails.totalHours ?? 1} hour(s)
                   </AlertDescription>
                 </Alert>
                 <div>
@@ -1090,7 +1096,8 @@ function PaymentPage() {
                     {paymentDetails.totalHours ?? 1}
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    Total: ₹{paymentDetails.amount ?? paymentDetails.totalAmount}
+                    Total: ₹
+                    {paymentDetails.amount ?? paymentDetails.totalAmount}
                   </p>
                 </div>
               </div>

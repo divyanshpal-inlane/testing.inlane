@@ -8,7 +8,7 @@ import {
   Search,
   Sheet,
 } from "lucide-react";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import Form14Generator from "@/components/admin/Form14Generator";
@@ -33,6 +33,7 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { supabase } from "@/lib/supabaseClient";
+import type { Tables } from "@/types/database.types";
 import {
   buildCertificateSheetCSV,
   downloadCSV,
@@ -44,13 +45,45 @@ import { downloadPDF } from "@/utils/generateForm14";
 // Animated Search Bar Component
 
 // ── Pending-LL learners — backend-driven pagination ─────────────────────
-// The Select Learner list loads learners from the database in small pages
-// (never the whole table). `Learner.enrollment!inner` can return the same
-// learner multiple times (several active enrollments), so rows are
-// de-duplicated by phone (falling back to id) while scanning.
+// The selection list requests exactly one database page. The RPC preserves
+// phone/id de-duplication before count/range, rather than buffering extra rows.
+// The chunked fetch below is used only by explicitly requested bulk downloads.
 
 const PENDING_LL_CHUNK_SIZE = 100;
-const LEARNER_PAGE_LIMIT = 10;
+const LEARNER_PAGE_LIMIT = 15;
+
+async function fetchPendingLLLearnersPage(opts: {
+  page: number;
+  search: string;
+  signal: AbortSignal;
+}): Promise<{ learners: Tables<"Learner">[]; totalCount: number }> {
+  const from = (opts.page - 1) * LEARNER_PAGE_LIMIT;
+  // This module-specific RPC is not in the generated database types yet.
+  const buildQuery = (head = false) =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (supabase as any).rpc(
+      "get_pending_ll_learners",
+      { search_term: opts.search.trim() },
+      { count: "exact", head },
+    );
+  const { data, error, count } = await buildQuery()
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .range(from, from + LEARNER_PAGE_LIMIT - 1)
+    .abortSignal(opts.signal);
+
+  // An approval can remove the last learner on a page. Only in that case,
+  // request the remaining count so the UI can move back to a valid page.
+  if (error?.code === "PGRST103" && from > 0) {
+    const { count: remainingCount, error: countError } = await buildQuery(
+      true,
+    ).abortSignal(opts.signal);
+    if (countError) throw countError;
+    return { learners: [], totalCount: remainingCount ?? 0 };
+  }
+  if (error) throw error;
+  return { learners: data ?? [], totalCount: count ?? 0 };
+}
 
 async function fetchPendingLLLearnersChunk(opts: {
   offset: number;
@@ -181,87 +214,42 @@ const LearnerLLDetails = () => {
   const [bulkProgress, setBulkProgress] = useState("");
   const [sheetFormsOpen, setSheetFormsOpen] = useState(false);
   // ── Learners awaiting LL service — paginated, DB-filtered ──────────────
-  const [learners, setLearners] = useState<any[]>([]);
-  const [listEnded, setListEnded] = useState(false);
-  const [loadingInitial, setLoadingInitial] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [listError, setListError] = useState<string | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
-
-  const seenRef = useRef<Set<string>>(new Set());
-  const learnerOffsetRef = useRef(0);
-  const learnerDoneRef = useRef(false);
-  const learnerLoadingRef = useRef(false);
-  const learnerRequestIdRef = useRef(0);
-  const learnerBufferRef = useRef<any[]>([]);
-  const learnerSearchRef = useRef("");
-
+  const [learnerPage, setLearnerPage] = useState(1);
   const debouncedLearnerSearch = useDebouncedValue(learnerSearchTerm, 300);
-  learnerSearchRef.current = debouncedLearnerSearch;
+  const isLearnerSearchPending = learnerSearchTerm !== debouncedLearnerSearch;
+  const {
+    data: learnerPageData,
+    isPending: isLearnerPagePending,
+    isFetching: isLearnerPageFetching,
+    error: learnerListError,
+  } = useQuery({
+    queryKey: ["pending-ll-learners", learnerPage, debouncedLearnerSearch],
+    // Resetting the page while typing must not fetch page 1 of the OLD search.
+    enabled: !isLearnerSearchPending,
+    queryFn: ({ signal }) =>
+      fetchPendingLLLearnersPage({
+        page: learnerPage,
+        search: debouncedLearnerSearch,
+        signal,
+      }),
+    staleTime: 30 * 1000,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+  const learners = learnerPageData?.learners ?? [];
+  const learnerTotalCount = learnerPageData?.totalCount ?? 0;
+  const learnerTotalPages = Math.max(
+    1,
+    Math.ceil(learnerTotalCount / LEARNER_PAGE_LIMIT),
+  );
+  const isLearnerListLoading = isLearnerPagePending || isLearnerSearchPending;
 
-  const resetLearnerList = useCallback(() => {
-    learnerRequestIdRef.current += 1;
-    seenRef.current = new Set();
-    learnerOffsetRef.current = 0;
-    learnerDoneRef.current = false;
-    learnerBufferRef.current = [];
-    setLearners([]);
-    setListEnded(false);
-  }, []);
-
-  const loadMoreLearners = useCallback(async () => {
-    if (learnerLoadingRef.current) return;
-    learnerLoadingRef.current = true;
-    const requestId = learnerRequestIdRef.current;
-    setLoadingMore(true);
-    try {
-      let buffer = learnerBufferRef.current;
-      while (buffer.length < LEARNER_PAGE_LIMIT && !learnerDoneRef.current) {
-        const { rows, done } = await fetchPendingLLLearnersChunk({
-          offset: learnerOffsetRef.current,
-          search: learnerSearchRef.current,
-        });
-        if (requestId !== learnerRequestIdRef.current) return;
-        const fresh = rows.filter((row) => {
-          const key = row.phone || row.id;
-          if (seenRef.current.has(key)) return false;
-          seenRef.current.add(key);
-          return true;
-        });
-        buffer = buffer.concat(fresh);
-        learnerOffsetRef.current += rows.length;
-        if (done) learnerDoneRef.current = true;
-      }
-      const reveal = buffer.slice(0, LEARNER_PAGE_LIMIT);
-      learnerBufferRef.current = buffer.slice(LEARNER_PAGE_LIMIT);
-      setLearners((prev) => prev.concat(reveal));
-      setListEnded(learnerDoneRef.current);
-    } catch (err) {
-      setListError(
-        err instanceof Error ? err.message : "Failed to load learners",
-      );
-    } finally {
-      learnerLoadingRef.current = false;
-      setLoadingMore(false);
-    }
-  }, []);
-
-  // Reset + load first page whenever search or refresh flag changes. If a
-  // scroll-triggered load is still in flight it aborts on the stale requestId
-  // (releasing the lock), so wait for it before kicking the fresh first page.
+  // Keep pagination valid if an approval removes the final row on a page.
   useEffect(() => {
-    setLoadingInitial(true);
-    setListError(null);
-    resetLearnerList();
-    const load = (async () => {
-      while (learnerLoadingRef.current) {
-        await new Promise((resolve) => setTimeout(resolve, 30));
-      }
-      await loadMoreLearners();
-    })();
-    void load.finally(() => setLoadingInitial(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedLearnerSearch, refreshKey]);
+    if (learnerPageData && learnerPage > learnerTotalPages) {
+      setLearnerPage(learnerTotalPages);
+    }
+  }, [learnerPageData, learnerPage, learnerTotalPages]);
 
   // New query for past LL applications
   const {
@@ -312,8 +300,10 @@ const LearnerLLDetails = () => {
         title: "Success",
         description: "Learner LL details updated successfully.",
       });
-      setRefreshKey((k) => k + 1);
-      queryClient.invalidateQueries(["learners", "pastLLApplications"]);
+      queryClient.invalidateQueries({ queryKey: ["pending-ll-learners"] });
+      queryClient.invalidateQueries({
+        queryKey: ["learners", "pastLLApplications"],
+      });
       setSelectedLearner(null);
       setAppointmentId("");
       setLlApproved(false);
@@ -428,21 +418,6 @@ const LearnerLLDetails = () => {
     });
     setDialogOpen(true);
   };
-
-  if (loadingInitial)
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="text-lg">Loading...</div>
-      </div>
-    );
-  if (listError)
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="text-lg text-red-500">
-          Error loading learners: {listError}
-        </div>
-      </div>
-    );
 
   const handleLLDetailsSave = () => {
     // console.log("LearnerId is ", LearnerId)
@@ -603,7 +578,10 @@ const LearnerLLDetails = () => {
                 <Input
                   type="text"
                   value={learnerSearchTerm}
-                  onChange={(e) => setLearnerSearchTerm(e.target.value)}
+                  onChange={(e) => {
+                    setLearnerSearchTerm(e.target.value);
+                    setLearnerPage(1);
+                  }}
                   placeholder="Search by name or phone..."
                   className="rounded-lg border-2 border-gray-200 py-2 pl-10 pr-4 transition-all duration-200 focus:border-primary focus:ring-2 focus:ring-primary/20"
                 />
@@ -653,16 +631,16 @@ const LearnerLLDetails = () => {
             </Button>
           </CardHeader>
           <CardContent className="p-0">
-            <div
-              className="max-h-[600px] overflow-y-auto"
-              onScroll={(event) => {
-                const el = event.currentTarget;
-                if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
-                  void loadMoreLearners();
-                }
-              }}
-            >
-              {learners.length === 0 ? (
+            <div className="max-h-[600px] overflow-y-auto">
+              {isLearnerListLoading ? (
+                <div className="p-4 text-center text-sm text-gray-400">
+                  Loading learners...
+                </div>
+              ) : learnerListError ? (
+                <div className="p-4 text-center text-sm text-red-500">
+                  Error loading learners: {learnerListError.message}
+                </div>
+              ) : learners.length === 0 ? (
                 <div className="py-8 text-center text-gray-500">
                   <div className="text-lg font-medium">
                     {debouncedLearnerSearch
@@ -717,16 +695,40 @@ const LearnerLLDetails = () => {
                   ))}
                 </div>
               )}
-              {loadingMore && (
-                <div className="p-4 text-center text-sm text-gray-400">
-                  Loading more…
-                </div>
-              )}
-              {!loadingMore && listEnded && learners.length > 0 && (
-                <div className="p-4 text-center text-xs text-gray-400">
-                  End of list
-                </div>
-              )}
+            </div>
+            <div className="flex items-center justify-between gap-2 border-t p-4">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={
+                  learnerPage === 1 ||
+                  isLearnerListLoading ||
+                  isLearnerPageFetching
+                }
+                onClick={() => setLearnerPage((page) => Math.max(1, page - 1))}
+              >
+                Previous
+              </Button>
+              <div
+                className="text-center text-xs text-gray-600"
+                aria-live="polite"
+              >
+                Page {learnerPage} of {learnerTotalPages}
+                <div>{learnerTotalCount} learners</div>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={
+                  learnerPage >= learnerTotalPages ||
+                  isLearnerListLoading ||
+                  isLearnerPageFetching ||
+                  !!learnerListError
+                }
+                onClick={() => setLearnerPage((page) => page + 1)}
+              >
+                Next
+              </Button>
             </div>
           </CardContent>
         </Card>

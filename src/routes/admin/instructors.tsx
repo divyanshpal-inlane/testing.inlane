@@ -53,6 +53,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
+import type { UIEvent } from "react";
 import {
   Fragment,
   memo,
@@ -1107,6 +1108,33 @@ export default function InstructorsManagement() {
     observer.observe(sentinel);
     return () => observer.disconnect();
   }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
+
+  // Reverse sync: pick up Schedule changes made elsewhere (e.g. a tentative
+  // slot booked from the Sales Dashboard) without requiring a manual reload.
+  // Broadly invalidates on any Schedule change rather than filtering by
+  // instructor server-side -- this list can show many instructors' schedules
+  // at once (each row's embedded `schedules`), so there's no single id to
+  // filter on. Mirrors the same invalidateQueries(["instructors"]) call this
+  // component already makes after its own tentative-schedule mutations
+  // succeed. Requires Realtime replication to be enabled for the "Schedule"
+  // table in Supabase (Database -> Replication, or `alter publication
+  // supabase_realtime add table "Schedule";` in the SQL editor) -- without
+  // it this subscription connects but never receives events.
+  useEffect(() => {
+    const channel = supabase
+      .channel("instructor-mgmt-schedule-sync")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "Schedule" },
+        () => {
+          void queryClient.invalidateQueries({ queryKey: ["instructors"] });
+        },
+      )
+      .subscribe();
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [queryClient]);
 
   // Add or update an instructor
   const mutation = useMutation({
@@ -2734,6 +2762,12 @@ function WeeklyScheduleView({
               end_time: tentativeSchedule.end_time,
               enabled: tentativeSchedule.enabled,
               isTentative: tentativeSchedule.isTentative,
+              // Every tentative row must carry status "hold" -- the Sales
+              // Dashboard (and this table's own "hold"+isTentative
+              // convention, see sql/override_tentative_slot.sql) treats
+              // isTentative rows without it as real bookings, since the
+              // Schedule.status column otherwise defaults to "booked".
+              status: "hold",
               instructor_id: instructorId,
               tentative_details: {
                 name: tentativeSchedule.tentative_details.name,
@@ -2765,6 +2799,7 @@ function WeeklyScheduleView({
             end_time: tentativeSchedule.end_time,
             enabled: tentativeSchedule.enabled,
             isTentative: tentativeSchedule.isTentative,
+            status: "hold",
             instructor_id: instructorId,
             tentative_details: {
               name: tentativeSchedule.tentative_details.name,
@@ -3286,6 +3321,7 @@ function WeeklyScheduleView({
             end_time: tentativeScheduleCopy.end_time,
             enabled: true,
             isTentative: true,
+            status: "hold",
             instructor_id: instructorId,
             tentative_details: {
               name: tentativeScheduleCopy.tentative_details.name,
@@ -3680,6 +3716,11 @@ function WeeklyScheduleView({
                           <td
                             key={dayIndex}
                             className={tdClasses}
+                            title={
+                              !schedule && unavailable
+                                ? "Instructor unavailable at this time"
+                                : undefined
+                            }
                             style={{
                               width: `${columnWidthPercentage}%`,
                               height: "40px",
@@ -4842,6 +4883,7 @@ export const AddTentativeSchedule = ({
         end_time: slot.end_time,
         instructor_id: instructorId,
         isTentative: true,
+        status: "hold",
         course_id:
           tentativeDetails.course_id === "none" ||
           tentativeDetails.course_id === "topup"
@@ -5892,6 +5934,21 @@ export const InstructorSchedulePage = () => {
   // After a drag finalises we set this so the trailing onClick (which fires
   // after mouseup) doesn't overwrite our prefilled add-form state.
   const dragJustEndedRef = useRef(false);
+  // The time-axis (hour labels) and the grid cells are two separate scroll
+  // containers side by side -- kept in sync here so scrolling one moves
+  // the other by the same amount, the same "frozen column" pattern used
+  // for spreadsheet-like UIs. Needed once row heights have a real minimum
+  // (see minmax() below) instead of always compressing to fit: previously
+  // neither side ever actually had anything to scroll, since 1fr rows
+  // just shrank to whatever space was available, however small.
+  const timeAxisRef = useRef<HTMLDivElement>(null);
+  const gridCellsRef = useRef<HTMLDivElement>(null);
+  const syncScroll =
+    (from: "axis" | "grid") => (e: UIEvent<HTMLDivElement>) => {
+      const target =
+        from === "axis" ? gridCellsRef.current : timeAxisRef.current;
+      if (target) target.scrollTop = e.currentTarget.scrollTop;
+    };
   useEffect(() => {
     dragStartRef.current = dragStart;
   }, [dragStart]);
@@ -5988,7 +6045,10 @@ export const InstructorSchedulePage = () => {
       const date = parse(i.toString(), "H", new Date());
       slots.push({
         hour24: i.toString().padStart(2, "0"),
-        display: format(date, "h a"),
+        // 24-hour, matching Sales Dashboard and this file's own
+        // WeeklyScheduleView, which both already use "HH:mm" -- this page
+        // was the odd one out with 12-hour AM/PM labels.
+        display: format(date, "HH:mm"),
       });
     }
     return slots;
@@ -6018,6 +6078,59 @@ export const InstructorSchedulePage = () => {
       return data;
     },
   });
+
+  // Reverse sync: pick up Schedule changes made elsewhere (e.g. a tentative
+  // slot booked from the Sales Dashboard) without requiring a manual
+  // reload. INSERT/UPDATE are filtered server-side to this page's own
+  // instructor since, unlike the list page, there's exactly one id to care
+  // about here. DELETE gets its own unfiltered handler: a server-side
+  // filter can't be evaluated for a delete under Postgres's default REPLICA
+  // IDENTITY (only the deleted row's primary key is available, not
+  // instructor_id), so a filtered subscription would silently never see
+  // deletions at all. Invalidating unconditionally on any delete is cheap
+  // here -- one instructor's query, not a list. Requires Realtime
+  // replication to be enabled for the "Schedule" table in Supabase
+  // (Database -> Replication, or `alter publication supabase_realtime add
+  // table "Schedule";` in the SQL editor) -- without it this subscription
+  // connects but never receives events.
+  useEffect(() => {
+    if (!id) return;
+    const invalidate = () =>
+      void queryClient.invalidateQueries({
+        queryKey: ["instructor-full", id],
+      });
+    const channel = supabase
+      .channel(`instructor-schedule-sync-${id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "Schedule",
+          filter: `instructor_id=eq.${id}`,
+        },
+        invalidate,
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "Schedule",
+          filter: `instructor_id=eq.${id}`,
+        },
+        invalidate,
+      )
+      .on(
+        "postgres_changes",
+        { event: "DELETE", schema: "public", table: "Schedule" },
+        invalidate,
+      )
+      .subscribe();
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [id, queryClient]);
 
   const deleteMutation = useMutation({
     mutationFn: async (scheduleId) => {
@@ -6645,37 +6758,49 @@ export const InstructorSchedulePage = () => {
           <div className="z-20 flex w-14 shrink-0 flex-col border-r bg-slate-50">
             <div className="h-10 border-b bg-white" />
             <div
-              className="grid flex-1"
-              style={{ gridTemplateRows: `repeat(${timeSlots.length}, 1fr)` }}
+              ref={timeAxisRef}
+              onScroll={syncScroll("axis")}
+              className="min-h-0 flex-1 overflow-y-auto"
             >
-              {timeSlots.map((slot, idx) => {
-                const isRowHovered = hoveredHour === idx;
+              <div
+                className="grid"
+                style={{
+                  gridTemplateRows: `repeat(${timeSlots.length}, minmax(44px, 1fr))`,
+                }}
+              >
+                {timeSlots.map((slot, idx) => {
+                  const isRowHovered = hoveredHour === idx;
 
-                return (
-                  <div
-                    key={slot.hour24}
-                    className={cn(
-                      "flex items-start justify-end border-b border-slate-100 pr-2 pt-1 transition-colors",
-                      // Theme Update: White on Dark Grey
-                      isRowHovered ? "bg-slate-500" : "bg-white",
-                    )}
-                  >
-                    <span
+                  return (
+                    <div
+                      key={slot.hour24}
                       className={cn(
-                        "text-[9px] font-bold uppercase transition-colors",
-                        // Toggle text color based on hover
-                        isRowHovered ? "text-white" : "text-slate-400",
+                        "flex items-start justify-end border-b border-slate-100 pr-2 pt-1 transition-colors",
+                        // Theme Update: White on Dark Grey
+                        isRowHovered ? "bg-slate-500" : "bg-white",
                       )}
                     >
-                      {slot.display}
-                    </span>
-                  </div>
-                );
-              })}
+                      <span
+                        className={cn(
+                          "text-[9px] font-bold uppercase transition-colors",
+                          // Toggle text color based on hover
+                          isRowHovered ? "text-white" : "text-slate-400",
+                        )}
+                      >
+                        {slot.display}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
 
-          <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+          <div
+            ref={gridCellsRef}
+            onScroll={syncScroll("grid")}
+            className="flex min-w-0 flex-1 flex-col overflow-y-auto"
+          >
             {/* GRID HEADERS */}
             <div className="sticky top-0 z-30 grid shrink-0 grid-cols-7 border-b bg-white">
               {weekDates.map((date, idx) => {
@@ -6734,7 +6859,9 @@ export const InstructorSchedulePage = () => {
             {/* GRID CELLS */}
             <div
               className="relative grid min-h-0 flex-1 grid-cols-7"
-              style={{ gridTemplateRows: `repeat(${timeSlots.length}, 1fr)` }}
+              style={{
+                gridTemplateRows: `repeat(${timeSlots.length}, minmax(44px, 1fr))`,
+              }}
             >
               {timeSlots.map((slot, rowIdx) => (
                 <Fragment key={slot.hour24}>
@@ -6779,9 +6906,21 @@ export const InstructorSchedulePage = () => {
 
                     const inDrag = isInDragRange(date, slot.hour24);
                     const isCellEmpty = slotSchedules.length === 0;
+                    // Cells with a scheduled class already explain
+                    // themselves via the class block's own hover detail --
+                    // this is only for an otherwise-blank cell that's
+                    // greyed out by unavailability, which had no
+                    // explanation at all for why it can't be booked.
+                    const unavailableTitle =
+                      isCellEmpty && (isTopUnavailable || isBottomUnavailable)
+                        ? isTopUnavailable && isBottomUnavailable
+                          ? "Instructor unavailable this whole hour"
+                          : `Instructor unavailable ${isTopUnavailable ? "the first half of this hour" : "the second half of this hour"}`
+                        : undefined;
                     return (
                       <div
                         key={`${dateStr}-${slot.hour24}`}
+                        title={unavailableTitle}
                         className={cn(
                           "group relative cursor-pointer select-none border-b border-r border-slate-50 transition-colors",
                           "hover:bg-slate-200",
@@ -6922,7 +7061,7 @@ export const InstructorSchedulePage = () => {
                                       "HH:mm:ss",
                                       new Date(),
                                     ),
-                                    "h:mm a",
+                                    "HH:mm",
                                   )}{" "}
                                   -{" "}
                                   {format(
@@ -6931,7 +7070,7 @@ export const InstructorSchedulePage = () => {
                                       "HH:mm:ss",
                                       new Date(),
                                     ),
-                                    "h:mm a",
+                                    "HH:mm",
                                   )}
                                 </div>
                               </div>
@@ -6983,14 +7122,14 @@ export const InstructorSchedulePage = () => {
                                     <Clock className="h-1.5 w-1.5" />
                                     {format(
                                       new Date(event.start.dateTime),
-                                      "h:mm a",
+                                      "HH:mm",
                                     )}
                                     {event.end?.dateTime && (
                                       <>
                                         {" - "}
                                         {format(
                                           new Date(event.end.dateTime),
-                                          "h:mm a",
+                                          "HH:mm",
                                         )}
                                       </>
                                     )}

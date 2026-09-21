@@ -1,5 +1,11 @@
 import { format } from "date-fns";
-import { CheckCircle2, ExternalLink, FileText, XCircle } from "lucide-react";
+import {
+  CheckCircle2,
+  ExternalLink,
+  FileText,
+  Upload,
+  XCircle,
+} from "lucide-react";
 import { useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -15,9 +21,12 @@ import {
   LLApplication,
   LLDocument,
   llDocumentUrl,
+  useAdminReplaceLLDocument,
   useLLDocuments,
   useReviewLLDocument,
 } from "@/queries/llApplications";
+
+const MAX_DOCUMENT_SIZE_BYTES = 10 * 1024 * 1024;
 
 /**
  * RTO-team review of the customer's in-app LL form submission: the answers
@@ -35,6 +44,7 @@ export default function LLDocumentsReview({
   const { toast } = useToast();
   const { data: documents, isLoading } = useLLDocuments(application.id);
   const review = useReviewLLDocument();
+  const replace = useAdminReplaceLLDocument();
   const [rejectingId, setRejectingId] = useState<string | null>(null);
   const [reason, setReason] = useState("");
 
@@ -85,6 +95,37 @@ export default function LLDocumentsReview({
     );
 
   const knownKeys = new Set(LL_FORM_FIELDS.map((f) => f.key));
+
+  const replaceRejectedDocument = (doc: LLDocument, file?: File) => {
+    if (!file) return;
+    if (file.size > MAX_DOCUMENT_SIZE_BYTES) {
+      toast({
+        title: "File is too large",
+        description: "Please choose an image or PDF under 10 MB.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    replace.mutate(
+      { application, doc, file, actorName, docLabel: docLabel(doc) },
+      {
+        onSuccess: ({ returnedToReview }) =>
+          toast({
+            title: "Document replaced",
+            description: returnedToReview
+              ? "All rejected documents have been replaced. The application is back under review."
+              : "The replacement is pending review.",
+          }),
+        onError: (e: Error) =>
+          toast({
+            title: "Upload failed",
+            description: e.message,
+            variant: "destructive",
+          }),
+      },
+    );
+  };
 
   return (
     <div className="rounded-md border p-3">
@@ -164,6 +205,37 @@ export default function LLDocumentsReview({
                     >
                       <XCircle className="mr-1 h-3.5 w-3.5" /> Reject
                     </Button>
+                  )}
+                  {d.status === "rejected" && (
+                    <>
+                      <input
+                        id={`replace-ll-document-${d.id}`}
+                        type="file"
+                        accept="image/*,.pdf"
+                        className="hidden"
+                        disabled={replace.isPending}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          e.target.value = "";
+                          replaceRejectedDocument(d, file);
+                        }}
+                      />
+                      <Button
+                        asChild
+                        size="sm"
+                        variant="outline"
+                        className="h-7 border-blue-300 text-blue-700 hover:bg-blue-50"
+                        disabled={replace.isPending}
+                      >
+                        <label htmlFor={`replace-ll-document-${d.id}`}>
+                          <Upload className="mr-1 h-3.5 w-3.5" />
+                          {replace.isPending &&
+                          replace.variables?.doc.id === d.id
+                            ? "Uploading…"
+                            : "Replace document"}
+                        </label>
+                      </Button>
+                    </>
                   )}
                 </div>
               </div>

@@ -107,7 +107,10 @@ export function useAllSafetyIncidents(filters?: {
 
       // Resolve instructor names/phones in one batch (no FK relationship typed).
       const ids = Array.from(new Set(rows.map((r) => r.instructor_id)));
-      const byId = new Map<string, { name: string | null; phone: string | null }>();
+      const byId = new Map<
+        string,
+        { name: string | null; phone: string | null }
+      >();
       if (ids.length) {
         const { data: instrs } = await supabase
           .from("Instructor")
@@ -134,7 +137,8 @@ export function useUpdateSafetyIncident() {
       adminResponse?: string;
       resolverName?: string;
     }) => {
-      const closing = input.status === "resolved" || input.status === "dismissed";
+      const closing =
+        input.status === "resolved" || input.status === "dismissed";
       const { error } = await supabase
         .from("safety_incident")
         .update({

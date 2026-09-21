@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { Fragment, useState } from "react";
 import { ChevronDown, RefreshCw } from "lucide-react";
+import { Fragment, useState } from "react";
+
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { COURSES_DATA } from "@/constants/courses";

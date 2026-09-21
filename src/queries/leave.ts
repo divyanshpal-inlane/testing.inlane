@@ -90,7 +90,7 @@ const unavailableInWindow = (
   return false;
 };
 
-const first = <T,>(v: T | T[] | null | undefined): T | null =>
+const first = <T>(v: T | T[] | null | undefined): T | null =>
   Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
 
 // Translate an approved leave request into an Instructor.unavailability entry,
@@ -214,7 +214,10 @@ export function useAllLeaveRequests(filters?: { status?: LeaveStatus }) {
 
       // Resolve instructor names/phones in one batch (no FK relationship typed).
       const ids = Array.from(new Set(rows.map((r) => r.instructor_id)));
-      const nameById = new Map<string, { name: string | null; phone: string | null }>();
+      const nameById = new Map<
+        string,
+        { name: string | null; phone: string | null }
+      >();
       if (ids.length) {
         const { data: instrs } = await supabase
           .from("Instructor")
@@ -268,7 +271,11 @@ export function useReviewLeaveRequest() {
         if (e2) throw e2;
         const { error: e3 } = await supabase
           .from("instructor_leave_request")
-          .update({ ...reviewed, status: "approved", unavailability_applied: true })
+          .update({
+            ...reviewed,
+            status: "approved",
+            unavailability_applied: true,
+          })
           .eq("id", request.id);
         if (e3) throw e3;
       } else {
@@ -298,9 +305,7 @@ export function useRevokeLeave() {
         const current = Array.isArray(instr?.unavailability)
           ? (instr!.unavailability as Array<Record<string, unknown>>)
           : [];
-        const next = current.filter(
-          (u) => u?.leave_request_id !== request.id,
-        );
+        const next = current.filter((u) => u?.leave_request_id !== request.id);
         const { error: e2 } = await supabase
           .from("Instructor")
           .update({ unavailability: next as unknown as Json })
@@ -345,9 +350,11 @@ export function useLeaveAffectedLessons(request: LeaveRequest | null) {
       }
 
       return rows.map((s) => {
-        const learner = first<{ name: string | null; phone: string | null; area: string | null }>(
-          s.Learner as never,
-        );
+        const learner = first<{
+          name: string | null;
+          phone: string | null;
+          area: string | null;
+        }>(s.Learner as never);
         const lesson = first<{ number: number | null }>(s.Lesson as never);
         return {
           scheduleId: s.id,
@@ -399,7 +406,10 @@ export function useReplacementCandidates(
         .select("instructor_id, start_time, end_time")
         .eq("date", l.date)
         .in("status", ACTIVE_STATUSES);
-      const byInstr = new Map<string, { start_time: string | null; end_time: string | null }[]>();
+      const byInstr = new Map<
+        string,
+        { start_time: string | null; end_time: string | null }[]
+      >();
       for (const s of scheds ?? []) {
         if (!s.instructor_id) continue;
         if (!byInstr.has(s.instructor_id)) byInstr.set(s.instructor_id, []);
@@ -430,7 +440,12 @@ export function useReplacementCandidates(
             Number(b.sameArea) - Number(a.sameArea) ||
             (a.name ?? "").localeCompare(b.name ?? ""),
         )
-        .map(({ id, name, phone, sameArea }) => ({ id, name, phone, sameArea }));
+        .map(({ id, name, phone, sameArea }) => ({
+          id,
+          name,
+          phone,
+          sameArea,
+        }));
     },
   });
 }
@@ -438,7 +453,10 @@ export function useReplacementCandidates(
 export function useReassignLesson() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (input: { scheduleId: number; newInstructorId: string }) => {
+    mutationFn: async (input: {
+      scheduleId: number;
+      newInstructorId: string;
+    }) => {
       const { error } = await supabase
         .from("Schedule")
         // Schedule's generated Update type wrongly requires ended_at; cast past it.

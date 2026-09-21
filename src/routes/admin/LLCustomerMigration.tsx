@@ -132,29 +132,55 @@ function SingleCustomerForm() {
       <CardContent className="space-y-4 p-5">
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Full name *">
-            <Input value={form.name ?? ""} onChange={(e) => set("name", e.target.value)} />
+            <Input
+              value={form.name ?? ""}
+              onChange={(e) => set("name", e.target.value)}
+            />
           </Field>
           <Field label="Phone *">
-            <Input value={form.phone ?? ""} onChange={(e) => set("phone", e.target.value)} placeholder="10-digit" />
+            <Input
+              value={form.phone ?? ""}
+              onChange={(e) => set("phone", e.target.value)}
+              placeholder="10-digit"
+            />
           </Field>
           <Field label="Email">
-            <Input value={form.email ?? ""} onChange={(e) => set("email", e.target.value)} />
+            <Input
+              value={form.email ?? ""}
+              onChange={(e) => set("email", e.target.value)}
+            />
           </Field>
           <Field label="Date of birth">
-            <Input type="date" value={form.dob ?? ""} onChange={(e) => set("dob", e.target.value)} />
+            <Input
+              type="date"
+              value={form.dob ?? ""}
+              onChange={(e) => set("dob", e.target.value)}
+            />
           </Field>
           <Field label="Area / locality">
-            <Input value={form.area ?? ""} onChange={(e) => set("area", e.target.value)} />
+            <Input
+              value={form.area ?? ""}
+              onChange={(e) => set("area", e.target.value)}
+            />
           </Field>
           <Field label="Pincode">
-            <Input value={form.pincode ?? ""} onChange={(e) => set("pincode", e.target.value)} />
+            <Input
+              value={form.pincode ?? ""}
+              onChange={(e) => set("pincode", e.target.value)}
+            />
           </Field>
           <Field label="Pick-up location" className="sm:col-span-2">
-            <Input value={form.pick_up_location ?? ""} onChange={(e) => set("pick_up_location", e.target.value)} />
+            <Input
+              value={form.pick_up_location ?? ""}
+              onChange={(e) => set("pick_up_location", e.target.value)}
+            />
           </Field>
 
           <Field label="LL stage">
-            <Select value={form.ll_stage ?? "has_ll"} onValueChange={(v) => set("ll_stage", v)}>
+            <Select
+              value={form.ll_stage ?? "has_ll"}
+              onValueChange={(v) => set("ll_stage", v)}
+            >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
@@ -168,21 +194,42 @@ function SingleCustomerForm() {
             </Select>
           </Field>
           <Field label="LL application / number">
-            <Input value={form.ll_application_id ?? ""} onChange={(e) => set("ll_application_id", e.target.value)} />
+            <Input
+              value={form.ll_application_id ?? ""}
+              onChange={(e) => set("ll_application_id", e.target.value)}
+            />
           </Field>
           <Field label="LL received date">
-            <Input type="date" value={form.ll_received_date ?? ""} onChange={(e) => set("ll_received_date", e.target.value)} />
+            <Input
+              type="date"
+              value={form.ll_received_date ?? ""}
+              onChange={(e) => set("ll_received_date", e.target.value)}
+            />
           </Field>
           <Field label="LL test date">
-            <Input type="date" value={form.ll_test_date ?? ""} onChange={(e) => set("ll_test_date", e.target.value)} />
+            <Input
+              type="date"
+              value={form.ll_test_date ?? ""}
+              onChange={(e) => set("ll_test_date", e.target.value)}
+            />
           </Field>
 
           <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={form.has_a_dl === "yes"} onChange={(e) => set("has_a_dl", e.target.checked ? "yes" : "no")} />
+            <input
+              type="checkbox"
+              checked={form.has_a_dl === "yes"}
+              onChange={(e) => set("has_a_dl", e.target.checked ? "yes" : "no")}
+            />
             Has 4-wheeler DL (treated as already-has-LL)
           </label>
           <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={form.has_two_wheeler_license === "yes"} onChange={(e) => set("has_two_wheeler_license", e.target.checked ? "yes" : "no")} />
+            <input
+              type="checkbox"
+              checked={form.has_two_wheeler_license === "yes"}
+              onChange={(e) =>
+                set("has_two_wheeler_license", e.target.checked ? "yes" : "no")
+              }
+            />
             Has 2-wheeler licence
           </label>
 
@@ -205,16 +252,35 @@ function SingleCustomerForm() {
             </Select>
           </Field>
           <Field label="Total amount (₹)">
-            <Input type="number" value={form.total_amount ?? ""} onChange={(e) => set("total_amount", e.target.value)} disabled={!form.course} />
+            <Input
+              type="number"
+              value={form.total_amount ?? ""}
+              onChange={(e) => set("total_amount", e.target.value)}
+              disabled={!form.course}
+            />
           </Field>
           <Field label="Amount paid (₹)">
-            <Input type="number" value={form.amount_paid ?? ""} onChange={(e) => set("amount_paid", e.target.value)} disabled={!form.course} />
+            <Input
+              type="number"
+              value={form.amount_paid ?? ""}
+              onChange={(e) => set("amount_paid", e.target.value)}
+              disabled={!form.course}
+            />
           </Field>
           <Field label="Lessons completed">
-            <Input type="number" value={form.completed_lessons ?? ""} onChange={(e) => set("completed_lessons", e.target.value)} disabled={!form.course} />
+            <Input
+              type="number"
+              value={form.completed_lessons ?? ""}
+              onChange={(e) => set("completed_lessons", e.target.value)}
+              disabled={!form.course}
+            />
           </Field>
           <Field label="Notes" className="sm:col-span-2">
-            <Textarea rows={2} value={form.comments ?? ""} onChange={(e) => set("comments", e.target.value)} />
+            <Textarea
+              rows={2}
+              value={form.comments ?? ""}
+              onChange={(e) => set("comments", e.target.value)}
+            />
           </Field>
         </div>
 
@@ -339,7 +405,9 @@ function BulkImport() {
     setImporting(false);
     toast({
       title: `Imported ${res.created} customer${res.created === 1 ? "" : "s"}`,
-      description: res.failed ? `${res.failed} failed — see details.` : undefined,
+      description: res.failed
+        ? `${res.failed} failed — see details.`
+        : undefined,
       variant: res.failed ? "destructive" : undefined,
     });
   };
@@ -415,7 +483,9 @@ function BulkImport() {
       )}
 
       {result && (
-        <Card className={result.failed ? "border-amber-300" : "border-emerald-300"}>
+        <Card
+          className={result.failed ? "border-amber-300" : "border-emerald-300"}
+        >
           <CardContent className="space-y-1 p-4 text-sm">
             <div className="font-medium">
               ✅ Created {result.created} · ⚠ {result.failed} failed
@@ -454,7 +524,10 @@ function BulkImport() {
                       <tr key={r.rowNumber} className="border-b [&>td]:p-2">
                         <td className="text-muted-foreground">{r.rowNumber}</td>
                         <td>
-                          <Badge variant="outline" className={`text-[10px] ${STATUS_BADGE[s]}`}>
+                          <Badge
+                            variant="outline"
+                            className={`text-[10px] ${STATUS_BADGE[s]}`}
+                          >
                             {STATUS_LABEL[s]}
                           </Badge>
                         </td>
@@ -501,8 +574,8 @@ export default function LLCustomerMigration() {
               LL Customer Migration
             </h1>
             <p className="text-sm text-muted-foreground">
-              Add existing Learner&apos;s License customers — one at a time or in
-              bulk from a CSV.
+              Add existing Learner&apos;s License customers — one at a time or
+              in bulk from a CSV.
             </p>
           </div>
         </div>
