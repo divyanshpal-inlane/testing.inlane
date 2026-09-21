@@ -51,7 +51,7 @@ export interface PotentialInstructorNoShow {
   lessonNumber: number | null;
 }
 
-const first = <T,>(v: T | T[] | null | undefined): T | null =>
+const first = <T>(v: T | T[] | null | undefined): T | null =>
   Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
 
 const today = () => format(new Date(), "yyyy-MM-dd");
@@ -92,7 +92,9 @@ export function useInstructorRecentLessons(instructorId: string | undefined) {
       }
 
       return rows.map((s) => {
-        const learner = first<{ name: string | null; phone: string | null }>(s.Learner as never);
+        const learner = first<{ name: string | null; phone: string | null }>(
+          s.Learner as never,
+        );
         const lesson = first<{ number: number | null }>(s.Lesson as never);
         return {
           scheduleId: s.id,
@@ -152,7 +154,9 @@ async function enrichNoShows(
       )
       .in("id", scheduleIds);
     for (const s of scheds ?? []) {
-      const learner = first<{ name: string | null; phone: string | null }>(s.Learner as never);
+      const learner = first<{ name: string | null; phone: string | null }>(
+        s.Learner as never,
+      );
       const instr = first<{ name: string | null }>(s.Instructor as never);
       const lesson = first<{ number: number | null }>(s.Lesson as never);
       byId.set(s.id, {
@@ -190,9 +194,16 @@ type EnrichedFields = {
   lessonNumber: number | null;
 };
 
-export function useNoShowCases(filters?: { status?: NoShowStatus; party?: NoShowParty }) {
+export function useNoShowCases(filters?: {
+  status?: NoShowStatus;
+  party?: NoShowParty;
+}) {
   return useQuery({
-    queryKey: ["no_show_cases", filters?.status ?? "any", filters?.party ?? "any"],
+    queryKey: [
+      "no_show_cases",
+      filters?.status ?? "any",
+      filters?.party ?? "any",
+    ],
     queryFn: async (): Promise<NoShowCase[]> => {
       let q = supabase
         .from("schedule_no_show")

@@ -20,6 +20,7 @@ import {
   MessageSquare,
   PhoneCall,
   Radar,
+  Search,
   Settings,
   ShieldCheck,
   Siren,
@@ -30,9 +31,10 @@ import {
   Wallet,
   Wrench,
 } from "lucide-react";
-import { Link, useNavigate } from "react-router-dom";
 import { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -48,9 +50,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Label } from "@/components/ui/label";
 import { useAuth } from "@/context/auth-context";
 import {
   ADMIN_PERMISSIONS,
@@ -213,7 +214,8 @@ const featureConfig: Record<
   },
   view_unmasked_phone_numbers: {
     title: "View Unmasked Phone Numbers",
-    description: "View and edit unmasked phone numbers for instructors and learners",
+    description:
+      "View and edit unmasked phone numbers for instructors and learners",
     icon: Users,
     link: "",
     color: "text-gray-500",
@@ -292,13 +294,20 @@ const featureConfig: Record<
   },
   compliance_forms: {
     title: "Compliance Forms",
-    description:
-      "Generate RTO Form 14, Form 15 & Certificate for any customer",
+    description: "Generate RTO Form 14, Form 15 & Certificate for any customer",
     icon: ClipboardList,
     link: "/admin/compliance-forms",
     color: "text-indigo-500",
   },
- } as const;
+  sales_dashboard: {
+    title: "Sales Availability Dashboard",
+    description:
+      "Search instructors by name or location and see live 30-min free-slot availability",
+    icon: Search,
+    link: "/admin/sales-dashboard",
+    color: "text-cyan-500",
+  },
+} as const;
 
 // Note: view_unmasked_phone_numbers controls visibility of sensitive data but doesn't have a dashboard feature card
 // Note: admin_management is only assignable to super admins, not available in regular admin permission selection
@@ -375,25 +384,28 @@ export default function AdminHome() {
     );
   }
 
-   // Determine if user is admin or team member
-   // Priority: Check if user exists in User table (team member) > Check if user is admin
-   const userRole = user?.user_metadata?.user_role;
-   const isTeamMember = !!currentUser; // User table exists = team member (created by admin)
-   const isAdmin = !isTeamMember && currentAdmin && (currentAdmin.is_admin || currentAdmin.is_super_admin);
-   
-   console.log("[AdminHome] User type determination:", {
-     userRole: userRole,
-     currentUserExists: !!currentUser,
-     currentUser: currentUser,
-     currentAdminExists: !!currentAdmin,
-     currentAdmin: currentAdmin,
-     adminIsAdmin: currentAdmin?.is_admin,
-     adminIsSuperAdmin: currentAdmin?.is_super_admin,
-     resolvedIsTeamMember: isTeamMember,
-     resolvedIsAdmin: isAdmin,
-     userPhone: user?.phone,
-     currentUserPhone: currentUser?.phone,
-   });
+  // Determine if user is admin or team member
+  // Priority: Check if user exists in User table (team member) > Check if user is admin
+  const userRole = user?.user_metadata?.user_role;
+  const isTeamMember = !!currentUser; // User table exists = team member (created by admin)
+  const isAdmin =
+    !isTeamMember &&
+    currentAdmin &&
+    (currentAdmin.is_admin || currentAdmin.is_super_admin);
+
+  console.log("[AdminHome] User type determination:", {
+    userRole: userRole,
+    currentUserExists: !!currentUser,
+    currentUser: currentUser,
+    currentAdminExists: !!currentAdmin,
+    currentAdmin: currentAdmin,
+    adminIsAdmin: currentAdmin?.is_admin,
+    adminIsSuperAdmin: currentAdmin?.is_super_admin,
+    resolvedIsTeamMember: isTeamMember,
+    resolvedIsAdmin: isAdmin,
+    userPhone: user?.phone,
+    currentUserPhone: currentUser?.phone,
+  });
 
   // Debug logging
   console.log("[AdminHome] Debug Info:", {
@@ -423,8 +435,14 @@ export default function AdminHome() {
       return isValid;
     });
     displayName = currentUser?.name || "Team Member";
-    console.log("[AdminHome] Using Team Member permissions (filtered):", userPermissions);
-    console.log("[AdminHome] Raw permissions from DB:", currentUser?.permissions);
+    console.log(
+      "[AdminHome] Using Team Member permissions (filtered):",
+      userPermissions,
+    );
+    console.log(
+      "[AdminHome] Raw permissions from DB:",
+      currentUser?.permissions,
+    );
   } else if (isAdmin) {
     userPermissions = currentAdmin?.permissions || [];
     isUserSuperAdmin = currentAdmin?.is_super_admin || false;
@@ -434,20 +452,36 @@ export default function AdminHome() {
   }
 
   // Filter features based on user's permissions
-  console.log("[AdminHome] All featureConfig keys:", Object.keys(featureConfig));
+  console.log(
+    "[AdminHome] All featureConfig keys:",
+    Object.keys(featureConfig),
+  );
   console.log("[AdminHome] User permissions to check:", userPermissions);
-  
-   const allowedFeatures = userPermissions
-     .filter((perm) => perm !== "admin_management" && perm !== "view_unmasked_phone_numbers" && perm !== "view_unmasked_car_numbers") // Filter out admin_management, view_unmasked_phone_numbers and view_unmasked_car_numbers
-     .map((perm) => {
+
+  const allowedFeatures = userPermissions
+    .filter(
+      (perm) =>
+        perm !== "admin_management" &&
+        perm !== "view_unmasked_phone_numbers" &&
+        perm !== "view_unmasked_car_numbers",
+    ) // Filter out admin_management, view_unmasked_phone_numbers and view_unmasked_car_numbers
+    .map((perm) => {
       const feature = featureConfig[perm];
-      console.log(`[AdminHome] Permission "${perm}": feature found=${!!feature}`);
+      console.log(
+        `[AdminHome] Permission "${perm}": feature found=${!!feature}`,
+      );
       return feature;
     })
     .filter((feature) => feature !== undefined);
-  
-  console.log("[AdminHome] Final allowedFeatures count:", allowedFeatures.length);
-  console.log("[AdminHome] Final allowedFeatures:", allowedFeatures.map(f => f?.title || "unknown"));
+
+  console.log(
+    "[AdminHome] Final allowedFeatures count:",
+    allowedFeatures.length,
+  );
+  console.log(
+    "[AdminHome] Final allowedFeatures:",
+    allowedFeatures.map((f) => f?.title || "unknown"),
+  );
 
   return (
     <div
@@ -491,61 +525,59 @@ export default function AdminHome() {
         </div>
 
         <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-2">
-           {/* Super Admin Management - only for super admins */}
-           {currentAdmin?.is_super_admin && (
-             <Card className="border-purple-200 transition-all hover:shadow-lg">
-               <Link to="/admin/admin-management">
-                 <CardHeader>
-                   <div className="flex items-center gap-4">
-                     <div className="rounded-lg bg-purple-100 p-2 text-purple-600">
-                       <ShieldCheck size={24} />
-                     </div>
-                     <div>
-                       <CardTitle className="text-xl">
-                         Admin Management
-                       </CardTitle>
-                       <CardDescription className="mt-1">
-                         Create and manage admin accounts and permissions
-                       </CardDescription>
-                     </div>
-                   </div>
-                 </CardHeader>
-                 <CardContent>
-                   <Button className="w-full" variant="ghost">
-                     Access Admin Management
-                   </Button>
-                 </CardContent>
-               </Link>
-             </Card>
-           )}
+          {/* Super Admin Management - only for super admins */}
+          {currentAdmin?.is_super_admin && (
+            <Card className="border-purple-200 transition-all hover:shadow-lg">
+              <Link to="/admin/admin-management">
+                <CardHeader>
+                  <div className="flex items-center gap-4">
+                    <div className="rounded-lg bg-purple-100 p-2 text-purple-600">
+                      <ShieldCheck size={24} />
+                    </div>
+                    <div>
+                      <CardTitle className="text-xl">
+                        Admin Management
+                      </CardTitle>
+                      <CardDescription className="mt-1">
+                        Create and manage admin accounts and permissions
+                      </CardDescription>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <Button className="w-full" variant="ghost">
+                    Access Admin Management
+                  </Button>
+                </CardContent>
+              </Link>
+            </Card>
+          )}
 
-           {/* User Management - for admins and super admins */}
-           {currentAdmin?.is_admin && (
-             <Card className="border-blue-200 transition-all hover:shadow-lg">
-               <Link to="/admin/user-management">
-                 <CardHeader>
-                   <div className="flex items-center gap-4">
-                     <div className="rounded-lg bg-blue-100 p-2 text-blue-600">
-                       <Users size={24} />
-                     </div>
-                     <div>
-                       <CardTitle className="text-xl">
-                         User Management
-                       </CardTitle>
-                       <CardDescription className="mt-1">
-                         Create and manage users with specific permissions
-                       </CardDescription>
-                     </div>
-                   </div>
-                 </CardHeader>
-                 <CardContent>
-                   <Button className="w-full" variant="ghost">
-                     Access User Management
-                   </Button>
-                 </CardContent>
-               </Link>
-             </Card>
-           )}
+          {/* User Management - for admins and super admins */}
+          {currentAdmin?.is_admin && (
+            <Card className="border-blue-200 transition-all hover:shadow-lg">
+              <Link to="/admin/user-management">
+                <CardHeader>
+                  <div className="flex items-center gap-4">
+                    <div className="rounded-lg bg-blue-100 p-2 text-blue-600">
+                      <Users size={24} />
+                    </div>
+                    <div>
+                      <CardTitle className="text-xl">User Management</CardTitle>
+                      <CardDescription className="mt-1">
+                        Create and manage users with specific permissions
+                      </CardDescription>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <Button className="w-full" variant="ghost">
+                    Access User Management
+                  </Button>
+                </CardContent>
+              </Link>
+            </Card>
+          )}
 
           {/* Feature cards based on permissions */}
           {allowedFeatures.map((feature) => (
@@ -578,207 +610,230 @@ export default function AdminHome() {
             </Card>
           ))}
 
-           {allowedFeatures.length === 0 && !currentAdmin?.is_super_admin && !isTeamMember && (
-             <Card className="col-span-2">
-               <CardHeader>
-                 <CardTitle>No Access</CardTitle>
-                 <CardDescription>
-                   You don't have permission to access any features. Please
-                   contact the Super Admin to get access.
-                 </CardDescription>
-               </CardHeader>
-             </Card>
-           )}
+          {allowedFeatures.length === 0 &&
+            !currentAdmin?.is_super_admin &&
+            !isTeamMember && (
+              <Card className="col-span-2">
+                <CardHeader>
+                  <CardTitle>No Access</CardTitle>
+                  <CardDescription>
+                    You don't have permission to access any features. Please
+                    contact the Super Admin to get access.
+                  </CardDescription>
+                </CardHeader>
+              </Card>
+            )}
 
-           {allowedFeatures.length === 0 && isTeamMember && (
-             <Card className="col-span-2">
-               <CardHeader>
-                 <CardTitle>No Permissions Assigned</CardTitle>
-                 <CardDescription>
-                   You haven't been assigned any permissions yet. Please contact
-                   your admin to get access to features.
-                 </CardDescription>
-               </CardHeader>
-             </Card>
-           )}
+          {allowedFeatures.length === 0 && isTeamMember && (
+            <Card className="col-span-2">
+              <CardHeader>
+                <CardTitle>No Permissions Assigned</CardTitle>
+                <CardDescription>
+                  You haven't been assigned any permissions yet. Please contact
+                  your admin to get access to features.
+                </CardDescription>
+              </CardHeader>
+            </Card>
+          )}
 
-           {/* Change Password - visible to everyone (at the end) */}
-           <Dialog open={openPasswordDialog} onOpenChange={setOpenPasswordDialog}>
-             <Card className="border-blue-200 transition-all hover:shadow-lg cursor-pointer" onClick={() => setOpenPasswordDialog(true)}>
-               <CardHeader>
-                 <div className="flex items-center gap-4">
-                   <div className="rounded-lg bg-blue-100 p-2 text-blue-600">
-                     <Lock size={24} />
-                   </div>
-                   <div>
-                     <CardTitle className="text-xl">
-                       Change Password
-                     </CardTitle>
-                     <CardDescription className="mt-1">
-                       Update your account password for enhanced security
-                     </CardDescription>
-                   </div>
-                 </div>
-               </CardHeader>
-               <CardContent>
-                 <Button className="w-full" variant="ghost">
-                   Change Password
-                 </Button>
-               </CardContent>
-             </Card>
+          {/* Change Password - visible to everyone (at the end) */}
+          <Dialog
+            open={openPasswordDialog}
+            onOpenChange={setOpenPasswordDialog}
+          >
+            <Card
+              className="cursor-pointer border-blue-200 transition-all hover:shadow-lg"
+              onClick={() => setOpenPasswordDialog(true)}
+            >
+              <CardHeader>
+                <div className="flex items-center gap-4">
+                  <div className="rounded-lg bg-blue-100 p-2 text-blue-600">
+                    <Lock size={24} />
+                  </div>
+                  <div>
+                    <CardTitle className="text-xl">Change Password</CardTitle>
+                    <CardDescription className="mt-1">
+                      Update your account password for enhanced security
+                    </CardDescription>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <Button className="w-full" variant="ghost">
+                  Change Password
+                </Button>
+              </CardContent>
+            </Card>
 
-             {/* Change Password Dialog */}
-             <DialogContent className="sm:max-w-[425px]">
-               <DialogHeader>
-                 <DialogTitle className="flex items-center gap-2">
-                   <Lock className="h-5 w-5" />
-                   Change Password
-                 </DialogTitle>
-                 <DialogDescription>
-                   Update your account password. It must be at least 6 characters long.
-                 </DialogDescription>
-               </DialogHeader>
+            {/* Change Password Dialog */}
+            <DialogContent className="sm:max-w-[425px]">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <Lock className="h-5 w-5" />
+                  Change Password
+                </DialogTitle>
+                <DialogDescription>
+                  Update your account password. It must be at least 6 characters
+                  long.
+                </DialogDescription>
+              </DialogHeader>
 
-               <form onSubmit={handlePasswordChange} className="space-y-4">
-                 {/* Current Password */}
-                 <div className="space-y-2">
-                   <Label htmlFor="oldPassword" className="text-sm font-medium">
-                     Current Password
-                   </Label>
-                   <div className="relative">
-                     <Input
-                       id="oldPassword"
-                       type={showOldPassword ? "text" : "password"}
-                       placeholder="Enter your current password"
-                       value={passwordForm.oldPassword}
-                       onChange={(e) =>
-                         setPasswordForm({
-                           ...passwordForm,
-                           oldPassword: e.target.value,
-                         })
-                       }
-                       disabled={isChangingPassword}
-                       className="pr-10"
-                     />
-                     <button
-                       type="button"
-                       onClick={() => setShowOldPassword(!showOldPassword)}
-                       className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
-                     >
-                       {showOldPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-                     </button>
-                   </div>
-                 </div>
+              <form onSubmit={handlePasswordChange} className="space-y-4">
+                {/* Current Password */}
+                <div className="space-y-2">
+                  <Label htmlFor="oldPassword" className="text-sm font-medium">
+                    Current Password
+                  </Label>
+                  <div className="relative">
+                    <Input
+                      id="oldPassword"
+                      type={showOldPassword ? "text" : "password"}
+                      placeholder="Enter your current password"
+                      value={passwordForm.oldPassword}
+                      onChange={(e) =>
+                        setPasswordForm({
+                          ...passwordForm,
+                          oldPassword: e.target.value,
+                        })
+                      }
+                      disabled={isChangingPassword}
+                      className="pr-10"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowOldPassword(!showOldPassword)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+                    >
+                      {showOldPassword ? (
+                        <EyeOff size={18} />
+                      ) : (
+                        <Eye size={18} />
+                      )}
+                    </button>
+                  </div>
+                </div>
 
-                 {/* New Password */}
-                 <div className="space-y-2">
-                   <Label htmlFor="newPassword" className="text-sm font-medium">
-                     New Password
-                   </Label>
-                   <div className="relative">
-                     <Input
-                       id="newPassword"
-                       type={showNewPassword ? "text" : "password"}
-                       placeholder="Enter your new password"
-                       value={passwordForm.newPassword}
-                       onChange={(e) =>
-                         setPasswordForm({
-                           ...passwordForm,
-                           newPassword: e.target.value,
-                         })
-                       }
-                       disabled={isChangingPassword}
-                       minLength={6}
-                       className="pr-10"
-                     />
-                     <button
-                       type="button"
-                       onClick={() => setShowNewPassword(!showNewPassword)}
-                       className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
-                     >
-                       {showNewPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-                     </button>
-                   </div>
-                   <p className="text-xs text-muted-foreground">
-                     Password should be minimum 6 characters
-                   </p>
-                 </div>
+                {/* New Password */}
+                <div className="space-y-2">
+                  <Label htmlFor="newPassword" className="text-sm font-medium">
+                    New Password
+                  </Label>
+                  <div className="relative">
+                    <Input
+                      id="newPassword"
+                      type={showNewPassword ? "text" : "password"}
+                      placeholder="Enter your new password"
+                      value={passwordForm.newPassword}
+                      onChange={(e) =>
+                        setPasswordForm({
+                          ...passwordForm,
+                          newPassword: e.target.value,
+                        })
+                      }
+                      disabled={isChangingPassword}
+                      minLength={6}
+                      className="pr-10"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowNewPassword(!showNewPassword)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+                    >
+                      {showNewPassword ? (
+                        <EyeOff size={18} />
+                      ) : (
+                        <Eye size={18} />
+                      )}
+                    </button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Password should be minimum 6 characters
+                  </p>
+                </div>
 
-                 {/* Confirm Password */}
-                 <div className="space-y-2">
-                   <Label htmlFor="confirmPassword" className="text-sm font-medium">
-                     Confirm New Password
-                   </Label>
-                   <div className="relative">
-                     <Input
-                       id="confirmPassword"
-                       type={showConfirmPassword ? "text" : "password"}
-                       placeholder="Confirm your new password"
-                       value={passwordForm.confirmPassword}
-                       onChange={(e) =>
-                         setPasswordForm({
-                           ...passwordForm,
-                           confirmPassword: e.target.value,
-                         })
-                       }
-                       disabled={isChangingPassword}
-                       minLength={6}
-                       className="pr-10"
-                     />
-                     <button
-                       type="button"
-                       onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-                       className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
-                     >
-                       {showConfirmPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-                     </button>
-                   </div>
-                 </div>
+                {/* Confirm Password */}
+                <div className="space-y-2">
+                  <Label
+                    htmlFor="confirmPassword"
+                    className="text-sm font-medium"
+                  >
+                    Confirm New Password
+                  </Label>
+                  <div className="relative">
+                    <Input
+                      id="confirmPassword"
+                      type={showConfirmPassword ? "text" : "password"}
+                      placeholder="Confirm your new password"
+                      value={passwordForm.confirmPassword}
+                      onChange={(e) =>
+                        setPasswordForm({
+                          ...passwordForm,
+                          confirmPassword: e.target.value,
+                        })
+                      }
+                      disabled={isChangingPassword}
+                      minLength={6}
+                      className="pr-10"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setShowConfirmPassword(!showConfirmPassword)
+                      }
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+                    >
+                      {showConfirmPassword ? (
+                        <EyeOff size={18} />
+                      ) : (
+                        <Eye size={18} />
+                      )}
+                    </button>
+                  </div>
+                </div>
 
-                 {/* Error and Success Messages */}
-                 {errorMessage && (
-                   <Alert variant="destructive">
-                     <AlertDescription>{errorMessage}</AlertDescription>
-                   </Alert>
-                 )}
+                {/* Error and Success Messages */}
+                {errorMessage && (
+                  <Alert variant="destructive">
+                    <AlertDescription>{errorMessage}</AlertDescription>
+                  </Alert>
+                )}
 
-                 {successMessage && (
-                   <Alert className="border-green-200 bg-green-50">
-                     <Check className="h-4 w-4 text-green-600" />
-                     <AlertDescription className="text-green-800">
-                       {successMessage}
-                     </AlertDescription>
-                   </Alert>
-                 )}
+                {successMessage && (
+                  <Alert className="border-green-200 bg-green-50">
+                    <Check className="h-4 w-4 text-green-600" />
+                    <AlertDescription className="text-green-800">
+                      {successMessage}
+                    </AlertDescription>
+                  </Alert>
+                )}
 
-                 <div className="flex gap-2 pt-4">
-                   <Button
-                     type="submit"
-                     disabled={isChangingPassword}
-                     className="flex-1"
-                   >
-                     {isChangingPassword ? (
-                       <>
-                         <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                         Changing...
-                       </>
-                     ) : (
-                       "Change Password"
-                     )}
-                   </Button>
-                   <Button
-                     type="button"
-                     variant="outline"
-                     onClick={() => setOpenPasswordDialog(false)}
-                     disabled={isChangingPassword}
-                   >
-                     Cancel
-                   </Button>
-                 </div>
-               </form>
-             </DialogContent>
-           </Dialog>
-
+                <div className="flex gap-2 pt-4">
+                  <Button
+                    type="submit"
+                    disabled={isChangingPassword}
+                    className="flex-1"
+                  >
+                    {isChangingPassword ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Changing...
+                      </>
+                    ) : (
+                      "Change Password"
+                    )}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setOpenPasswordDialog(false)}
+                    disabled={isChangingPassword}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </form>
+            </DialogContent>
+          </Dialog>
         </div>
       </div>
     </div>

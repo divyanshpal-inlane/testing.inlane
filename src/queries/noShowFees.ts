@@ -22,7 +22,11 @@ export type AppealReason =
   | "system_error"
   | "emergency"
   | "other";
-export type AppealStatus = "pending" | "approved" | "rejected" | "partial_refund";
+export type AppealStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "partial_refund";
 
 export interface NoShowFee {
   id: string;
@@ -60,7 +64,7 @@ export interface NoShowAppeal {
   created_at: string | null;
 }
 
-const first = <T,>(v: T | T[] | null | undefined): T | null =>
+const first = <T>(v: T | T[] | null | undefined): T | null =>
   Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
 
 // Best-effort WhatsApp/Heltar dispatch — a missing template must never block the
@@ -95,7 +99,8 @@ async function enrichFees(rows: any[]): Promise<NoShowFee[]> {
   const schedById = new Map<number, any>();
   for (const s of scheds ?? []) schedById.set(s.id, s);
   const appealByFee = new Map<string, NoShowAppeal>();
-  for (const a of (appeals ?? []) as NoShowAppeal[]) appealByFee.set(a.fee_id, a);
+  for (const a of (appeals ?? []) as NoShowAppeal[])
+    appealByFee.set(a.fee_id, a);
 
   return rows.map((r) => {
     const s = schedById.get(r.schedule_id);
@@ -160,7 +165,8 @@ export function useChargeNoShowFee() {
         if (schedErr) throw schedErr;
         learnerId = sched?.learner_id ?? null;
       }
-      if (!learnerId) throw new Error("Could not resolve learner for this lesson.");
+      if (!learnerId)
+        throw new Error("Could not resolve learner for this lesson.");
 
       const { data: fee, error } = await sb
         .from("no_show_fee")
@@ -279,7 +285,10 @@ export function useReviewAppeal() {
         refund = 0;
         feeUpdate = { status: "confirmed" };
       } else {
-        refund = Math.max(0, Math.min(input.refundAmount ?? 0, input.feeAmount));
+        refund = Math.max(
+          0,
+          Math.min(input.refundAmount ?? 0, input.feeAmount),
+        );
         appealStatus = "partial_refund";
         // The standing amount is what remains after the partial refund.
         feeUpdate = { status: "confirmed", amount: input.feeAmount - refund };

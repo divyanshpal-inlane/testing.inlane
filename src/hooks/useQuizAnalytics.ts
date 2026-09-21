@@ -1,8 +1,9 @@
 import { useEffect, useRef } from "react";
+
 import { useLearningSession } from "@/hooks/useLearningSession";
 import {
-  questionId,
   type LearningContext,
+  questionId,
 } from "@/lib/learning-analytics/model";
 
 export function useQuizAnalytics(context: LearningContext) {

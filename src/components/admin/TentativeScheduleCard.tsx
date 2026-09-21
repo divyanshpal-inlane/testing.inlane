@@ -129,6 +129,7 @@ export const TentativeScheduleDialog = ({
       course_id: scheduleData.course_id,
       enabled: true,
       isTentative: true,
+      status: "hold",
       leadName: scheduleData.leadName,
     };
   };

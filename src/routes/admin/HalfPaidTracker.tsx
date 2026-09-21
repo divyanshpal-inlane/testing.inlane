@@ -96,7 +96,7 @@ export function HalfPaidTracker() {
             installment_type
           )
         `,
-          { count: 'exact' }
+          { count: "exact" },
         )
         .eq("payment_status", "half_paid");
 
@@ -104,7 +104,7 @@ export function HalfPaidTracker() {
       if (searchQuery.trim()) {
         // Search by Learner name only
         const searchPattern = `%${searchQuery}%`;
-        query = query.ilike('Learner.name', searchPattern);
+        query = query.ilike("Learner.name", searchPattern);
       }
 
       // Apply pagination at database level
@@ -172,7 +172,7 @@ export function HalfPaidTracker() {
   return (
     <Card className="mt-6 transition-all hover:shadow-lg">
       <CardHeader className="flex flex-row items-center justify-between gap-4">
-        <div className="flex flex-col gap-2 flex-1">
+        <div className="flex flex-1 flex-col gap-2">
           <div className="flex items-center gap-4">
             <CardTitle className="text-xl">50% Payment Tracker</CardTitle>
             <Input
@@ -316,14 +316,18 @@ export function HalfPaidTracker() {
             {enrollments.length > 0 && (
               <div className="mt-4 flex items-center justify-between">
                 <div className="text-sm text-muted-foreground">
-                  Showing {Math.min((currentPage - 1) * itemsPerPage + 1, totalCount)} to{" "}
-                  {Math.min(currentPage * itemsPerPage, totalCount)} of {totalCount} results
+                  Showing{" "}
+                  {Math.min((currentPage - 1) * itemsPerPage + 1, totalCount)}{" "}
+                  to {Math.min(currentPage * itemsPerPage, totalCount)} of{" "}
+                  {totalCount} results
                 </div>
                 <div className="flex items-center gap-2">
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                    onClick={() =>
+                      setCurrentPage((prev) => Math.max(1, prev - 1))
+                    }
                     disabled={currentPage === 1}
                   >
                     Previous
@@ -334,7 +338,9 @@ export function HalfPaidTracker() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                    onClick={() =>
+                      setCurrentPage((prev) => Math.min(totalPages, prev + 1))
+                    }
                     disabled={currentPage === totalPages}
                   >
                     Next
