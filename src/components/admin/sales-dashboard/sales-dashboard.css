@@ -59,6 +59,25 @@
   --gc-purple-fill: #6366f1;
   --gc-purple-hover: #4f46e5;
   --gc-purple-text: #ffffff;
+  /* Softer calendar-only fills. The existing semantic tokens above remain
+     unchanged for dashboard controls, notices, and booking actions. */
+  --gc-slot-free-fill: #bbf7d0;
+  --gc-slot-free-hover: #86efac;
+  --gc-slot-free-border: #4ade80;
+  --gc-slot-free-text: #166534;
+  --gc-slot-tentative-fill: #fde68a;
+  --gc-slot-tentative-hover: #fcd34d;
+  --gc-slot-tentative-border: #fbbf24;
+  --gc-slot-tentative-text: #78350f;
+  --gc-slot-booked-fill: #c7d2fe;
+  --gc-slot-booked-hover: #a5b4fc;
+  --gc-slot-booked-border: #818cf8;
+  --gc-slot-booked-text: #312e81;
+  /* Keep paused and unavailable in their existing neutral/slate family,
+     balanced to the same medium-pastel range as the other slot states. */
+  --gc-paused-fill: #cbd5e1;
+  --gc-paused-border: #94a3b8;
+  --gc-unavailable-fill: #d4d4d8;
   --gc-shadow: 0 1px 3px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.06);
   --gc-pop-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(0, 0, 0, 0.06);
   --gc-suggest-shadow: 0 10px 15px rgba(0, 0, 0, 0.1),
@@ -88,6 +107,7 @@
   --gc-green-fill: #3f3f46;
   --gc-green-hover: #52525b;
   --gc-green-text: #d4d4d8;
+  --gc-slot-free-text: #86efac;
   --gc-red-text: #fca5a5;
   --gc-red-bg: #450a0a;
   --gc-red-hover: #7f1d1d;
@@ -858,20 +878,20 @@
 }
 
 .cell-free {
-  background: var(--gc-green-fill);
+  background: var(--gc-slot-free-fill);
 }
 
 .cell-free:hover {
-  background: var(--gc-green-hover);
+  background: var(--gc-slot-free-hover);
 }
 
 .cell-half {
   background: linear-gradient(
     45deg,
-    var(--gc-green-fill) 25%,
+    var(--gc-slot-free-fill) 25%,
     transparent 25%,
     transparent 75%,
-    var(--gc-green-fill) 75%
+    var(--gc-slot-free-fill) 75%
   ) !important;
   background-size: 8px 8px;
 }
@@ -879,10 +899,10 @@
 .cell-half:hover {
   background: linear-gradient(
     45deg,
-    var(--gc-green-hover) 25%,
+    var(--gc-slot-free-hover) 25%,
     transparent 25%,
     transparent 75%,
-    var(--gc-green-hover) 75%
+    var(--gc-slot-free-hover) 75%
   ) !important;
   background-size: 8px 8px;
 }
@@ -899,21 +919,40 @@
    same yellow; only the hover popover's title/override-eligibility
    differs by payment status). */
 .cell-tentative {
-  background: var(--gc-yellow-fill);
+  background: var(--gc-slot-tentative-fill);
 }
 
 .cell-tentative:hover {
-  background: var(--gc-yellow-hover);
+  background: var(--gc-slot-tentative-hover);
 }
 
 /* 🟣 Booked — a real class (booked/completed), or a real learner booking
    mid-payment (pending_payment). Never overridable from Sales. */
 .cell-booked {
-  background: var(--gc-purple-fill);
+  background: var(--gc-slot-booked-fill);
 }
 
 .cell-booked:hover {
-  background: var(--gc-purple-hover);
+  background: var(--gc-slot-booked-hover);
+}
+
+/* These two states are applied only to the expanded instructor timetable.
+   The primary booking grid deliberately keeps its existing appearance. */
+.cell-paused {
+  background: var(--gc-paused-fill);
+  box-shadow: inset 0 0 0 1px var(--gc-paused-border);
+}
+
+.cell-paused:hover {
+  background: var(--gc-paused-fill);
+}
+
+.cell-unavailable {
+  background: var(--gc-unavailable-fill);
+}
+
+.cell-unavailable:hover {
+  background: var(--gc-unavailable-fill);
 }
 
 /* 🔵 Pending — a slot already added to the in-progress multi-class batch
@@ -962,6 +1001,8 @@
 
 .detail {
   overflow: auto;
+  overflow-anchor: none;
+  scrollbar-gutter: stable;
   max-height: 60vh;
   background: var(--gc-detail);
   border-top: 1px solid var(--gc-border);
@@ -1024,6 +1065,55 @@
   color: var(--gc-text-2);
 }
 
+.detail-month-nav {
+  display: inline-grid;
+  grid-template-columns: 28px minmax(110px, auto) 28px;
+  align-items: center;
+  border: 1px solid var(--gc-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--gc-bg);
+}
+
+.detail-month-btn {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--gc-text-2);
+}
+
+.detail-month-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.detail-month-btn:hover:not(:disabled) {
+  background: var(--gc-hover);
+  color: var(--gc-text);
+}
+
+.detail-month-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.detail-month-label {
+  padding: 0 9px;
+  border-right: 1px solid var(--gc-border);
+  border-left: 1px solid var(--gc-border);
+  color: var(--gc-text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 28px;
+  text-align: center;
+  white-space: nowrap;
+}
+
 .detail-close {
   margin-left: auto;
   padding: 4px 12px;
@@ -1059,6 +1149,25 @@
   color: var(--gc-text-2);
 }
 
+.detail-legend {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--gc-border);
+  background: var(--gc-bg);
+  color: var(--gc-text-2);
+  font-size: 11px;
+}
+
+.detail-legend > span {
+  white-space: nowrap;
+}
+
 .detail-loading::before {
   content: "";
   width: 16px;
@@ -1077,13 +1186,15 @@
 }
 
 .mini {
+  --mini-time-column-width: 72px;
   border-collapse: collapse;
+  min-width: 100%;
 }
 
 .mini th,
 .mini td {
-  border-right: 1px solid var(--gc-border);
-  border-bottom: 1px solid var(--gc-border);
+  border-right: 1px solid var(--gc-grid-line);
+  border-bottom: 1px solid var(--gc-grid-line);
   padding: 5px 7px;
   font-size: 12px;
 }
@@ -1091,14 +1202,32 @@
 .mini th {
   position: sticky;
   top: 0;
+  z-index: 2;
+  height: 34px;
   background: var(--gc-surface);
   color: var(--gc-text-2);
-  font-weight: 500;
+  font-weight: 600;
+}
+
+.mini .time-label {
+  position: static;
+  display: block;
+  padding: 0;
+  transform: none;
+  background: transparent;
+  color: var(--gc-text);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
 }
 
 .mini-date {
   position: sticky;
   left: 0;
+  z-index: 1;
+  width: 148px;
+  min-width: 148px;
+  max-width: 148px;
   background: var(--gc-surface);
   text-align: left;
   white-space: nowrap;
@@ -1106,9 +1235,17 @@
   color: var(--gc-text);
 }
 
+.mini thead .mini-date {
+  z-index: 4;
+}
+
+.mini-date-label {
+  font-variant-numeric: tabular-nums;
+}
+
 .mini-date .mini-count {
   margin-left: 8px;
-  color: var(--gc-green-text);
+  color: var(--gc-slot-free-text);
   font-weight: 700;
 }
 
@@ -1123,16 +1260,115 @@
 }
 
 .mini .cell {
-  min-width: 40px;
-  height: 20px;
+  width: var(--mini-time-column-width);
+  min-width: var(--mini-time-column-width);
+  max-width: var(--mini-time-column-width);
+  height: 58px;
+}
+
+/* Schedule cards mirror the concise name/number/time treatment used by the
+   Instructor Schedule grid, while remaining inside the Sales Dashboard's
+   existing date-row/time-column structure. The card ignores pointer events so
+   every existing cell hover, popover and double-click action remains active. */
+.mini .cell-schedule-anchor {
+  z-index: 1;
+}
+
+.mini-schedule-card {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 2px;
+  z-index: 1;
+  box-sizing: border-box;
+  min-width: 44px;
+  padding: 5px 6px;
+  overflow: hidden;
+  border: 1px solid var(--gc-slot-booked-border);
+  border-left-width: 3px;
+  border-radius: 5px;
+  background: var(--gc-slot-booked-fill);
+  box-shadow: var(--gc-shadow);
+  color: var(--gc-slot-booked-text);
+  pointer-events: none;
+}
+
+.mini-schedule-card-tentative {
+  border-color: var(--gc-slot-tentative-border);
+  background: var(--gc-slot-tentative-fill);
+  color: var(--gc-slot-tentative-text);
+}
+
+.mini-schedule-card-paused {
+  border-color: var(--gc-paused-border);
+  background: var(--gc-paused-fill);
+  color: var(--gc-text);
+}
+
+.mini-schedule-name,
+.mini-schedule-meta {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 4px;
+}
+
+.mini-schedule-name {
+  align-items: flex-start;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: normal;
+}
+
+.mini-schedule-name > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mini-schedule-number {
+  flex: none;
+  font-size: 9px;
+}
+
+.mini-schedule-meta {
+  justify-content: space-between;
+  margin-top: 5px;
+  font-size: 8px;
+  font-weight: 600;
+  line-height: 1;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+/* A hovered continuation cell sits above adjacent cells for its existing
+   popover. Keeping its fill transparent prevents it from visually slicing the
+   schedule card underneath while the pointer crosses the block. */
+.mini .cell-hovered.cell-booked,
+.mini .cell-hovered.cell-tentative,
+.mini .cell-hovered.cell-paused {
+  background: transparent;
+}
+
+.mini .mini-time {
+  width: var(--mini-time-column-width);
+  min-width: var(--mini-time-column-width);
+  max-width: var(--mini-time-column-width);
+}
+
+/* The stronger divider falls after each :30 column, matching the main grid's
+   existing hour grouping while retaining every 30-minute boundary. */
+.mini th:nth-child(odd):not(.mini-date),
+.mini td:nth-child(odd):not(.mini-date) {
+  border-right-color: var(--gc-grid-line-strong);
 }
 
 .mini .cell-free {
-  background: var(--gc-green-fill);
+  background: var(--gc-slot-free-fill);
 }
 
 .mini .cell-free:hover {
-  background: var(--gc-green-hover);
+  background: var(--gc-slot-free-hover);
 }
 
 .empty {
@@ -1163,8 +1399,8 @@
 }
 
 .swatch.free {
-  background: var(--gc-green-fill);
-  border: 1px solid var(--gc-green-hover);
+  background: var(--gc-slot-free-fill);
+  border: 1px solid var(--gc-slot-free-border);
 }
 
 .swatch.busy {
@@ -1173,13 +1409,23 @@
 }
 
 .swatch.tentative {
-  background: var(--gc-yellow-fill);
-  border: 1px solid var(--gc-yellow-hover);
+  background: var(--gc-slot-tentative-fill);
+  border: 1px solid var(--gc-slot-tentative-border);
 }
 
 .swatch.booked {
-  background: var(--gc-purple-fill);
-  border: 1px solid var(--gc-purple-hover);
+  background: var(--gc-slot-booked-fill);
+  border: 1px solid var(--gc-slot-booked-border);
+}
+
+.swatch.paused {
+  background: var(--gc-paused-fill);
+  border: 1px solid var(--gc-paused-border);
+}
+
+.swatch.unavailable {
+  background: var(--gc-unavailable-fill);
+  border: 1px solid var(--gc-border);
 }
 
 .swatch.pending {
@@ -1204,6 +1450,18 @@
   text-align: center;
   color: var(--gc-text-2);
   padding: 40px 0;
+}
+
+.dashboard-loading-state {
+  min-height: 40vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.dashboard-loading-spinner {
+  color: var(--gc-blue);
 }
 
 .state.error {
@@ -1665,4 +1923,39 @@
 
 .slot-toast-success .slot-toast-close:hover {
   background: var(--gc-green-hover);
+}
+
+.customer-reuse-toast {
+  top: 76px;
+  flex-wrap: wrap;
+  width: min(620px, 92vw);
+}
+
+.customer-reuse-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.customer-reuse-action {
+  min-height: 30px;
+  padding: 5px 10px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  background: var(--gc-bg);
+  color: inherit;
+  font-family: "Glancyr", sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.customer-reuse-action:hover {
+  filter: brightness(0.97);
+}
+
+.customer-reuse-action.secondary {
+  border-color: transparent;
+  background: transparent;
 }
