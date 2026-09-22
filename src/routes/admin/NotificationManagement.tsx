@@ -1,8 +1,12 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { addDays, format, formatDate, parse } from "date-fns";
 import { Delete, Mail, RefreshCcw, Search, Send, UserPlus } from "lucide-react";
 import { ArrowLeft, Loader2 } from "lucide-react";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
@@ -434,71 +438,111 @@ function LearnerNotificationCard() {
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<NotificationTab>("learners");
   const [tabState, setTabState] = useState({
-    learners: { page: 1, search: "" },
-    instructors: { page: 1, search: "" },
+    learners: { search: "" },
+    instructors: { search: "" },
   });
   const [counts, setCounts] = useState({ learners: 0, instructors: 0 });
+  const loadMoreRef = useRef<HTMLDivElement>(null);
   const learnerSearch = useDebouncedValue(tabState.learners.search);
   const instructorSearch = useDebouncedValue(tabState.instructors.search);
-  const { page, search } = tabState[activeTab];
-  const searchPending =
-    search !== (activeTab === "learners" ? learnerSearch : instructorSearch);
+  const { search } = tabState[activeTab];
+  const debouncedSearch =
+    activeTab === "learners" ? learnerSearch : instructorSearch;
+  const searchPending = search !== debouncedSearch;
   const tomorrow = addDays(new Date(), 1).toISOString().split("T")[0];
 
-  const { data, isFetching, isError } = useQuery({
+  const {
+    data,
+    fetchNextPage,
+    hasNextPage,
+    isError,
+    isFetching,
+    isFetchingNextPage,
+    isFetchNextPageError,
+    isLoading,
+  } = useInfiniteQuery({
     queryKey: [
       "daily-notification-schedules",
       tomorrow,
       activeTab,
-      search,
-      page,
+      debouncedSearch,
     ],
-    queryFn: async ({ signal }) => {
+    queryFn: async ({ pageParam, signal }) => {
       const { data, error } = await supabase
         .rpc("get_daily_notification_schedules", {
           schedule_date: tomorrow,
           recipient_tab: activeTab,
-          search_term: search,
-          page_number: page,
+          search_term: debouncedSearch,
+          page_number: pageParam,
         })
         .abortSignal(signal);
       if (error) throw error;
       return data as unknown as NotificationSchedulesPage;
     },
+    initialPageParam: 1,
+    getNextPageParam: (lastPage, pages) =>
+      pages.length * DAILY_NOTIFICATION_PAGE_SIZE < lastPage.total_count
+        ? pages.length + 1
+        : undefined,
     enabled: !searchPending,
     staleTime: 30_000,
     refetchOnWindowFocus: false,
     retry: false,
   });
 
-  const loading = searchPending || isFetching || (!data && !isError);
-  const totalCount = data?.total_count ?? 0;
-  const totalPages = Math.max(
-    1,
-    Math.ceil(totalCount / DAILY_NOTIFICATION_PAGE_SIZE),
-  );
+  const schedules = useMemo(() => {
+    const seen = new Set<unknown>();
+
+    return (data?.pages ?? []).flatMap((page) =>
+      page.schedules.filter((schedule) => {
+        const id = schedule.id;
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      }),
+    );
+  }, [data]);
+  const loading = searchPending || isLoading;
 
   useEffect(() => {
-    if (!data) return;
+    const firstPage = data?.pages[0];
+    if (!firstPage) return;
     setCounts({
-      learners: data.learner_count,
-      instructors: data.instructor_count,
+      learners: firstPage.learner_count,
+      instructors: firstPage.instructor_count,
     });
-    // Refresh can remove the last record on the current page.
-    if (page > totalPages) {
-      setTabState((prev) => ({
-        ...prev,
-        [activeTab]: { ...prev[activeTab], page: totalPages },
-      }));
-    }
-  }, [data, activeTab, page, totalPages]);
+  }, [data]);
 
-  const setPage = (nextPage: number) => {
-    setTabState((prev) => ({
-      ...prev,
-      [activeTab]: { ...prev[activeTab], page: nextPage },
-    }));
-  };
+  useEffect(() => {
+    const loadMoreNode = loadMoreRef.current;
+    if (
+      !loadMoreNode ||
+      !hasNextPage ||
+      isFetching ||
+      isFetchNextPageError ||
+      searchPending
+    ) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting) {
+          void fetchNextPage({ cancelRefetch: false });
+        }
+      },
+      { rootMargin: "300px 0px" },
+    );
+
+    observer.observe(loadMoreNode);
+    return () => observer.disconnect();
+  }, [
+    fetchNextPage,
+    hasNextPage,
+    isFetching,
+    isFetchNextPageError,
+    searchPending,
+  ]);
 
   return (
     <Card className="transition-all hover:shadow-lg">
@@ -512,9 +556,9 @@ function LearnerNotificationCard() {
               queryKey: ["daily-notification-schedules", tomorrow],
             })
           }
-          disabled={loading}
+          disabled={searchPending || isFetching}
         >
-          <RefreshCcw size={16} className={loading ? "animate-spin" : ""} />
+          <RefreshCcw size={16} className={isFetching ? "animate-spin" : ""} />
         </Button>
       </CardHeader>
       <CardContent>
@@ -540,10 +584,10 @@ function LearnerNotificationCard() {
                 value={search}
                 onChange={(e) => {
                   const nextSearch = e.target.value;
-                  // Reset atomically so the old filter is never fetched at page 1.
+                  // Each debounced search gets a fresh infinite-query cache.
                   setTabState((prev) => ({
                     ...prev,
-                    [activeTab]: { page: 1, search: nextSearch },
+                    [activeTab]: { search: nextSearch },
                   }));
                 }}
                 className="pl-10"
@@ -553,11 +597,11 @@ function LearnerNotificationCard() {
               <p className="py-4 text-center text-muted-foreground">
                 Loading schedules...
               </p>
-            ) : isError ? (
+            ) : isError && !data ? (
               <p className="py-4 text-center text-muted-foreground">
                 Failed to fetch schedules
               </p>
-            ) : !data?.schedules.length ? (
+            ) : !schedules.length ? (
               <p className="py-4 text-center text-muted-foreground">
                 {search
                   ? "No schedules match your search"
@@ -565,41 +609,37 @@ function LearnerNotificationCard() {
               </p>
             ) : activeTab === "learners" ? (
               <LearnerTab
-                key={`${tomorrow}:${search}:${page}`}
-                schedulesList={data.schedules}
+                key={`${tomorrow}:${debouncedSearch}`}
+                schedulesList={schedules}
                 toast={toast}
               />
             ) : (
               <InstructorTab
-                key={`${tomorrow}:${search}:${page}`}
-                schedulesList={data.schedules}
+                key={`${tomorrow}:${debouncedSearch}`}
+                schedulesList={schedules}
                 toast={toast}
               />
             )}
 
-            <div className="mt-4 flex items-center justify-between gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setPage(page - 1)}
-                disabled={page <= 1 || loading || isError}
-              >
-                Previous
-              </Button>
-              <span className="text-sm text-muted-foreground">
-                Page {page}
-                {data &&
-                  !searchPending &&
-                  ` of ${totalPages} (${totalCount} ${activeTab === "learners" ? "records" : "instructors"})`}
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setPage(page + 1)}
-                disabled={!data || page >= totalPages || loading || isError}
-              >
-                Next
-              </Button>
+            <div
+              ref={loadMoreRef}
+              className="mt-4 flex min-h-8 items-center justify-center"
+            >
+              {isFetchingNextPage && (
+                <span className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading more...
+                </span>
+              )}
+              {isFetchNextPageError && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void fetchNextPage({ cancelRefetch: false })}
+                >
+                  Could not load more. Retry
+                </Button>
+              )}
             </div>
           </TabsContent>
         </Tabs>
