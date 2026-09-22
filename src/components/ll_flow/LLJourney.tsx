@@ -28,6 +28,7 @@ import {
   LL_TEST_VIDEO_URL,
   llDocSlotLabel,
   PARIVAHAN_LL_TEST_URL,
+  shouldShowLLExpiryWarning,
 } from "@/constants/llPipeline";
 import { whatsappHref } from "@/constants/support";
 import { useLearner, useLearnerUpdate } from "@/queries/learner";
@@ -657,7 +658,16 @@ export default function LLJourney() {
         </Button>
       )}
 
-      {expiryDays !== null && expiryDays >= 0 && expiryDays <= 30 && (
+      {expiryDays !== null &&
+        expiryDays >= 0 &&
+        expiryDays <= 30 &&
+        shouldShowLLExpiryWarning(
+          {
+            ll_test_passed_achieved: application?.ll_test_passed_achieved,
+            dl_test_passed_achieved: application?.dl_test_passed_achieved,
+          },
+          application?.status,
+        ) && (
         <LLExpiryWarning
           application={application!}
           expiryDays={expiryDays}

@@ -12,7 +12,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 import LLDocumentsReview from "@/components/admin/LLDocumentsReview";
 import { Badge } from "@/components/ui/badge";
@@ -61,6 +61,7 @@ import {
   LLApplication,
   llDocumentUrl,
   LLPipelineFilters,
+  normalizeLLPipelineFilters,
   useActiveLLApplication,
   useCreateLLApplication,
   useLLApplication,
@@ -116,27 +117,49 @@ const LL_BOARD_STAGE_FILTERS: StageFilterOption[] = (() => {
 export default function LLPipeline() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { toast } = useToast();
   const { data: currentUser } = useCurrentUser();
   const actorName = currentUser?.name ?? null;
   const actorId = currentUser?.id ?? null;
 
-  const [queue, setQueue] = useState<QueueKey>("all");
+  const [queue, setQueue] = useState<QueueKey>(() => {
+    const q = searchParams.get("queue");
+    if (
+      q === "all" ||
+      q === "escalations" ||
+      LL_PHASES.some((p) => p.key === q)
+    ) {
+      return q as QueueKey;
+    }
+    return "all";
+  });
   const [pagesByQueue, setPagesByQueue] = useState<
     Partial<Record<QueueKey, number>>
   >({});
   const page = pagesByQueue[queue] ?? 1;
-  const [stageFilter, setStageFilter] = useState("all");
-  const [searchTerm, setSearchTerm] = useState("");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  // Date filter (feedback item 8): view entries created/updated in a range.
-  const [dateField, setDateField] = useState<"created_at" | "updated_at">(
-    "updated_at",
+  const [stageFilter, setStageFilter] = useState(
+    () => searchParams.get("stage") ?? "all",
   );
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
-  /** Filter by segregation route A–D ("all" = no filter). */
-  const [routeFilter, setRouteFilter] = useState<"all" | string>("all");
+  const [searchTerm, setSearchTerm] = useState(
+    () => searchParams.get("q") ?? "",
+  );
+  const [selectedId, setSelectedId] = useState<string | null>(
+    () => searchParams.get("id"),
+  );
+  const [dateField, setDateField] = useState<"created_at" | "updated_at">(
+    () =>
+      searchParams.get("dateField") === "created_at"
+        ? "created_at"
+        : "updated_at",
+  );
+  const [dateFrom, setDateFrom] = useState(
+    () => searchParams.get("from") ?? "",
+  );
+  const [dateTo, setDateTo] = useState(() => searchParams.get("to") ?? "");
+  const [routeFilter, setRouteFilter] = useState<string>(
+    () => searchParams.get("route") ?? "all",
+  );
 
   const updateStatus = useUpdateLLStatus();
   const revertStatus = useRevertLLStatus();
@@ -149,15 +172,16 @@ export default function LLPipeline() {
   // Queue/search/route/date filters are applied in the DB (PostgREST WHERE),
   // never client-side. Tabs retain separate pages; filter changes reset them.
   const filters = useMemo<LLPipelineFilters>(
-    () => ({
-      queue,
-      stage: stageFilter,
-      search: debouncedSearch,
-      route: routeFilter,
-      dateField,
-      dateFrom,
-      dateTo,
-    }),
+    () =>
+      normalizeLLPipelineFilters({
+        queue,
+        stage: stageFilter,
+        search: debouncedSearch,
+        route: routeFilter,
+        dateField,
+        dateFrom,
+        dateTo,
+      }),
     [
       queue,
       stageFilter,
@@ -168,6 +192,56 @@ export default function LLPipeline() {
       dateTo,
     ],
   );
+
+  const dateRangeInverted =
+    !!dateFrom && !!dateTo && dateFrom > dateTo;
+
+  const hasListFilters =
+    queue !== "all" ||
+    stageFilter !== "all" ||
+    routeFilter !== "all" ||
+    !!dateFrom ||
+    !!dateTo ||
+    !!searchTerm.trim();
+
+  const clearAllListFilters = () => {
+    setQueue("all");
+    setPagesByQueue({});
+    setStageFilter("all");
+    setRouteFilter("all");
+    setDateFrom("");
+    setDateTo("");
+    setDateField("updated_at");
+    setSearchTerm("");
+  };
+
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (queue !== "all") params.set("queue", queue);
+    if (stageFilter !== "all") params.set("stage", stageFilter);
+    if (routeFilter !== "all") params.set("route", routeFilter);
+    if (dateField !== "updated_at") params.set("dateField", dateField);
+    if (dateFrom) params.set("from", dateFrom);
+    if (dateTo) params.set("to", dateTo);
+    const q = searchTerm.trim();
+    if (q) params.set("q", q);
+    if (selectedId) params.set("id", selectedId);
+    const next = params.toString();
+    if (next !== searchParams.toString()) {
+      setSearchParams(params, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-way sync to URL
+  }, [
+    queue,
+    stageFilter,
+    routeFilter,
+    dateField,
+    dateFrom,
+    dateTo,
+    searchTerm,
+    selectedId,
+    setSearchParams,
+  ]);
 
   // While typing, don't request page 1 with the OLD search term. Fetch once
   // the debounce settles, using the new search and already-reset page.
@@ -196,6 +270,8 @@ export default function LLPipeline() {
     pageApplication,
   );
   const selected = pageApplication ?? selectedApplication ?? null;
+  const selectedHiddenFromList =
+    !!selectedId && !!selected && !pageApplication;
 
   // A status change/deletion may remove the last row of the last page.
   useEffect(() => {
@@ -249,6 +325,7 @@ export default function LLPipeline() {
                 setRouteFilter("all");
                 setDateFrom("");
                 setDateTo("");
+                setDateField("updated_at");
                 setSearchTerm("");
                 setSelectedId(application.id);
               }}
@@ -295,6 +372,7 @@ export default function LLPipeline() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All routes</SelectItem>
+              <SelectItem value="unset">Route not set</SelectItem>
               {LL_SEGREGATION_ROUTES.map((r) => (
                 <SelectItem key={r.code} value={r.code}>
                   {r.code} — {r.name}
@@ -336,7 +414,7 @@ export default function LLPipeline() {
               setPagesByQueue({});
             }}
           />
-          {(dateFrom || dateTo) && (
+          {(dateFrom || dateTo || dateRangeInverted) && (
             <Button
               variant="ghost"
               size="sm"
@@ -347,7 +425,20 @@ export default function LLPipeline() {
                 setPagesByQueue({});
               }}
             >
-              Clear
+              Clear dates
+            </Button>
+          )}
+          {hasListFilters && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={() => {
+                clearAllListFilters();
+                setSelectedId(null);
+              }}
+            >
+              Clear all
             </Button>
           )}
         </div>
@@ -430,15 +521,40 @@ export default function LLPipeline() {
             <div className="relative mt-1">
               <Search className="absolute left-2 top-2 h-4 w-4 text-gray-500" />
               <Input
-                placeholder="Name, phone, application no…"
-                className="h-8 pl-8 text-sm"
+                placeholder="Search name, phone, LL/DL no., stage…"
+                className="h-8 pl-8 pr-8 text-sm"
                 value={searchTerm}
                 onChange={(e) => {
                   setSearchTerm(e.target.value);
                   setPagesByQueue({});
                 }}
               />
+              {searchTerm.trim() && (
+                <button
+                  type="button"
+                  className="absolute right-2 top-2 text-gray-400 hover:text-gray-600"
+                  aria-label="Clear search"
+                  onClick={() => {
+                    setSearchTerm("");
+                    setPagesByQueue({});
+                  }}
+                >
+                  <XCircle className="h-4 w-4" />
+                </button>
+              )}
             </div>
+            {selectedHiddenFromList && (
+              <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
+                Selected case is hidden by filters.{" "}
+                <button
+                  type="button"
+                  className="font-medium underline"
+                  onClick={clearAllListFilters}
+                >
+                  Reset filters
+                </button>
+              </p>
+            )}
           </CardHeader>
           <CardContent className="p-3 pt-0">
             <ScrollArea className="h-[calc(100vh-300px)]">
@@ -460,8 +576,20 @@ export default function LLPipeline() {
                   </Button>
                 </div>
               ) : applications.length === 0 ? (
-                <div className="py-10 text-center text-sm text-gray-500">
-                  No applications in this queue.
+                <div className="space-y-2 py-10 text-center text-sm text-gray-500">
+                  <p>No applications match these filters.</p>
+                  {hasListFilters && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        clearAllListFilters();
+                        setSelectedId(null);
+                      }}
+                    >
+                      Clear all filters
+                    </Button>
+                  )}
                 </div>
               ) : (
                 applications.map((a) => (
@@ -732,6 +860,10 @@ function ApplicationDetail({
   const failureOptions = getLLFailureOptions(
     application.status,
     effectiveBatchCode,
+    {
+      ll_test_passed_achieved: application.ll_test_passed_achieved ?? false,
+      dl_test_passed_achieved: application.dl_test_passed_achieved ?? false,
+    },
   );
   const needsRouteToAdvance =
     application.status === "application_ready" &&
