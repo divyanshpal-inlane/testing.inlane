@@ -9,7 +9,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 
@@ -29,7 +29,6 @@ import {
   defaultExportFilename,
   downloadCSV,
   fetchLessonsDashboardExport,
-  LESSONS_PAGE_SIZE,
   lessonsToCSV,
   plusDaysYmd,
   todayYmd,
@@ -91,8 +90,9 @@ export default function LessonsDashboard() {
   const [classNumbersInput, setClassNumbersInput] = useState("");
   const [statuses, setStatuses] = useState<string[]>(ALL_STATUS_KEYS);
   const [search, setSearch] = useState("");
-  const [page, setPage] = useState(1);
   const [isExporting, setIsExporting] = useState(false);
+  const tableScrollRef = useRef<HTMLDivElement>(null);
+  const loadMoreRef = useRef<HTMLDivElement>(null);
 
   // When every status chip is on, send no status filter at all so lessons with
   // any status value (including ones not in STATUS_OPTIONS, e.g. null) still
@@ -117,15 +117,53 @@ export default function LessonsDashboard() {
     statuses: allStatusesSelected ? undefined : statuses,
     search,
   };
-  const { data, isLoading, isFetching, isError, error, refetch } =
-    useLessonsDashboard(filters, page);
-  const rows = data?.rows;
-  const totalCount = data?.totalCount ?? 0;
-  const totalPages = Math.max(1, Math.ceil(totalCount / LESSONS_PAGE_SIZE));
-  const shownCount = Math.min(
-    totalCount,
-    (page - 1) * LESSONS_PAGE_SIZE + (rows?.length ?? 0),
+  const {
+    data,
+    isLoading,
+    isFetching,
+    isFetchingNextPage,
+    hasNextPage,
+    fetchNextPage,
+    isError,
+    error,
+    refetch,
+  } = useLessonsDashboard(filters);
+  const rows = useMemo(
+    () => data?.pages.flatMap((page) => page.rows) ?? [],
+    [data],
   );
+  const totalCount = data?.pages[0]?.totalCount ?? 0;
+  const shownCount = Math.min(totalCount, rows.length);
+
+  useEffect(() => {
+    const scrollContainer = tableScrollRef.current;
+    const sentinel = loadMoreRef.current;
+    if (
+      !scrollContainer ||
+      !sentinel ||
+      !hasNextPage ||
+      isFetchingNextPage ||
+      isError
+    )
+      return;
+
+    let requested = false;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting || requested) return;
+        requested = true;
+        observer.disconnect();
+        void fetchNextPage({ cancelRefetch: false });
+      },
+      {
+        root: scrollContainer,
+        rootMargin: "0px 0px 200px",
+      },
+    );
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [fetchNextPage, hasNextPage, isError, isFetchingNextPage]);
 
   const { data: kams } = useAllKAMsForFilter();
   const { data: instructors } = useAllInstructorsForAssignment();
@@ -153,7 +191,6 @@ export default function LessonsDashboard() {
         )}`;
 
   const clearFilters = () => {
-    setPage(1);
     setSelectedKamIds([]);
     setSelectedInstructorIds([]);
     setClassNumbersInput("");
@@ -234,7 +271,6 @@ export default function LessonsDashboard() {
                   key={k}
                   type="button"
                   onClick={() => {
-                    setPage(1);
                     setPreset(k);
                   }}
                   className={cn(
@@ -255,7 +291,6 @@ export default function LessonsDashboard() {
                   type="date"
                   value={customFrom}
                   onChange={(e) => {
-                    setPage(1);
                     setCustomFrom(e.target.value);
                   }}
                   className="h-8 w-[10.5rem]"
@@ -265,7 +300,6 @@ export default function LessonsDashboard() {
                   type="date"
                   value={customTo}
                   onChange={(e) => {
-                    setPage(1);
                     setCustomTo(e.target.value);
                   }}
                   className="h-8 w-[10.5rem]"
@@ -284,7 +318,6 @@ export default function LessonsDashboard() {
                 }))}
                 selected={selectedKamIds}
                 onChange={(ids) => {
-                  setPage(1);
                   setSelectedKamIds(ids);
                 }}
               />
@@ -296,7 +329,6 @@ export default function LessonsDashboard() {
                 }))}
                 selected={selectedInstructorIds}
                 onChange={(ids) => {
-                  setPage(1);
                   setSelectedInstructorIds(ids);
                 }}
               />
@@ -305,7 +337,6 @@ export default function LessonsDashboard() {
                   placeholder="Class # (e.g. 1, 2, 3)"
                   value={classNumbersInput}
                   onChange={(e) => {
-                    setPage(1);
                     setClassNumbersInput(e.target.value);
                   }}
                   className="h-8 w-48"
@@ -317,7 +348,6 @@ export default function LessonsDashboard() {
                   placeholder="Customer name / phone"
                   value={search}
                   onChange={(e) => {
-                    setPage(1);
                     setSearch(e.target.value);
                   }}
                   className="h-8 w-56 pl-8"
@@ -336,7 +366,6 @@ export default function LessonsDashboard() {
                   key={opt.key}
                   type="button"
                   onClick={() => {
-                    setPage(1);
                     setStatuses((prev) =>
                       prev.includes(opt.key)
                         ? prev.filter((s) => s !== opt.key)
@@ -399,12 +428,15 @@ export default function LessonsDashboard() {
               >
                 Unable to load lessons: {error.message}
               </div>
-            ) : !rows || rows.length === 0 ? (
+            ) : rows.length === 0 ? (
               <div className="p-6 text-center text-sm text-muted-foreground">
                 No lessons match the current filters.
               </div>
             ) : (
-              <div className="isolate max-h-[70vh] overflow-auto">
+              <div
+                ref={tableScrollRef}
+                className="isolate max-h-[70vh] overflow-auto"
+              >
                 <table className="w-full text-sm">
                   <thead className="sticky top-0 z-10 bg-muted text-xs font-medium text-muted-foreground shadow-sm">
                     <tr>
@@ -496,40 +528,18 @@ export default function LessonsDashboard() {
                     ))}
                   </tbody>
                 </table>
+                <div ref={loadMoreRef} className="h-px" />
+                {isFetchingNextPage && (
+                  <div
+                    aria-live="polite"
+                    className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground"
+                  >
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Loading more lessons…
+                  </div>
+                )}
               </div>
             )}
-            <nav
-              aria-label="Lessons pagination"
-              className="flex flex-wrap items-center justify-between gap-2 border-t p-3"
-            >
-              <span
-                aria-live="polite"
-                className="text-xs text-muted-foreground"
-              >
-                Page {page}
-                {data ? ` of ${totalPages}` : ""}
-              </span>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setPage((current) => Math.max(1, current - 1))}
-                  disabled={page === 1 || isFetching}
-                >
-                  Previous
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setPage((current) => current + 1)}
-                  disabled={
-                    !data || isFetching || isError || page >= totalPages
-                  }
-                >
-                  Next
-                </Button>
-              </div>
-            </nav>
           </CardContent>
         </Card>
       </div>
