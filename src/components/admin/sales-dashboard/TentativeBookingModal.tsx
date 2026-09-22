@@ -4,8 +4,10 @@ import React, { useEffect, useState } from "react";
 import { minutesToTime, timeToMinutes } from "@/lib/sales-dashboard/validation";
 import { isValidPhone, normalizePhone } from "@/lib/sales-dashboard/validation";
 import { supabase } from "@/lib/supabaseClient";
+import type { ReusableCustomer } from "@/queries/salesBookingCustomers";
 
 import { AddressAutocomplete } from "./AddressAutocomplete";
+import { ReusableCustomerPicker } from "./ReusableCustomerPicker";
 
 export interface TentativeBookingData {
   instructorId: string;
@@ -40,6 +42,8 @@ export interface CustomerFormValues {
   course: string;
 }
 
+export type CustomerMode = "new" | "reuse";
+
 export const DEFAULT_CUSTOMER_FORM = (
   currentUserName = "",
   address = "",
@@ -70,6 +74,9 @@ interface TentativeBookingModalProps {
   validateSlot: (slot: SlotPick) => { ok: boolean; reason?: string };
   formData: CustomerFormValues;
   onFormDataChange: (data: CustomerFormValues) => void;
+  customerMode: CustomerMode;
+  onCustomerModeChange: (mode: CustomerMode) => void;
+  onReuseCustomer: (customer: ReusableCustomer) => void;
   // Present only when this submission should replace an existing unpaid
   // tentative slot rather than create fresh ones. blockId identifies the
   // old Schedule row to release. Override is always exactly one slot —
@@ -128,6 +135,9 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
   validateSlot,
   formData,
   onFormDataChange,
+  customerMode,
+  onCustomerModeChange,
+  onReuseCustomer,
   overrideContext = null,
 }) => {
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -385,6 +395,48 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
               ))}
             </div>
           </div>
+
+          {/* Customer source. A saved course is reused when available, while
+              every prefilled customer field remains editable in this form. */}
+          <div>
+            <span className="block text-sm font-medium text-foreground">
+              Customer
+            </span>
+            <div
+              className="mt-1 grid grid-cols-2 rounded-lg border border-input bg-muted p-1"
+              role="group"
+              aria-label="Customer entry mode"
+            >
+              <button
+                type="button"
+                aria-pressed={customerMode === "new"}
+                onClick={() => onCustomerModeChange("new")}
+                className={`rounded-md px-3 py-2 text-sm font-medium ${
+                  customerMode === "new"
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                New Customer
+              </button>
+              <button
+                type="button"
+                aria-pressed={customerMode === "reuse"}
+                onClick={() => onCustomerModeChange("reuse")}
+                className={`rounded-md px-3 py-2 text-sm font-medium ${
+                  customerMode === "reuse"
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Reuse Customer
+              </button>
+            </div>
+          </div>
+
+          {customerMode === "reuse" && (
+            <ReusableCustomerPicker onSelect={onReuseCustomer} />
+          )}
 
           {/* Customer Name */}
           <div>

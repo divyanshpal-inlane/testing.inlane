@@ -60,6 +60,9 @@ export interface ScheduleRow {
   tentative_details: Record<string, unknown> | null;
   pause_reason: string | null;
   pause_notes: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  lesson: { number: number | null } | null;
 }
 
 export interface BlockDetail {
@@ -84,6 +87,10 @@ export interface BlockDetail {
   area: string;
   courseName: string;
   notes: string;
+  pauseReason: string;
+  lessonNumber: number | null;
+  startedAt: string | null;
+  endedAt: string | null;
 }
 
 export interface SalesData {
@@ -124,7 +131,7 @@ async function fetchScheduleWindow(
       let query = sb
         .from("Schedule")
         .select(
-          "id, instructor_id, date, start_time, end_time, status, learner_id, course_id, leadName, isTentative, tentative_details, pause_reason, pause_notes",
+          "id, instructor_id, date, start_time, end_time, status, learner_id, course_id, leadName, isTentative, tentative_details, pause_reason, pause_notes, started_at, ended_at, lesson:lesson_id(number)",
         )
         .gte("date", dateFrom)
         .lte("date", dateTo);
@@ -410,6 +417,16 @@ export function useSalesData() {
             area,
             courseName,
             notes,
+            pauseReason: str(r.pause_reason),
+            lessonNumber:
+              !r.isTentative &&
+              r.learner_id != null &&
+              typeof r.lesson?.number === "number" &&
+              r.lesson.number > 0
+                ? r.lesson.number
+                : null,
+            startedAt: r.started_at,
+            endedAt: r.ended_at,
           };
         });
 

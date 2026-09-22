@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { GeoPoint, KmlZone } from "@/lib/sales-dashboard/kml";
 import { PROXIMITY_RADIUS_KM } from "@/lib/sales-dashboard/kml";
@@ -90,6 +90,8 @@ const EMPTY_OVERLAYS: OverlaySet = {
   labels: [],
 };
 const RING_COLOR = "#1a73e8";
+const DEFAULT_MAP_CENTER = { lat: 12.9716, lng: 77.5946 };
+const DEFAULT_MAP_ZOOM = 11;
 
 export default function LocationSearch({
   zones,
@@ -115,6 +117,7 @@ export default function LocationSearch({
     lat: number;
     lng: number;
     label: string;
+    applied: boolean;
   } | null>(null);
 
   const [maps, setMaps] = useState<typeof google.maps | null | undefined>(
@@ -129,6 +132,14 @@ export default function LocationSearch({
     point !== null &&
     via === "point" &&
     matchedNames.some((n) => Boolean(zoneInfo[n]));
+
+  const applyResolvedLocation = useCallback(
+    (selection: { lat: number; lng: number; label: string }) => {
+      setGeoError(null);
+      onLocate(selection.lat, selection.lng, selection.label);
+    },
+    [onLocate],
+  );
 
   useEffect(() => {
     let active = true;
@@ -151,7 +162,7 @@ export default function LocationSearch({
         const place = ac.getPlace();
         const loc = place?.geometry?.location;
         if (!loc) return;
-        selectedPlaceRef.current = {
+        const selection = {
           lat: loc.lat(),
           lng: loc.lng(),
           label:
@@ -159,7 +170,10 @@ export default function LocationSearch({
             place.name ||
             inputRef.current?.value ||
             "",
+          applied: true,
         };
+        selectedPlaceRef.current = selection;
+        applyResolvedLocation(selection);
       });
       autoRef.current = ac;
       return () => {
@@ -169,7 +183,18 @@ export default function LocationSearch({
     } catch (err) {
       console.error("Failed to initialize Google Maps Autocomplete:", err);
     }
-  }, [maps, collapsed]);
+  }, [maps, collapsed, applyResolvedLocation]);
+
+  // Parent-driven clear paths (the summary Clear button and dashboard Reset)
+  // must clear the same local state as this component's own Clear button.
+  useEffect(() => {
+    if (point !== null) return;
+    selectedPlaceRef.current = null;
+    setGeoError(null);
+    setManualLat("");
+    setManualLng("");
+    if (inputRef.current) inputRef.current.value = "";
+  }, [point]);
 
   const runSearch = async (text: string): Promise<void> => {
     const trimmed = text.trim();
@@ -177,7 +202,7 @@ export default function LocationSearch({
     setGeoError(null);
     const sel = selectedPlaceRef.current;
     if (sel && sel.lat !== undefined && sel.lng !== undefined) {
-      onLocate(sel.lat, sel.lng, sel.label);
+      if (!sel.applied) applyResolvedLocation(sel);
       selectedPlaceRef.current = null;
       return;
     }
@@ -197,7 +222,7 @@ export default function LocationSearch({
     }
     const pt = await geocodeText(maps, trimmed);
     if (pt) {
-      onLocate(pt.lat, pt.lng, trimmed);
+      applyResolvedLocation({ ...pt, label: trimmed });
     } else {
       setGeoError(
         `Couldn't find "${trimmed}". Try a different area or click a suggestion.`,
@@ -210,7 +235,11 @@ export default function LocationSearch({
     const lng = parseFloat(manualLng);
     if (Number.isFinite(lat) && Number.isFinite(lng)) {
       setGeoError(null);
-      onLocate(lat, lng, `${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+      applyResolvedLocation({
+        lat,
+        lng,
+        label: `${lat.toFixed(5)}, ${lng.toFixed(5)}`,
+      });
     } else {
       setGeoError("Enter valid latitude and longitude numbers.");
     }
@@ -235,8 +264,8 @@ export default function LocationSearch({
     if (!mapElRef.current) return;
     if (!mapObjRef.current) {
       mapObjRef.current = new maps.Map(mapElRef.current, {
-        center: { lat: 12.9716, lng: 77.5946 },
-        zoom: 11,
+        center: DEFAULT_MAP_CENTER,
+        zoom: DEFAULT_MAP_ZOOM,
         mapTypeControl: false,
         streetViewControl: false,
         fullscreenControl: false,
@@ -258,7 +287,11 @@ export default function LocationSearch({
       labels: [],
     };
 
-    if (!point) return;
+    if (!point) {
+      map.setCenter(DEFAULT_MAP_CENTER);
+      map.setZoom(DEFAULT_MAP_ZOOM);
+      return;
+    }
     const matchedSet = new Set(matchedNames);
     const bounds = new maps.LatLngBounds();
 
@@ -423,6 +456,11 @@ export default function LocationSearch({
               className="loc-input"
               placeholder="Area, landmark or address — e.g. Koramangala, Bangalore"
               autoComplete="off"
+              onChange={() => {
+                // Typing only invalidates an earlier suggestion; it never
+                // applies location filtering until Search/Enter is used.
+                selectedPlaceRef.current = null;
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
