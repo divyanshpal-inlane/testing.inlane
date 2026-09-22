@@ -1,4 +1,4 @@
-import { hashKey, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
 
 import { supabase } from "@/lib/supabaseClient";
@@ -75,18 +75,21 @@ export async function fetchLessonsDashboardPage(
   return data as unknown as LessonsDashboardPage;
 }
 
-export function useLessonsDashboard(
-  filters: LessonsDashboardFilters,
-  page = 1,
-) {
-  return useQuery({
-    queryKey: ["lessons-dashboard", filters, page],
-    queryFn: ({ signal }) => fetchLessonsDashboardPage(filters, page, signal),
-    // Keep the table mounted during pagination so its scroll position is retained.
-    placeholderData: (previousData, previousQuery) =>
-      hashKey([previousQuery?.queryKey[1]]) === hashKey([filters])
-        ? previousData
-        : undefined,
+export function useLessonsDashboard(filters: LessonsDashboardFilters) {
+  return useInfiniteQuery({
+    queryKey: ["lessons-dashboard", filters],
+    initialPageParam: 1,
+    queryFn: ({ pageParam, signal }) =>
+      fetchLessonsDashboardPage(filters, pageParam, signal),
+    getNextPageParam: (lastPage, allPages) => {
+      const loadedCount = allPages.reduce(
+        (count, page) => count + page.rows.length,
+        0,
+      );
+      return lastPage.rows.length > 0 && loadedCount < lastPage.totalCount
+        ? allPages.length + 1
+        : undefined;
+    },
     // Retrying cannot resolve an RPC that has not been installed in Supabase.
     retry: (failureCount, error) =>
       failureCount < 3 && !("code" in error && error.code === "PGRST202"),
