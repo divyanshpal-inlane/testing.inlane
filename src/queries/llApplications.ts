@@ -71,6 +71,10 @@ export interface LLApplication {
   reapply_fee: number | null;
   /** Which scheduled nudges the ll-flow-reminders sweep already sent. */
   reminders_sent: Record<string, string>;
+  /** Sticky: learner passed the online LL test (survives Ops revert). */
+  ll_test_passed_achieved?: boolean;
+  /** Sticky: learner passed the DL test (survives Ops revert). */
+  dl_test_passed_achieved?: boolean;
   created_at: string;
   updated_at: string;
   Learner: {
@@ -117,6 +121,33 @@ export interface LLPipelineFilters {
 }
 
 export const LL_PIPELINE_PAGE_SIZE = 15;
+
+/** Swap inverted local-date bounds so filters stay inclusive. */
+export function normalizeLLPipelineFilters(
+  filters: LLPipelineFilters,
+): LLPipelineFilters {
+  if (
+    filters.dateFrom &&
+    filters.dateTo &&
+    filters.dateFrom > filters.dateTo
+  ) {
+    return {
+      ...filters,
+      dateFrom: filters.dateTo,
+      dateTo: filters.dateFrom,
+    };
+  }
+  return filters;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyLLRouteFilter(query: any, route: string) {
+  if (route === "all") return query;
+  if (route === "unset") {
+    return query.or("batch_code.is.null,batch_code.not.in.(A,B,C,D)");
+  }
+  return query.eq("batch_code", route);
+}
 
 /** Every storable status that belongs to a pipeline phase (incl. failures). */
 function llStatusesInPhase(phase: LLPhaseKey): string[] {
@@ -175,7 +206,8 @@ async function fetchLLApplicationsPage(opts: {
   filters: LLPipelineFilters;
   signal: AbortSignal;
 }): Promise<{ data: LLApplication[]; total: number }> {
-  const { page, filters, signal } = opts;
+  const { page, signal } = opts;
+  const filters = normalizeLLPipelineFilters(opts.filters);
   const from = (page - 1) * LL_PIPELINE_PAGE_SIZE;
   const buildQuery = (head = false) => {
     // The SQL function returns the table type, preserving Learner embedding.
@@ -197,9 +229,10 @@ async function fetchLLApplicationsPage(opts: {
     } else if (filters.queue !== "all") {
       q = q.in("status", llStatusesInPhase(filters.queue));
     }
-    if (filters.route !== "all") {
-      q = q.eq("batch_code", filters.route);
+    if (filters.stage && filters.stage !== "all") {
+      q = q.eq("status", filters.stage);
     }
+    q = applyLLRouteFilter(q, filters.route);
     if (filters.dateFrom) {
       // Local-date aware bounds (IST) so a date filter includes the whole day.
       q = q.gte(filters.dateField, `${filters.dateFrom}T00:00:00+05:30`);
@@ -602,10 +635,16 @@ export function useUpdateLLStatus() {
         (extraFields?.batch_code as string | null | undefined) ??
         application.batch_code;
 
+      const milestones = {
+        ll_test_passed_achieved: application.ll_test_passed_achieved ?? false,
+        dl_test_passed_achieved: application.dl_test_passed_achieved ?? false,
+      };
+
       const kind = classifyLLStatusTransition(
         application.status,
         toStatus,
         batchCode,
+        milestones,
       );
       if (!kind) {
         throw new Error(
@@ -619,6 +658,7 @@ export function useUpdateLLStatus() {
         toStatus,
         batchCode,
         kind,
+        milestones,
       });
 
       // eslint-disable-next-line @typescript-eslint/no-unused-vars

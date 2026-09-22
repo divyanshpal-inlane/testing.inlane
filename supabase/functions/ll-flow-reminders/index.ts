@@ -149,9 +149,19 @@ function dueReminders(app: any): DueReminder[] {
     });
   }
 
-  // 6. LL expiring within 30 days (any post-issue status).
+  // 6. LL expiring within 30 days (before DL test passed).
   const untilExpiry = daysUntil(app.ll_expiry_date);
+  const dlTestPassed =
+    app.dl_test_passed_achieved === true ||
+    [
+      "dl_test_passed",
+      "dl_number_generated",
+      "dl_delivery_pending",
+      "dl_not_delivered",
+      "dl_delivered",
+    ].includes(app.status);
   if (
+    !dlTestPassed &&
     untilExpiry !== null &&
     untilExpiry >= 0 &&
     untilExpiry <= 30 &&

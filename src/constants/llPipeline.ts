@@ -515,6 +515,49 @@ export function isLLFailureStatus(status: string): boolean {
   return status in LL_FAILURE_STAGES || status === "ll_expired";
 }
 
+/** Sticky journey milestones (set in DB on first reach; survive Ops reverts). */
+export interface LLPipelineMilestones {
+  ll_test_passed_achieved?: boolean;
+  dl_test_passed_achieved?: boolean;
+}
+
+export function llStatusRank(status: string): number {
+  return LL_STAGE_ORDER[status] ?? -1;
+}
+
+export function hasAchievedLLTestPassed(
+  milestones: LLPipelineMilestones,
+): boolean {
+  return milestones.ll_test_passed_achieved === true;
+}
+
+export function hasAchievedDLTestPassed(
+  milestones: LLPipelineMilestones,
+): boolean {
+  return milestones.dl_test_passed_achieved === true;
+}
+
+/** Block scrutiny-expired after LL or DL test milestones (incl. Ops revert edge cases). */
+export function canEnterScrutinyExpired(
+  milestones: LLPipelineMilestones,
+): boolean {
+  if (hasAchievedLLTestPassed(milestones)) return false;
+  if (hasAchievedDLTestPassed(milestones)) return false;
+  return true;
+}
+
+/** 30-day LL-validity nudges — not relevant after DL test passed. */
+export function shouldShowLLExpiryWarning(
+  milestones: LLPipelineMilestones,
+  status?: string,
+): boolean {
+  if (hasAchievedDLTestPassed(milestones)) return false;
+  if (status && llStatusRank(status) >= llStatusRank("dl_test_passed")) {
+    return false;
+  }
+  return true;
+}
+
 const LL_STAGE_ORDER: Record<string, number> = Object.fromEntries([
   ...LL_STAGES.map((s, i) => [s.key, i] as const),
   ...Object.keys(LL_FAILURE_STAGES).map(
@@ -585,6 +628,7 @@ export function getLLAdvanceTargets(
 export function getLLFailureOptions(
   status: string,
   batchCode: string | null | undefined,
+  milestones?: LLPipelineMilestones,
 ): LLFailure[] {
   const stage = LL_STAGE_MAP[status];
   if (!stage?.failures?.length) return [];
@@ -593,6 +637,13 @@ export function getLLFailureOptions(
   const def = route ? LL_SEGREGATION_ROUTE_MAP[route] : null;
 
   return stage.failures.filter((f) => {
+    if (
+      f.key === "scrutiny_expired" &&
+      milestones &&
+      !canEnterScrutinyExpired(milestones)
+    ) {
+      return false;
+    }
     if (
       (f.key === "ll_test_failed" || f.key === "scrutiny_expired") &&
       def &&
@@ -687,8 +738,9 @@ export function assertLLStatusTransition(opts: {
   toStatus: string;
   batchCode: string | null | undefined;
   kind: LLTransitionKind;
+  milestones?: LLPipelineMilestones;
 }): void {
-  const { fromStatus, toStatus, batchCode, kind } = opts;
+  const { fromStatus, toStatus, batchCode, kind, milestones } = opts;
 
   if (fromStatus === toStatus) {
     throw new Error("Status is already set to that stage.");
@@ -713,7 +765,21 @@ export function assertLLStatusTransition(opts: {
   }
 
   if (kind === "failure") {
-    const allowed = getLLFailureOptions(fromStatus, batchCode).map(
+    if (
+      toStatus === "scrutiny_expired" &&
+      milestones &&
+      !canEnterScrutinyExpired(milestones)
+    ) {
+      if (hasAchievedLLTestPassed(milestones)) {
+        throw new Error(
+          "Cannot mark scrutiny expired after the learner has passed the LL test.",
+        );
+      }
+      throw new Error(
+        "Cannot mark scrutiny expired after the learner has passed the DL test.",
+      );
+    }
+    const allowed = getLLFailureOptions(fromStatus, batchCode, milestones).map(
       (f) => f.key,
     );
     if (!allowed.includes(toStatus)) {
@@ -750,12 +816,15 @@ export function classifyLLStatusTransition(
   fromStatus: string,
   toStatus: string,
   batchCode: string | null | undefined,
+  milestones?: LLPipelineMilestones,
 ): LLTransitionKind | null {
   if (getLLAdvanceTargets(fromStatus, batchCode).includes(toStatus)) {
     return "advance";
   }
   if (
-    getLLFailureOptions(fromStatus, batchCode).some((f) => f.key === toStatus)
+    getLLFailureOptions(fromStatus, batchCode, milestones).some(
+      (f) => f.key === toStatus,
+    )
   ) {
     return "failure";
   }

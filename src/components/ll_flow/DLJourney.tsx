@@ -24,6 +24,7 @@ import {
   DL_TEST_CHECKLIST_SECTIONS,
   isDLSlotVisibleToCustomer,
   parseLLDateYmd,
+  shouldShowLLExpiryWarning,
 } from "@/constants/llPipeline";
 import { whatsappHref } from "@/constants/support";
 import { useCustomerDLTestSlots } from "@/queries/dlTestSlots";
@@ -615,6 +616,18 @@ function LLExpiryBannerInner({
 }) {
   const requestHelp = useRequestLLHelp();
   const [requested, setRequested] = useState(false);
+
+  if (
+    !shouldShowLLExpiryWarning(
+      {
+        ll_test_passed_achieved: application.ll_test_passed_achieved,
+        dl_test_passed_achieved: application.dl_test_passed_achieved,
+      },
+      application.status,
+    )
+  ) {
+    return null;
+  }
 
   const expiryDays = daysUntil(application.ll_expiry_date);
   if (expiryDays === null || expiryDays < 0 || expiryDays > 30) return null;
