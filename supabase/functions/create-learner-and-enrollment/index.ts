@@ -1,6 +1,8 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+import { validateCreateLearnerRequest, ValidationError } from "./validation.ts";
+
 // Load environment variables
 const supabaseUrl = Deno.env.get("MY_SUPABASE_URL");
 const supabaseKey = Deno.env.get("MY_SUPABASE_SERVICE_ROLE_KEY");
@@ -20,25 +22,11 @@ const corsHeaders = {
   "Access-Control-Max-Age": "86400",
 };
 
-export async function createLearnerAndEnrollment(data: {
-  name: string;
-  email: string;
-  phone: string;
-  courseId: string;
-  amount: number;
-  installmentType: string;
-  installment1Amount: number;
-  installment2Amount: number;
-  unlockedLessons: number[];
-  courseTypeSelection?: string;
-  totalLessons?: number;
-  selectedModules?: string[];
-  modulePrices?: Record<string, number>;
-  has_a_DL?: boolean;
-  has_two_wheeler_license?: boolean;
-  address_change_required?: boolean;
-  LL_received?: boolean;
-}) {
+export async function createLearnerAndEnrollment(input: unknown) {
+  // Validate and normalize the complete request before either insert. In
+  // particular, hidden course/RTO fields are rejected instead of silently
+  // being persisted through a stale or tampered client payload.
+  const data = validateCreateLearnerRequest(input);
   const {
     name,
     email,
@@ -57,6 +45,11 @@ export async function createLearnerAndEnrollment(data: {
     has_two_wheeler_license,
     address_change_required,
     LL_received,
+    caseType,
+    twoWheelerRequirement,
+    fourWheelerRequirement,
+    rtoFee,
+    rtoAddressChangeRequired,
   } = data;
 
   // Check if learner with this phone already exists
@@ -99,20 +92,22 @@ export async function createLearnerAndEnrollment(data: {
 
   // Build progress based on course type
   const progress =
-    courseTypeSelection === "demo"
-      ? { type: "demo", total_hours: 1 }
-      : courseTypeSelection === "custom"
-        ? {
-            type: "custom",
-            total_hours: totalLessons || 0,
-            // Persist the picked skill modules so the learner's payment link can
-            // show the actual course name the admin sold them.
-            selected_modules: selectedModules || [],
-            // Per-module (possibly discounted) prices set by the admin, so the
-            // payment page shows the real itemised breakdown.
-            module_prices: modulePrices || {},
-          }
-        : { type: "course", total_hours: totalLessons || 0 };
+    caseType === "rto_only"
+      ? {}
+      : courseTypeSelection === "demo"
+        ? { type: "demo", total_hours: 1 }
+        : courseTypeSelection === "custom"
+          ? {
+              type: "custom",
+              total_hours: totalLessons || 0,
+              // Persist the picked skill modules so the learner's payment link can
+              // show the actual course name the admin sold them.
+              selected_modules: selectedModules || [],
+              // Per-module (possibly discounted) prices set by the admin, so the
+              // payment page shows the real itemised breakdown.
+              module_prices: modulePrices || {},
+            }
+          : { type: "course", total_hours: totalLessons || 0 };
 
   // Create enrollment entry (course_id is NULL for demo/custom courses).
   // payment_status is set to "pending" (not left NULL) so the reuse lookups in
@@ -133,6 +128,11 @@ export async function createLearnerAndEnrollment(data: {
         installment2_amount: installment2Amount,
         unlocked_lessons: unlockedLessons,
         progress,
+        case_type: caseType,
+        two_wheeler_requirement: twoWheelerRequirement,
+        four_wheeler_requirement: fourWheelerRequirement,
+        rto_fee: rtoFee,
+        rto_address_change_required: rtoAddressChangeRequired,
       },
     ])
     .select()
@@ -167,12 +167,16 @@ serve(async (req) => {
     });
   } catch (error) {
     console.error("Error creating learner and enrollment:", error);
-    const errorMessage = error.message || "An error occurred";
+    const errorMessage =
+      error instanceof Error ? error.message : "An error occurred";
 
-    // Return 400 for "Learner already registered" error (validation error)
-    // Return 500 for other errors (server errors)
+    // Invalid requests and duplicate learners are client errors. Database and
+    // infrastructure failures remain server errors.
     const statusCode =
-      errorMessage === "Learner already registered" ? 400 : 500;
+      error instanceof ValidationError ||
+      errorMessage === "Learner already registered"
+        ? 400
+        : 500;
 
     return new Response(JSON.stringify({ error: errorMessage }), {
       status: statusCode,

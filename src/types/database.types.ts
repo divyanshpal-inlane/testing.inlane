@@ -501,8 +501,10 @@ export type Database = {
       enrollment: {
         Row: {
           amount: number | null;
-          course_id: string;
+          case_type: string | null;
+          course_id: string | null;
           created_at: string;
+          four_wheeler_requirement: string | null;
           id: string;
           installment_mode: string | null;
           installment1_amount: number | null;
@@ -511,14 +513,19 @@ export type Database = {
           payment_id: string | null;
           payment_status: string | null;
           progress: Json;
+          rto_address_change_required: boolean | null;
+          rto_fee: number | null;
           status: Database["public"]["Enums"]["enrollment_status"];
+          two_wheeler_requirement: string | null;
           unlocked_lessons: number[] | null;
           updated_at: string;
         };
         Insert: {
           amount?: number | null;
-          course_id: string;
+          case_type?: string | null;
+          course_id?: string | null;
           created_at?: string;
+          four_wheeler_requirement?: string | null;
           id?: string;
           installment_mode?: string | null;
           installment1_amount?: number | null;
@@ -527,14 +534,19 @@ export type Database = {
           payment_id?: string | null;
           payment_status?: string | null;
           progress?: Json;
+          rto_address_change_required?: boolean | null;
+          rto_fee?: number | null;
           status?: Database["public"]["Enums"]["enrollment_status"];
+          two_wheeler_requirement?: string | null;
           unlocked_lessons?: number[] | null;
           updated_at?: string;
         };
         Update: {
           amount?: number | null;
-          course_id?: string;
+          case_type?: string | null;
+          course_id?: string | null;
           created_at?: string;
+          four_wheeler_requirement?: string | null;
           id?: string;
           installment_mode?: string | null;
           installment1_amount?: number | null;
@@ -543,7 +555,10 @@ export type Database = {
           payment_id?: string | null;
           payment_status?: string | null;
           progress?: Json;
+          rto_address_change_required?: boolean | null;
+          rto_fee?: number | null;
           status?: Database["public"]["Enums"]["enrollment_status"];
+          two_wheeler_requirement?: string | null;
           unlocked_lessons?: number[] | null;
           updated_at?: string;
         };
@@ -750,7 +765,7 @@ export type Database = {
           LL_approved_date: string | null;
           LL_application_id: string | null;
           LL_received: boolean | null;
-          LL_received_date: date | null;
+          LL_received_date: string | null;
           LL_result: boolean | null;
           LL_team_appointment_booked: boolean | null;
           LL_test_date: string | null;
@@ -1124,7 +1139,7 @@ export type Database = {
           otp_end: string | null;
           start_time: string;
           status?: string | null;
-          isTentative: boolean | null;
+          isTentative?: boolean | null;
           leadName: string | null;
           started_at: string | null;
           ended_at: string | null;
@@ -1145,7 +1160,7 @@ export type Database = {
           otp_end: string | null;
           start_time?: string;
           status?: string | null;
-          isTentative: boolean | null;
+          isTentative?: boolean | null;
           leadName: string | null;
           started_at: string | null;
           ended_at: string | null;
