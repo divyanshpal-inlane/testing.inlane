@@ -430,7 +430,7 @@ function ExceptionsTab() {
       <ExceptionSection
         title="Stalled LL/DL cases"
         count={ex.stalledLL.length}
-        to="/admin/ll-pipeline?queue=escalations"
+        to="/admin/ll-pipeline?escalations=1"
         toLabel="Pipeline board"
       >
         <div className="space-y-1.5">

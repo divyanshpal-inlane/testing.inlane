@@ -108,13 +108,16 @@ export interface LLPipelineEvent {
 export type LLPipelineQueueKey = "all" | LLPhaseKey | "escalations";
 
 export interface LLPipelineFilters {
-  queue: LLPipelineQueueKey;
-  /** Exact board stage ("all" = every stage in the selected queue). */
-  stage: string;
+  /** Empty = every phase; otherwise status must fall in one of these phases. */
+  phases: LLPhaseKey[];
+  /** When true, only escalated rows / failure statuses (scoped to selected phases if any). */
+  escalationsOnly: boolean;
+  /** Empty = all stages in scope; otherwise status IN (...). */
+  stages: string[];
   /** Matches learner name/phone/email, application no., LL no., batch/route. */
   search: string;
-  /** Segregation route ("all" = no filter). */
-  route: string;
+  /** Empty = all routes; values A|B|C|D|unset */
+  routes: string[];
   dateField: "created_at" | "updated_at";
   dateFrom: string;
   dateTo: string;
@@ -141,12 +144,19 @@ export function normalizeLLPipelineFilters(
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function applyLLRouteFilter(query: any, route: string) {
-  if (route === "all") return query;
-  if (route === "unset") {
-    return query.or("batch_code.is.null,batch_code.not.in.(A,B,C,D)");
+function applyLLRoutesFilter(query: any, routes: string[]) {
+  if (!routes.length) return query;
+  const orParts: string[] = [];
+  if (routes.includes("unset")) {
+    orParts.push("batch_code.is.null");
   }
-  return query.eq("batch_code", route);
+  for (const code of ["A", "B", "C", "D"] as const) {
+    if (routes.includes(code)) {
+      orParts.push(`batch_code.eq.${code}`);
+    }
+  }
+  if (orParts.length === 0) return query;
+  return query.or(orParts.join(","));
 }
 
 /** Every storable status that belongs to a pipeline phase (incl. failures). */
@@ -166,26 +176,47 @@ const ALL_LL_PIPELINE_STATUSES = [
   ...Object.keys(LL_FAILURE_STAGES),
 ];
 
-function llStatusesForQueue(queue: LLPipelineQueueKey): string[] {
-  if (queue !== "all" && queue !== "escalations") {
-    return llStatusesInPhase(queue);
+/** Union of storable statuses across the selected pipeline phases. */
+export function llStatusesForPhases(phases: LLPhaseKey[]): string[] {
+  const statuses = new Set<string>();
+  for (const phase of phases) {
+    for (const status of llStatusesInPhase(phase)) {
+      statuses.add(status);
+    }
   }
-  return ALL_LL_PIPELINE_STATUSES;
+  return [...statuses];
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function applyLLQueueFilter(query: any, queue: LLPipelineQueueKey) {
-  if (queue === "escalations") {
+function applyLLPhaseQueueFilters(
+  query: any,
+  phases: LLPhaseKey[],
+  escalationsOnly: boolean,
+) {
+  if (phases.length === 0 && !escalationsOnly) {
+    return query;
+  }
+
+  if (phases.length === 0 && escalationsOnly) {
     return query.or(
       `escalated.is.true,status.in.(${LL_ESCALATION_STATUSES.join(",")})`,
     );
   }
 
-  if (queue !== "all") {
-    return query.in("status", llStatusesInPhase(queue));
+  const phaseStatuses = llStatusesForPhases(phases);
+
+  if (!escalationsOnly) {
+    return query.in("status", phaseStatuses);
   }
 
-  return query;
+  const failuresInPhase = LL_ESCALATION_STATUSES.filter((s) =>
+    phaseStatuses.includes(s),
+  );
+  const escOr = ["escalated.is.true"];
+  if (failuresInPhase.length > 0) {
+    escOr.push(`status.in.(${failuresInPhase.join(",")})`);
+  }
+  return query.in("status", phaseStatuses).or(escOr.join(","));
 }
 
 /** Expand derived route labels into database batch-code matches. */
@@ -222,17 +253,15 @@ async function fetchLLApplicationsPage(opts: {
     );
 
     q = q.select("*, Learner(id, name, phone, email, area)");
-    if (filters.queue === "escalations") {
-      q = q.or(
-        `escalated.is.true,status.in.(${Object.keys(LL_FAILURE_STAGES).join(",")})`,
-      );
-    } else if (filters.queue !== "all") {
-      q = q.in("status", llStatusesInPhase(filters.queue));
+    q = applyLLPhaseQueueFilters(
+      q,
+      filters.phases,
+      filters.escalationsOnly,
+    );
+    if (filters.stages.length > 0) {
+      q = q.in("status", filters.stages);
     }
-    if (filters.stage && filters.stage !== "all") {
-      q = q.eq("status", filters.stage);
-    }
-    q = applyLLRouteFilter(q, filters.route);
+    q = applyLLRoutesFilter(q, filters.routes);
     if (filters.dateFrom) {
       // Local-date aware bounds (IST) so a date filter includes the whole day.
       q = q.gte(filters.dateField, `${filters.dateFrom}T00:00:00+05:30`);
@@ -355,18 +384,29 @@ export function useLLQueueCounts() {
   });
 }
 
-/** Exact counts for every stage shown in the selected pipeline queue. */
-export function useLLStageCounts(queue: LLPipelineQueueKey) {
+/** Exact counts for every stage in the current phase / escalation scope. */
+export function useLLStageCounts(
+  phases: LLPhaseKey[],
+  escalationsOnly: boolean,
+) {
   return useQuery({
-    queryKey: ["ll-stage-counts", queue],
+    queryKey: ["ll-stage-counts", phases, escalationsOnly],
     queryFn: async (): Promise<Record<string, number>> => {
+      const statusesInScope =
+        phases.length === 0
+          ? ALL_LL_PIPELINE_STATUSES
+          : llStatusesForPhases(phases);
+
       const rows = await Promise.all(
-        llStatusesForQueue(queue).map(async (status) => {
+        statusesInScope.map(async (status) => {
           let q = sb.from("ll_applications").select("id", {
             count: "exact",
             head: true,
           });
-          q = applyLLQueueFilter(q, queue).eq("status", status);
+          q = applyLLPhaseQueueFilters(q, phases, escalationsOnly).eq(
+            "status",
+            status,
+          );
           const { error, count } = await q;
           if (error) throw error;
           return [status, count ?? 0] as const;
