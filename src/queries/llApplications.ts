@@ -129,18 +129,28 @@ export const LL_PIPELINE_PAGE_SIZE = 15;
 export function normalizeLLPipelineFilters(
   filters: LLPipelineFilters,
 ): LLPipelineFilters {
+  const stages = [...new Set(filters.stages.map((s) => s.trim()).filter(Boolean))];
+  let next: LLPipelineFilters = { ...filters, stages };
   if (
-    filters.dateFrom &&
-    filters.dateTo &&
-    filters.dateFrom > filters.dateTo
+    next.dateFrom &&
+    next.dateTo &&
+    next.dateFrom > next.dateTo
   ) {
-    return {
-      ...filters,
-      dateFrom: filters.dateTo,
-      dateTo: filters.dateFrom,
+    next = {
+      ...next,
+      dateFrom: next.dateTo,
+      dateTo: next.dateFrom,
     };
   }
-  return filters;
+  next = {
+    ...next,
+    stages: resolveLLPipelineStageFilter(
+      next.stages,
+      next.phases,
+      next.escalationsOnly,
+    ),
+  };
+  return next;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -187,36 +197,96 @@ export function llStatusesForPhases(phases: LLPhaseKey[]): string[] {
   return [...statuses];
 }
 
+/** Status keys allowed by the current phase / escalation scope (before stage pick). */
+export function llPipelineStatusesInScope(
+  phases: LLPhaseKey[],
+  escalationsOnly: boolean,
+): string[] {
+  if (phases.length > 0) {
+    return llStatusesForPhases(phases);
+  }
+  if (escalationsOnly) {
+    return ALL_LL_PIPELINE_STATUSES;
+  }
+  return ALL_LL_PIPELINE_STATUSES;
+}
+
+/** Stage multi-select intersected with phase scope; deduped. */
+export function resolveLLPipelineStageFilter(
+  stages: string[],
+  phases: LLPhaseKey[],
+  escalationsOnly: boolean,
+): string[] {
+  if (stages.length === 0) return [];
+  const scope = new Set(llPipelineStatusesInScope(phases, escalationsOnly));
+  const seen = new Set<string>();
+  const picked: string[] = [];
+  for (const key of stages) {
+    if (!scope.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    picked.push(key);
+  }
+  return picked;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyLLPipelineStatusFilter(
+  query: any,
+  phases: LLPhaseKey[],
+  escalationsOnly: boolean,
+  stages: string[],
+) {
+  const stageFilter = resolveLLPipelineStageFilter(
+    stages,
+    phases,
+    escalationsOnly,
+  );
+  const phaseStatuses =
+    phases.length > 0 ? llStatusesForPhases(phases) : null;
+
+  if (!escalationsOnly && !phaseStatuses && stageFilter.length === 0) {
+    return query;
+  }
+
+  if (!escalationsOnly) {
+    if (stageFilter.length > 0) {
+      return query.in("status", stageFilter);
+    }
+    if (phaseStatuses) {
+      return query.in("status", phaseStatuses);
+    }
+    return query;
+  }
+
+  // Escalations scope: escalated flag and/or failure statuses, optionally
+  // narrowed by phase and/or explicit stage multi-select.
+  const baseScope = phaseStatuses ?? ALL_LL_PIPELINE_STATUSES;
+  const scoped =
+    stageFilter.length > 0
+      ? stageFilter
+      : baseScope;
+
+  if (scoped.length === 0) {
+    return query.in("status", ["__ll_pipeline_no_match__"]);
+  }
+
+  const failuresInScope = scoped.filter((s) =>
+    LL_ESCALATION_STATUSES.includes(s),
+  );
+  const orParts = [`and(escalated.is.true,status.in.(${scoped.join(",")}))`];
+  if (failuresInScope.length > 0) {
+    orParts.push(`status.in.(${failuresInScope.join(",")})`);
+  }
+  return query.or(orParts.join(","));
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function applyLLPhaseQueueFilters(
   query: any,
   phases: LLPhaseKey[],
   escalationsOnly: boolean,
 ) {
-  if (phases.length === 0 && !escalationsOnly) {
-    return query;
-  }
-
-  if (phases.length === 0 && escalationsOnly) {
-    return query.or(
-      `escalated.is.true,status.in.(${LL_ESCALATION_STATUSES.join(",")})`,
-    );
-  }
-
-  const phaseStatuses = llStatusesForPhases(phases);
-
-  if (!escalationsOnly) {
-    return query.in("status", phaseStatuses);
-  }
-
-  const failuresInPhase = LL_ESCALATION_STATUSES.filter((s) =>
-    phaseStatuses.includes(s),
-  );
-  const escOr = ["escalated.is.true"];
-  if (failuresInPhase.length > 0) {
-    escOr.push(`status.in.(${failuresInPhase.join(",")})`);
-  }
-  return query.in("status", phaseStatuses).or(escOr.join(","));
+  return applyLLPipelineStatusFilter(query, phases, escalationsOnly, []);
 }
 
 /** Expand derived route labels into database batch-code matches. */
@@ -253,14 +323,12 @@ async function fetchLLApplicationsPage(opts: {
     );
 
     q = q.select("*, Learner(id, name, phone, email, area)");
-    q = applyLLPhaseQueueFilters(
+    q = applyLLPipelineStatusFilter(
       q,
       filters.phases,
       filters.escalationsOnly,
+      filters.stages,
     );
-    if (filters.stages.length > 0) {
-      q = q.in("status", filters.stages);
-    }
     q = applyLLRoutesFilter(q, filters.routes);
     if (filters.dateFrom) {
       // Local-date aware bounds (IST) so a date filter includes the whole day.
