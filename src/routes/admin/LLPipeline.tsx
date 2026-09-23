@@ -14,7 +14,13 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import LLDocumentsReview from "@/components/admin/LLDocumentsReview";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -78,8 +84,6 @@ import {
 } from "@/queries/llApplications";
 import { useCurrentUser } from "@/queries/userManagement";
 
-type QueueKey = "all" | LLPhaseKey | "escalations";
-
 interface StageFilterOption {
   key: string;
   label: string;
@@ -114,6 +118,64 @@ const LL_BOARD_STAGE_FILTERS: StageFilterOption[] = (() => {
   return stages;
 })();
 
+const ROUTE_FILTER_OPTIONS: { value: string; label: string }[] = [
+  { value: "unset", label: "Route not set" },
+  ...LL_SEGREGATION_ROUTES.map((r) => ({
+    value: r.code,
+    label: `${r.code} — ${r.name}`,
+  })),
+];
+
+function parseStagesFromSearchParams(params: URLSearchParams): string[] {
+  const multi = params.get("stages");
+  if (multi) {
+    return multi.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  const single = params.get("stage");
+  if (single && single !== "all") return [single];
+  return [];
+}
+
+function parseRoutesFromSearchParams(params: URLSearchParams): string[] {
+  const multi = params.get("routes");
+  if (multi) {
+    return multi.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  const single = params.get("route");
+  if (single && single !== "all") return [single];
+  return [];
+}
+
+function parsePhasesFromSearchParams(params: URLSearchParams): LLPhaseKey[] {
+  const multi = params.get("phases");
+  if (multi) {
+    return multi
+      .split(",")
+      .map((s) => s.trim())
+      .filter((p): p is LLPhaseKey =>
+        LL_PHASES.some((phase) => phase.key === p),
+      );
+  }
+  const q = params.get("queue");
+  if (
+    q &&
+    q !== "all" &&
+    q !== "escalations" &&
+    LL_PHASES.some((phase) => phase.key === q)
+  ) {
+    return [q as LLPhaseKey];
+  }
+  return [];
+}
+
+function parseEscalationsFromSearchParams(params: URLSearchParams): boolean {
+  if (params.get("escalations") === "1") return true;
+  if (params.get("queue") === "escalations" && !params.get("phases")) {
+    return true;
+  }
+  return false;
+}
+
 export default function LLPipeline() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -123,23 +185,15 @@ export default function LLPipeline() {
   const actorName = currentUser?.name ?? null;
   const actorId = currentUser?.id ?? null;
 
-  const [queue, setQueue] = useState<QueueKey>(() => {
-    const q = searchParams.get("queue");
-    if (
-      q === "all" ||
-      q === "escalations" ||
-      LL_PHASES.some((p) => p.key === q)
-    ) {
-      return q as QueueKey;
-    }
-    return "all";
-  });
-  const [pagesByQueue, setPagesByQueue] = useState<
-    Partial<Record<QueueKey, number>>
-  >({});
-  const page = pagesByQueue[queue] ?? 1;
-  const [stageFilter, setStageFilter] = useState(
-    () => searchParams.get("stage") ?? "all",
+  const [selectedPhases, setSelectedPhases] = useState<LLPhaseKey[]>(() =>
+    parsePhasesFromSearchParams(searchParams),
+  );
+  const [escalationsOnly, setEscalationsOnly] = useState(() =>
+    parseEscalationsFromSearchParams(searchParams),
+  );
+  const [listPage, setListPage] = useState(1);
+  const [selectedStages, setSelectedStages] = useState<string[]>(() =>
+    parseStagesFromSearchParams(searchParams),
   );
   const [searchTerm, setSearchTerm] = useState(
     () => searchParams.get("q") ?? "",
@@ -157,8 +211,8 @@ export default function LLPipeline() {
     () => searchParams.get("from") ?? "",
   );
   const [dateTo, setDateTo] = useState(() => searchParams.get("to") ?? "");
-  const [routeFilter, setRouteFilter] = useState<string>(
-    () => searchParams.get("route") ?? "all",
+  const [selectedRoutes, setSelectedRoutes] = useState<string[]>(() =>
+    parseRoutesFromSearchParams(searchParams),
   );
 
   const updateStatus = useUpdateLLStatus();
@@ -174,41 +228,83 @@ export default function LLPipeline() {
   const filters = useMemo<LLPipelineFilters>(
     () =>
       normalizeLLPipelineFilters({
-        queue,
-        stage: stageFilter,
+        phases: selectedPhases,
+        escalationsOnly,
+        stages: selectedStages,
         search: debouncedSearch,
-        route: routeFilter,
+        routes: selectedRoutes,
         dateField,
         dateFrom,
         dateTo,
       }),
     [
-      queue,
-      stageFilter,
+      selectedPhases,
+      escalationsOnly,
+      selectedStages,
       debouncedSearch,
-      routeFilter,
+      selectedRoutes,
       dateField,
       dateFrom,
       dateTo,
     ],
   );
 
+  const resetListPage = () => setListPage(1);
+
+  const togglePhase = (phase: LLPhaseKey) => {
+    setSelectedPhases((prev) =>
+      prev.includes(phase)
+        ? prev.filter((p) => p !== phase)
+        : [...prev, phase],
+    );
+    resetListPage();
+  };
+
+  const toggleEscalations = () => {
+    setEscalationsOnly((prev) => !prev);
+    resetListPage();
+  };
+
+  const showAllPhases = () => {
+    setSelectedPhases([]);
+    setEscalationsOnly(false);
+    resetListPage();
+  };
+
+  const toggleStage = (stageKey: string) => {
+    setSelectedStages((prev) =>
+      prev.includes(stageKey)
+        ? prev.filter((k) => k !== stageKey)
+        : [...prev, stageKey],
+    );
+    resetListPage();
+  };
+
+  const toggleRoute = (routeValue: string) => {
+    setSelectedRoutes((prev) =>
+      prev.includes(routeValue)
+        ? prev.filter((r) => r !== routeValue)
+        : [...prev, routeValue],
+    );
+    resetListPage();
+  };
+
   const dateRangeInverted =
     !!dateFrom && !!dateTo && dateFrom > dateTo;
 
   const hasListFilters =
-    queue !== "all" ||
-    stageFilter !== "all" ||
-    routeFilter !== "all" ||
+    selectedPhases.length > 0 ||
+    escalationsOnly ||
+    selectedStages.length > 0 ||
+    selectedRoutes.length > 0 ||
     !!dateFrom ||
     !!dateTo ||
     !!searchTerm.trim();
 
   const clearAllListFilters = () => {
-    setQueue("all");
-    setPagesByQueue({});
-    setStageFilter("all");
-    setRouteFilter("all");
+    showAllPhases();
+    setSelectedStages([]);
+    setSelectedRoutes([]);
     setDateFrom("");
     setDateTo("");
     setDateField("updated_at");
@@ -217,9 +313,16 @@ export default function LLPipeline() {
 
   useEffect(() => {
     const params = new URLSearchParams();
-    if (queue !== "all") params.set("queue", queue);
-    if (stageFilter !== "all") params.set("stage", stageFilter);
-    if (routeFilter !== "all") params.set("route", routeFilter);
+    if (selectedPhases.length > 0) {
+      params.set("phases", selectedPhases.join(","));
+    }
+    if (escalationsOnly) params.set("escalations", "1");
+    if (selectedStages.length > 0) {
+      params.set("stages", selectedStages.join(","));
+    }
+    if (selectedRoutes.length > 0) {
+      params.set("routes", selectedRoutes.join(","));
+    }
     if (dateField !== "updated_at") params.set("dateField", dateField);
     if (dateFrom) params.set("from", dateFrom);
     if (dateTo) params.set("to", dateTo);
@@ -232,9 +335,10 @@ export default function LLPipeline() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-way sync to URL
   }, [
-    queue,
-    stageFilter,
-    routeFilter,
+    selectedPhases,
+    escalationsOnly,
+    selectedStages,
+    selectedRoutes,
     dateField,
     dateFrom,
     dateTo,
@@ -245,7 +349,7 @@ export default function LLPipeline() {
 
   // While typing, don't request page 1 with the OLD search term. Fetch once
   // the debounce settles, using the new search and already-reset page.
-  const pipeline = useLLApplicationsPage(filters, page, !isSearchPending);
+  const pipeline = useLLApplicationsPage(filters, listPage, !isSearchPending);
   const applications = pipeline.data?.data ?? [];
   const totalRecords = pipeline.data?.total ?? 0;
   const totalPages = Math.max(
@@ -255,14 +359,29 @@ export default function LLPipeline() {
   const { data: queueCountsData } = useLLQueueCounts();
   const queueCounts: Record<string, number> = queueCountsData ?? {};
   const { data: stageCountsData, isLoading: stageCountsLoading } =
-    useLLStageCounts(queue);
+    useLLStageCounts(selectedPhases, escalationsOnly);
   const stageCounts = stageCountsData ?? {};
   const visibleStageFilters = useMemo(() => {
-    if (queue === "all" || queue === "escalations") {
+    if (selectedPhases.length === 0) {
       return LL_BOARD_STAGE_FILTERS;
     }
-    return LL_BOARD_STAGE_FILTERS.filter((stage) => stage.phase === queue);
-  }, [queue]);
+    return LL_BOARD_STAGE_FILTERS.filter((stage) =>
+      selectedPhases.includes(stage.phase as LLPhaseKey),
+    );
+  }, [selectedPhases]);
+
+  const phaseScopeLabel = useMemo(() => {
+    if (escalationsOnly && selectedPhases.length === 0) {
+      return "escalations";
+    }
+    if (selectedPhases.length === 0) {
+      return "all phases";
+    }
+    if (selectedPhases.length === 1) {
+      return LL_PHASES.find((p) => p.key === selectedPhases[0])?.label ?? "";
+    }
+    return `${selectedPhases.length} phases`;
+  }, [selectedPhases, escalationsOnly]);
 
   const pageApplication = applications.find((a) => a.id === selectedId);
   const { data: selectedApplication } = useLLApplication(
@@ -275,10 +394,10 @@ export default function LLPipeline() {
 
   // A status change/deletion may remove the last row of the last page.
   useEffect(() => {
-    if (pipeline.data && !isSearchPending && page > totalPages) {
-      setPagesByQueue((current) => ({ ...current, [queue]: totalPages }));
+    if (pipeline.data && !isSearchPending && listPage > totalPages) {
+      setListPage(totalPages);
     }
-  }, [pipeline.data, isSearchPending, page, totalPages, queue]);
+  }, [pipeline.data, isSearchPending, listPage, totalPages]);
 
   return (
     <div
@@ -319,10 +438,9 @@ export default function LLPipeline() {
                   ["ll-applications", "detail", application.id],
                   application,
                 );
-                setQueue("all");
-                setPagesByQueue({});
-                setStageFilter("all");
-                setRouteFilter("all");
+                showAllPhases();
+                setSelectedStages([]);
+                setSelectedRoutes([]);
                 setDateFrom("");
                 setDateTo("");
                 setDateField("updated_at");
@@ -334,57 +452,113 @@ export default function LLPipeline() {
         </div>
       </div>
 
-      {/* Queue tabs */}
+      {/* Phase queue (multi-select) */}
       <div className="flex flex-wrap gap-1 border-b bg-white px-4 py-2">
-        {[
-          { key: "all" as QueueKey, label: "All" },
-          ...LL_PHASES.map((p) => ({ key: p.key as QueueKey, label: p.label })),
-          { key: "escalations" as QueueKey, label: "⚠ Escalations" },
-        ].map((t) => (
-          <button
-            key={t.key}
-            onClick={() => {
-              setQueue(t.key);
-              setStageFilter("all");
-              setSelectedId(null);
-            }}
-            className={`rounded-full px-3 py-1 text-xs font-medium transition ${
-              queue === t.key
-                ? t.key === "escalations"
-                  ? "bg-red-600 text-white"
-                  : "bg-primary text-primary-foreground"
-                : "bg-muted text-muted-foreground hover:bg-muted/70"
-            }`}
-          >
-            {t.label} {queueCounts[t.key] ?? 0}
-          </button>
-        ))}
+        <button
+          type="button"
+          onClick={() => {
+            showAllPhases();
+            setSelectedId(null);
+          }}
+          className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+            selectedPhases.length === 0 && !escalationsOnly
+              ? "bg-primary text-primary-foreground"
+              : "bg-muted text-muted-foreground hover:bg-muted/70"
+          }`}
+          aria-pressed={selectedPhases.length === 0 && !escalationsOnly}
+        >
+          All {queueCounts.all ?? 0}
+        </button>
+        {LL_PHASES.map((p) => {
+          const active = selectedPhases.includes(p.key);
+          return (
+            <button
+              key={p.key}
+              type="button"
+              onClick={() => togglePhase(p.key)}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                active
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-muted text-muted-foreground hover:bg-muted/70"
+              }`}
+              aria-pressed={active}
+            >
+              {p.label} {queueCounts[p.key] ?? 0}
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          onClick={() => {
+            toggleEscalations();
+            setSelectedId(null);
+          }}
+          className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+            escalationsOnly
+              ? "bg-red-600 text-white"
+              : "bg-muted text-muted-foreground hover:bg-muted/70"
+          }`}
+          aria-pressed={escalationsOnly}
+        >
+          ⚠ Escalations {queueCounts.escalations ?? 0}
+        </button>
         <div className="ml-auto flex flex-wrap items-center gap-1">
-          <Select
-            value={routeFilter}
-            onValueChange={(value) => {
-              setRouteFilter(value);
-              setPagesByQueue({});
-            }}
-          >
-            <SelectTrigger className="h-7 w-44 text-xs">
-              <SelectValue placeholder="Route" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All routes</SelectItem>
-              <SelectItem value="unset">Route not set</SelectItem>
-              {LL_SEGREGATION_ROUTES.map((r) => (
-                <SelectItem key={r.code} value={r.code}>
-                  {r.code} — {r.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1 px-2 text-xs font-normal"
+              >
+                Routes
+                {selectedRoutes.length > 0 && (
+                  <Badge
+                    variant="secondary"
+                    className="h-4 px-1 text-[10px] tabular-nums"
+                  >
+                    {selectedRoutes.length}
+                  </Badge>
+                )}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-56 p-2">
+              <p className="mb-2 text-[11px] font-medium text-muted-foreground">
+                Segregation routes (multi-select)
+              </p>
+              <div className="max-h-48 space-y-1 overflow-y-auto">
+                {ROUTE_FILTER_OPTIONS.map((opt) => (
+                  <label
+                    key={opt.value}
+                    className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-xs hover:bg-muted"
+                  >
+                    <Checkbox
+                      checked={selectedRoutes.includes(opt.value)}
+                      onCheckedChange={() => toggleRoute(opt.value)}
+                    />
+                    <span>{opt.label}</span>
+                  </label>
+                ))}
+              </div>
+              {selectedRoutes.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="mt-2 h-7 w-full text-xs"
+                  onClick={() => {
+                    setSelectedRoutes([]);
+                    resetListPage();
+                  }}
+                >
+                  Clear routes
+                </Button>
+              )}
+            </PopoverContent>
+          </Popover>
           <Select
             value={dateField}
             onValueChange={(v) => {
               setDateField(v as "created_at" | "updated_at");
-              setPagesByQueue({});
+              resetListPage();
             }}
           >
             <SelectTrigger className="h-7 w-28 text-xs">
@@ -401,7 +575,7 @@ export default function LLPipeline() {
             value={dateFrom}
             onChange={(e) => {
               setDateFrom(e.target.value);
-              setPagesByQueue({});
+              resetListPage();
             }}
           />
           <span className="text-xs text-gray-400">–</span>
@@ -411,7 +585,7 @@ export default function LLPipeline() {
             value={dateTo}
             onChange={(e) => {
               setDateTo(e.target.value);
-              setPagesByQueue({});
+              resetListPage();
             }}
           />
           {(dateFrom || dateTo || dateRangeInverted) && (
@@ -422,7 +596,7 @@ export default function LLPipeline() {
               onClick={() => {
                 setDateFrom("");
                 setDateTo("");
-                setPagesByQueue({});
+                resetListPage();
               }}
             >
               Clear dates
@@ -454,33 +628,39 @@ export default function LLPipeline() {
             {visibleStageFilters.length} stages
           </Badge>
           <span className="text-xs text-slate-500">
-            {queueCounts[queue] ?? 0} applications in this queue
+            {pipeline.data && !isSearchPending
+              ? totalRecords
+              : "…"}{" "}
+            applications · {phaseScopeLabel}
+            {selectedStages.length > 0 && (
+              <span className="ml-1 font-medium text-slate-700">
+                · {selectedStages.length} stage
+                {selectedStages.length === 1 ? "" : "s"} selected
+              </span>
+            )}
           </span>
-          {stageFilter !== "all" && (
+          {selectedStages.length > 0 && (
             <Button
               variant="ghost"
               size="sm"
               className="ml-auto h-6 px-2 text-xs"
               onClick={() => {
-                setStageFilter("all");
-                setSelectedId(null);
+                setSelectedStages([]);
+                resetListPage();
               }}
             >
-              Clear stage filter
+              Clear stage selection
             </Button>
           )}
         </div>
         <div className="flex flex-wrap gap-1.5">
           {visibleStageFilters.map((stage) => {
-            const active = stageFilter === stage.key;
+            const active = selectedStages.includes(stage.key);
             return (
               <button
                 key={stage.key}
                 type="button"
-                onClick={() => {
-                  setStageFilter(active ? "all" : stage.key);
-                  setSelectedId(null);
-                }}
+                onClick={() => toggleStage(stage.key)}
                 className={`rounded-md border px-2 py-1 text-left text-[11px] transition ${
                   active
                     ? stage.isFailure
@@ -526,7 +706,7 @@ export default function LLPipeline() {
                 value={searchTerm}
                 onChange={(e) => {
                   setSearchTerm(e.target.value);
-                  setPagesByQueue({});
+                  resetListPage();
                 }}
               />
               {searchTerm.trim() && (
@@ -536,7 +716,7 @@ export default function LLPipeline() {
                   aria-label="Clear search"
                   onClick={() => {
                     setSearchTerm("");
-                    setPagesByQueue({});
+                    resetListPage();
                   }}
                 >
                   <XCircle className="h-4 w-4" />
@@ -627,13 +807,10 @@ export default function LLPipeline() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() =>
-                  setPagesByQueue((current) => ({
-                    ...current,
-                    [queue]: Math.max(1, page - 1),
-                  }))
+                onClick={() => setListPage((p) => Math.max(1, p - 1))}
+                disabled={
+                  listPage <= 1 || pipeline.isFetching || isSearchPending
                 }
-                disabled={page <= 1 || pipeline.isFetching || isSearchPending}
               >
                 Previous
               </Button>
@@ -642,7 +819,7 @@ export default function LLPipeline() {
                 aria-live="polite"
               >
                 <div>
-                  Page {page}
+                  Page {listPage}
                   {pipeline.data && !isSearchPending && ` of ${totalPages}`}
                 </div>
                 <div>
@@ -655,14 +832,11 @@ export default function LLPipeline() {
                 variant="outline"
                 size="sm"
                 onClick={() =>
-                  setPagesByQueue((current) => ({
-                    ...current,
-                    [queue]: Math.min(totalPages, page + 1),
-                  }))
+                  setListPage((p) => Math.min(totalPages, p + 1))
                 }
                 disabled={
                   !pipeline.data ||
-                  page >= totalPages ||
+                  listPage >= totalPages ||
                   pipeline.isFetching ||
                   pipeline.isError ||
                   isSearchPending
