@@ -519,6 +519,7 @@ export type Database = {
           two_wheeler_requirement: string | null;
           unlocked_lessons: number[] | null;
           updated_at: string;
+          vehicle_type: string | null;
         };
         Insert: {
           amount?: number | null;
@@ -540,6 +541,7 @@ export type Database = {
           two_wheeler_requirement?: string | null;
           unlocked_lessons?: number[] | null;
           updated_at?: string;
+          vehicle_type?: string | null;
         };
         Update: {
           amount?: number | null;
@@ -561,6 +563,7 @@ export type Database = {
           two_wheeler_requirement?: string | null;
           unlocked_lessons?: number[] | null;
           updated_at?: string;
+          vehicle_type?: string | null;
         };
         Relationships: [
           {

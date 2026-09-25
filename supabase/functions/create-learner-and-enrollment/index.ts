@@ -31,6 +31,7 @@ export async function createLearnerAndEnrollment(input: unknown) {
     name,
     email,
     phone,
+    vehicleType,
     courseId,
     amount,
     installmentType,
@@ -48,7 +49,6 @@ export async function createLearnerAndEnrollment(input: unknown) {
     caseType,
     twoWheelerRequirement,
     fourWheelerRequirement,
-    rtoFee,
     rtoAddressChangeRequired,
   } = data;
 
@@ -129,9 +129,9 @@ export async function createLearnerAndEnrollment(input: unknown) {
         unlocked_lessons: unlockedLessons,
         progress,
         case_type: caseType,
+        vehicle_type: vehicleType,
         two_wheeler_requirement: twoWheelerRequirement,
         four_wheeler_requirement: fourWheelerRequirement,
-        rto_fee: rtoFee,
         rto_address_change_required: rtoAddressChangeRequired,
       },
     ])

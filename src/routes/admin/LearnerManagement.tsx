@@ -40,29 +40,27 @@ interface RtoPrototypeData {
   twoWheelerRequirement: LicenceRequirement;
   fourWheelerRequirement: LicenceRequirement;
   addressChangeRequired: boolean;
-  fee: string;
 }
 
 const DEFAULT_RTO_PROTOTYPE_DATA: RtoPrototypeData = {
   twoWheelerRequirement: "not_required",
   fourWheelerRequirement: "not_required",
   addressChangeRequired: false,
-  fee: "",
 };
 
 interface CreateLearnerBasePayload {
   name: string;
   email: string;
   phone: string;
-}
-
-interface CreateLearnerCoursePayload {
   vehicleType: VehicleType;
-  courseId: string | null;
   amount: number;
   installmentType: "full" | "installment";
   installment1Amount: number;
   installment2Amount: number;
+}
+
+interface CreateLearnerCoursePayload {
+  courseId: string | null;
   unlockedLessons: number[];
   courseTypeSelection: CourseType;
   totalLessons: number;
@@ -73,14 +71,12 @@ interface CreateLearnerCoursePayload {
 interface CreateLearnerLegacyLicencePayload {
   has_a_DL: boolean;
   has_two_wheeler_license: boolean;
-  address_change_required: boolean;
   LL_received: boolean;
 }
 
 interface CreateLearnerRtoPayload {
   twoWheelerRequirement: LicenceRequirement;
   fourWheelerRequirement: LicenceRequirement;
-  rtoFee: number;
   rtoAddressChangeRequired: boolean;
 }
 
@@ -185,7 +181,7 @@ export default function LearnerManagement() {
   // Service-specific state stays separate from learner identity and the
   // existing course form so switching cases can clear only incompatible data.
   const [caseType, setCaseType] = useState<CaseType>("classes_only");
-  const [vehicleType, setVehicleType] = useState<VehicleType | "">("");
+  const [vehicleType, setVehicleType] = useState<VehicleType>("four_wheeler");
   const [rtoPrototypeData, setRtoPrototypeData] = useState<RtoPrototypeData>(
     DEFAULT_RTO_PROTOTYPE_DATA,
   );
@@ -211,7 +207,6 @@ export default function LearnerManagement() {
     installment2Amount: 0,
     unlockedLessons: [] as number[],
     has_a_DL: false,
-    address_change_required: false,
     has_two_wheeler_license: false,
     // New fields for course type tracking
     courseTypeSelection: "predefined" as CourseType,
@@ -317,7 +312,7 @@ export default function LearnerManagement() {
   // Reset form when dialog opens
   const openCreateDialog = () => {
     setCaseType("classes_only");
-    setVehicleType("");
+    setVehicleType("four_wheeler");
     setRtoPrototypeData(DEFAULT_RTO_PROTOTYPE_DATA);
     setCourseType("predefined");
     setSelectedCourseId("");
@@ -335,7 +330,6 @@ export default function LearnerManagement() {
       installment2Amount: 0,
       unlockedLessons: [],
       has_a_DL: false,
-      address_change_required: false,
       has_two_wheeler_license: false,
       courseTypeSelection: "predefined",
       selectedModules: [],
@@ -346,7 +340,6 @@ export default function LearnerManagement() {
   };
 
   const clearCoursePrototypeFields = () => {
-    setVehicleType("");
     setCourseType("predefined");
     setSelectedCourseId("");
     setSelectedModules([]);
@@ -356,7 +349,7 @@ export default function LearnerManagement() {
       courseId: "",
       courseName: "",
       amount: 0,
-      installmentType: "full",
+      installmentType: "installment",
       installment1Amount: 0,
       installment2Amount: 0,
       unlockedLessons: [],
@@ -372,27 +365,16 @@ export default function LearnerManagement() {
     }
     if (value === "classes_only") {
       setRtoPrototypeData(DEFAULT_RTO_PROTOTYPE_DATA);
+      setVehicleType("four_wheeler");
     }
     setCaseType(value);
   };
-
-  const requirementIncludesDl = (value: LicenceRequirement) =>
-    value === "dl" || value === "ll_and_dl";
 
   const handleLicenceRequirementChange = (
     field: "twoWheelerRequirement" | "fourWheelerRequirement",
     value: LicenceRequirement,
   ) => {
-    setRtoPrototypeData((prev) => {
-      const next = { ...prev, [field]: value };
-      const addressChangeApplies =
-        requirementIncludesDl(next.twoWheelerRequirement) ||
-        requirementIncludesDl(next.fourWheelerRequirement);
-
-      return addressChangeApplies
-        ? next
-        : { ...next, addressChangeRequired: false };
-    });
+    setRtoPrototypeData((prev) => ({ ...prev, [field]: value }));
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -475,7 +457,7 @@ export default function LearnerManagement() {
     try {
       const hasCourse = caseType !== "rto_only";
       const hasRto = caseType !== "classes_only";
-      const courseAmount = Number(learnerData.amount);
+      const totalAmount = Number(learnerData.amount);
       const firstPaymentAmount = Number(learnerData.installment1Amount);
       const secondPaymentAmount = Number(learnerData.installment2Amount);
 
@@ -506,15 +488,6 @@ export default function LearnerManagement() {
         return;
       }
 
-      if (hasCourse && !vehicleType) {
-        toast({
-          title: "Error",
-          description: "Please select a vehicle.",
-          variant: "destructive",
-        });
-        return;
-      }
-
       if (hasCourse && courseType === "predefined" && !selectedCourseId) {
         toast({
           title: "Error",
@@ -537,34 +510,32 @@ export default function LearnerManagement() {
         return;
       }
 
-      if (hasCourse && (!Number.isFinite(courseAmount) || courseAmount < 0)) {
+      if (!Number.isFinite(totalAmount) || totalAmount < 0) {
         toast({
           title: "Error",
-          description: "Course amount must be at least 0.",
+          description: "Amount must be at least 0.",
           variant: "destructive",
         });
         return;
       }
 
       if (
-        hasCourse &&
         learnerData.installmentType === "installment" &&
         (!Number.isFinite(firstPaymentAmount) ||
           !Number.isFinite(secondPaymentAmount) ||
           firstPaymentAmount < 0 ||
           secondPaymentAmount < 0 ||
-          Math.abs(firstPaymentAmount + secondPaymentAmount - courseAmount) >
+          Math.abs(firstPaymentAmount + secondPaymentAmount - totalAmount) >
             0.01)
       ) {
         toast({
           title: "Error",
-          description: "Installment amounts must equal the course amount.",
+          description: "Installment amounts must equal the total amount.",
           variant: "destructive",
         });
         return;
       }
 
-      let rtoFee = 0;
       if (hasRto) {
         if (
           rtoPrototypeData.twoWheelerRequirement === "not_required" &&
@@ -574,20 +545,6 @@ export default function LearnerManagement() {
             title: "Error",
             description:
               "Select at least one 2-wheeler or 4-wheeler RTO service.",
-            variant: "destructive",
-          });
-          return;
-        }
-
-        rtoFee = Number(rtoPrototypeData.fee);
-        if (
-          rtoPrototypeData.fee.trim() === "" ||
-          !Number.isFinite(rtoFee) ||
-          rtoFee < 0
-        ) {
-          toast({
-            title: "Error",
-            description: "RTO fee must be at least 0.",
             variant: "destructive",
           });
           return;
@@ -648,9 +605,9 @@ export default function LearnerManagement() {
           email: learnerData.email.trim(),
           phone: learnerData.phone,
           caseType: "classes_only",
-          vehicleType: vehicleType as VehicleType,
+          vehicleType,
           courseId: normalizedCourseId,
-          amount: courseAmount,
+          amount: totalAmount,
           installmentType: learnerData.installmentType as
             | "full"
             | "installment",
@@ -663,7 +620,6 @@ export default function LearnerManagement() {
           modulePrices: normalizedModulePrices,
           has_a_DL: learnerData.has_a_DL,
           has_two_wheeler_license: learnerData.has_two_wheeler_license,
-          address_change_required: learnerData.address_change_required,
           LL_received: learnerData.has_a_DL,
         };
       } else if (caseType === "rto_only") {
@@ -672,9 +628,15 @@ export default function LearnerManagement() {
           email: learnerData.email.trim(),
           phone: learnerData.phone,
           caseType: "rto_only",
+          vehicleType,
+          amount: totalAmount,
+          installmentType: learnerData.installmentType as
+            | "full"
+            | "installment",
+          installment1Amount: firstPaymentAmount,
+          installment2Amount: secondPaymentAmount,
           twoWheelerRequirement: rtoPrototypeData.twoWheelerRequirement,
           fourWheelerRequirement: rtoPrototypeData.fourWheelerRequirement,
-          rtoFee,
           rtoAddressChangeRequired: rtoPrototypeData.addressChangeRequired,
         };
       } else {
@@ -683,9 +645,9 @@ export default function LearnerManagement() {
           email: learnerData.email.trim(),
           phone: learnerData.phone,
           caseType: "lessons_with_rto",
-          vehicleType: vehicleType as VehicleType,
+          vehicleType,
           courseId: normalizedCourseId,
-          amount: courseAmount,
+          amount: totalAmount,
           installmentType: learnerData.installmentType as
             | "full"
             | "installment",
@@ -698,7 +660,6 @@ export default function LearnerManagement() {
           modulePrices: normalizedModulePrices,
           twoWheelerRequirement: rtoPrototypeData.twoWheelerRequirement,
           fourWheelerRequirement: rtoPrototypeData.fourWheelerRequirement,
-          rtoFee,
           rtoAddressChangeRequired: rtoPrototypeData.addressChangeRequired,
         };
       }
@@ -803,7 +764,7 @@ export default function LearnerManagement() {
           const paymentAmount =
             learnerData.installmentType === "installment"
               ? learnerData.installment1Amount
-              : learnerData.amount || courseAmount;
+              : learnerData.amount || totalAmount;
           sendPaymentLink(
             {
               id: data.learner.id,
@@ -1045,7 +1006,7 @@ export default function LearnerManagement() {
                       <SelectItem value="classes_only">Classes Only</SelectItem>
                       <SelectItem value="rto_only">RTO Only</SelectItem>
                       <SelectItem value="lessons_with_rto">
-                        Lessons with RTO Services
+                        RTO + Classes
                       </SelectItem>
                     </SelectContent>
                   </Select>
@@ -1057,7 +1018,7 @@ export default function LearnerManagement() {
                   }`}
                 >
                   <Label htmlFor="vehicleType" className="text-right">
-                    Vehicle
+                    Vehicle Type
                   </Label>
                   <Select
                     onValueChange={(value: VehicleType) =>
@@ -1069,7 +1030,9 @@ export default function LearnerManagement() {
                       <SelectValue placeholder="Select vehicle" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="two_wheeler">2-Wheeler</SelectItem>
+                      {caseType !== "classes_only" && (
+                        <SelectItem value="two_wheeler">2-Wheeler</SelectItem>
+                      )}
                       <SelectItem value="four_wheeler">4-Wheeler</SelectItem>
                     </SelectContent>
                   </Select>
@@ -1243,27 +1206,6 @@ export default function LearnerManagement() {
                     </div>
                   </div>
                 )}
-                <div
-                  className={`grid grid-cols-4 items-center gap-4 ${
-                    caseType === "rto_only" ? "hidden" : ""
-                  }`}
-                >
-                  <Label htmlFor="amount" className="text-right">
-                    Amount (₹)
-                  </Label>
-                  <Input
-                    id="amount"
-                    name="amount"
-                    type="number"
-                    value={learnerData.amount}
-                    onChange={handleInputChange}
-                    min={0}
-                    className="col-span-3"
-                    onWheel={(e) => e.currentTarget.blur()}
-                    disabled={courseType === "custom"}
-                  />
-                </div>
-
                 {caseType !== "classes_only" && (
                   <>
                     <div className="grid grid-cols-4 items-center gap-4">
@@ -1332,59 +1274,62 @@ export default function LearnerManagement() {
                       </Select>
                     </div>
 
-                    {(requirementIncludesDl(
-                      rtoPrototypeData.twoWheelerRequirement,
-                    ) ||
-                      requirementIncludesDl(
-                        rtoPrototypeData.fourWheelerRequirement,
-                      )) && (
-                      <div className="grid grid-cols-4 items-center gap-4">
-                        <Label
-                          htmlFor="prototypeAddressChange"
-                          className="text-right"
-                        >
-                          Address Change
-                        </Label>
-                        <div className="col-span-3 flex items-center space-x-2">
-                          <input
-                            type="checkbox"
-                            id="prototypeAddressChange"
-                            checked={rtoPrototypeData.addressChangeRequired}
-                            onChange={(event) =>
-                              setRtoPrototypeData((prev) => ({
-                                ...prev,
-                                addressChangeRequired: event.target.checked,
-                              }))
-                            }
-                          />
-                          <Label htmlFor="prototypeAddressChange">
-                            Licence address change required
-                          </Label>
-                        </div>
-                      </div>
-                    )}
-
                     <div className="grid grid-cols-4 items-center gap-4">
-                      <Label htmlFor="prototypeRtoFee" className="text-right">
-                        RTO Fee (₹)
+                      <Label
+                        htmlFor="prototypeAddressChange"
+                        className="text-right"
+                      >
+                        Address Change
                       </Label>
-                      <Input
-                        id="prototypeRtoFee"
-                        type="number"
-                        min={0}
-                        value={rtoPrototypeData.fee}
-                        onChange={(event) =>
+                      <Select
+                        value={
+                          rtoPrototypeData.addressChangeRequired
+                            ? "required"
+                            : "not_required"
+                        }
+                        onValueChange={(value) =>
                           setRtoPrototypeData((prev) => ({
                             ...prev,
-                            fee: event.target.value,
+                            addressChangeRequired: value === "required",
                           }))
                         }
-                        onWheel={(event) => event.currentTarget.blur()}
-                        className="col-span-3"
-                      />
+                      >
+                        <SelectTrigger
+                          id="prototypeAddressChange"
+                          className="col-span-3"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="required">Required</SelectItem>
+                          <SelectItem value="not_required">
+                            Not Required
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
                   </>
                 )}
+
+                <div className="grid grid-cols-4 items-center gap-4">
+                  <Label htmlFor="amount" className="text-right">
+                    Amount (₹)
+                  </Label>
+                  <Input
+                    id="amount"
+                    name="amount"
+                    type="number"
+                    value={learnerData.amount}
+                    onChange={handleInputChange}
+                    min={0}
+                    className="col-span-3"
+                    onWheel={(event) => event.currentTarget.blur()}
+                    disabled={
+                      caseType === "classes_only" && courseType === "custom"
+                    }
+                  />
+                </div>
+
                 {/* Hide installment options for demo courses */}
                 {courseType !== "demo" && (
                   <>
@@ -1395,7 +1340,6 @@ export default function LearnerManagement() {
                       <Select
                         onValueChange={handleInstallmentTypeChange}
                         value={learnerData.installmentType}
-                        disabled={caseType === "rto_only"}
                       >
                         <SelectTrigger
                           id="installmentType"
@@ -1429,7 +1373,6 @@ export default function LearnerManagement() {
                             min={0}
                             className="col-span-3"
                             onWheel={(e) => e.currentTarget.blur()}
-                            disabled={caseType === "rto_only"}
                           />
                         </div>
                         <div className="grid grid-cols-4 items-center gap-4">
@@ -1490,18 +1433,6 @@ export default function LearnerManagement() {
                       />
                       <Label htmlFor="has_two_wheeler_license">
                         Has a 2-wheeler license, not 4-wheeler
-                      </Label>
-                    </div>
-                    <div className="flex items-center space-x-2">
-                      <input
-                        type="checkbox"
-                        id="address_change_required"
-                        name="address_change_required"
-                        checked={learnerData.address_change_required}
-                        onChange={handleInputChange}
-                      />
-                      <Label htmlFor="address_change_required">
-                        License address change required
                       </Label>
                     </div>
                   </>

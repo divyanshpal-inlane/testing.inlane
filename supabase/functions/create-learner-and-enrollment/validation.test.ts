@@ -51,9 +51,13 @@ const classesPayload = {
 const rtoPayload = {
   ...basePayload,
   caseType: "rto_only",
+  vehicleType: "two_wheeler",
+  amount: 2500,
+  installmentType: "installment",
+  installment1Amount: 1000,
+  installment2Amount: 1500,
   twoWheelerRequirement: "ll",
   fourWheelerRequirement: "not_required",
-  rtoFee: 2500,
   rtoAddressChangeRequired: false,
 };
 
@@ -69,7 +73,7 @@ Deno.test("rejects hidden RTO values for Classes Only", () => {
     () =>
       validateCreateLearnerRequest({
         ...classesPayload,
-        rtoFee: 100,
+        twoWheelerRequirement: "ll",
       }),
     "Classes-only cases cannot include hidden RTO values",
   );
@@ -79,7 +83,8 @@ Deno.test("validates RTO Only without course values", () => {
   const result = validateCreateLearnerRequest(rtoPayload);
 
   assert(result.courseId === null, "Expected no course ID");
-  assert(result.rtoFee === 2500, "Expected RTO fee");
+  assert(result.amount === 2500, "Expected total amount");
+  assert(result.vehicleType === "two_wheeler", "Expected vehicle type");
 });
 
 Deno.test("rejects hidden course values for RTO Only", () => {
@@ -87,20 +92,19 @@ Deno.test("rejects hidden course values for RTO Only", () => {
     () =>
       validateCreateLearnerRequest({
         ...rtoPayload,
-        amount: 0,
+        courseId: coursePayload.courseId,
       }),
-    "RTO-only cases cannot include hidden course or course-payment values",
+    "RTO-only cases cannot include hidden course values",
   );
 });
 
-Deno.test("validates Lessons with RTO Services", () => {
+Deno.test("validates RTO + Classes", () => {
   const result = validateCreateLearnerRequest({
     ...basePayload,
     ...coursePayload,
     caseType: "lessons_with_rto",
     twoWheelerRequirement: "not_required",
     fourWheelerRequirement: "ll_and_dl",
-    rtoFee: 3500,
     rtoAddressChangeRequired: true,
   });
 
@@ -108,38 +112,56 @@ Deno.test("validates Lessons with RTO Services", () => {
   assert(result.rtoAddressChangeRequired, "Expected address change");
 });
 
-Deno.test("requires an RTO service and limits address change to DL", () => {
-  const rtoPayload = {
-    ...basePayload,
-    caseType: "rto_only",
-    twoWheelerRequirement: "not_required",
-    fourWheelerRequirement: "not_required",
-    rtoFee: 0,
-    rtoAddressChangeRequired: false,
-  };
+Deno.test(
+  "requires an RTO service and accepts either address-change option",
+  () => {
+    const rtoPayload = {
+      ...basePayload,
+      caseType: "rto_only",
+      vehicleType: "four_wheeler",
+      amount: 2500,
+      installmentType: "full",
+      installment1Amount: 2500,
+      installment2Amount: 0,
+      twoWheelerRequirement: "not_required",
+      fourWheelerRequirement: "not_required",
+      rtoAddressChangeRequired: false,
+    };
 
-  assertValidationError(
-    () => validateCreateLearnerRequest(rtoPayload),
-    "Select at least one 2-wheeler or 4-wheeler RTO service",
-  );
+    assertValidationError(
+      () => validateCreateLearnerRequest(rtoPayload),
+      "Select at least one 2-wheeler or 4-wheeler RTO service",
+    );
 
+    const addressChangeResult = validateCreateLearnerRequest({
+      ...rtoPayload,
+      twoWheelerRequirement: "ll",
+      rtoAddressChangeRequired: true,
+    });
+    assert(
+      addressChangeResult.rtoAddressChangeRequired,
+      "Expected address change to be required",
+    );
+
+    assertValidationError(
+      () =>
+        validateCreateLearnerRequest({
+          ...rtoPayload,
+          twoWheelerRequirement: "ll",
+          has_a_DL: false,
+        }),
+      "RTO cases cannot include hidden legacy licence-state values",
+    );
+  },
+);
+
+Deno.test("limits Classes Only to 4-Wheeler", () => {
   assertValidationError(
     () =>
       validateCreateLearnerRequest({
-        ...rtoPayload,
-        twoWheelerRequirement: "ll",
-        rtoAddressChangeRequired: true,
+        ...classesPayload,
+        vehicleType: "two_wheeler",
       }),
-    "Address change is only available when a DL service is required",
-  );
-
-  assertValidationError(
-    () =>
-      validateCreateLearnerRequest({
-        ...rtoPayload,
-        twoWheelerRequirement: "ll",
-        has_a_DL: false,
-      }),
-    "RTO cases cannot include hidden legacy licence-state values",
+    "Classes Only supports 4-Wheeler only",
   );
 });

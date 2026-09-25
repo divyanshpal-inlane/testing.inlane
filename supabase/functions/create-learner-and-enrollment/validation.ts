@@ -27,7 +27,7 @@ export interface ValidatedCreateLearnerRequest {
   vehicleType: VehicleType | null;
   courseId: string | null;
   amount: number;
-  installmentType: "full" | "installment" | null;
+  installmentType: "full" | "installment";
   installment1Amount: number;
   installment2Amount: number;
   unlockedLessons: number[];
@@ -41,7 +41,6 @@ export interface ValidatedCreateLearnerRequest {
   LL_received: boolean;
   twoWheelerRequirement: LicenceRequirement | null;
   fourWheelerRequirement: LicenceRequirement | null;
-  rtoFee: number;
   rtoAddressChangeRequired: boolean;
 }
 
@@ -123,9 +122,6 @@ const numberRecord = (
   return result;
 };
 
-const includesDl = (requirement: LicenceRequirement): boolean =>
-  requirement === "dl" || requirement === "ll_and_dl";
-
 export function validateCreateLearnerRequest(
   input: unknown,
 ): ValidatedCreateLearnerRequest {
@@ -154,11 +150,48 @@ export function validateCreateLearnerRequest(
   const hasRto = caseType !== "classes_only";
 
   let vehicleType: VehicleType | null = null;
+  if (
+    isLegacyClassesRequest &&
+    (input.vehicleType === undefined || input.vehicleType === null)
+  ) {
+    vehicleType = null;
+  } else if (!isOneOf(input.vehicleType, VEHICLE_TYPES)) {
+    throw new ValidationError("Vehicle type is required");
+  } else {
+    vehicleType = input.vehicleType;
+  }
+
+  if (caseType === "classes_only" && vehicleType === "two_wheeler") {
+    throw new ValidationError("Classes Only supports 4-Wheeler only");
+  }
+
+  const amount = finiteNumber(input.amount, "Amount");
+  if (
+    input.installmentType !== "full" &&
+    input.installmentType !== "installment"
+  ) {
+    throw new ValidationError("Invalid payment type");
+  }
+  const installmentType = input.installmentType;
+  const installment1Amount = finiteNumber(
+    input.installment1Amount,
+    "First payment amount",
+  );
+  const installment2Amount = finiteNumber(
+    input.installment2Amount,
+    "Second payment amount",
+  );
+
+  if (
+    installmentType === "installment" &&
+    Math.abs(installment1Amount + installment2Amount - amount) > 0.01
+  ) {
+    throw new ValidationError(
+      "Installment amounts must equal the total amount",
+    );
+  }
+
   let courseId: string | null = null;
-  let amount = 0;
-  let installmentType: "full" | "installment" | null = null;
-  let installment1Amount = 0;
-  let installment2Amount = 0;
   let unlockedLessons: number[] = [];
   let courseTypeSelection: CourseType | null = null;
   let totalLessons = 0;
@@ -166,51 +199,14 @@ export function validateCreateLearnerRequest(
   let modulePrices: Record<string, number> = {};
 
   if (hasCourse) {
-    if (
-      isLegacyClassesRequest &&
-      (input.vehicleType === undefined || input.vehicleType === null)
-    ) {
-      vehicleType = null;
-    } else if (!isOneOf(input.vehicleType, VEHICLE_TYPES)) {
-      throw new ValidationError("Vehicle is required");
-    } else {
-      vehicleType = input.vehicleType;
-    }
-
     if (!isOneOf(input.courseTypeSelection, COURSE_TYPES)) {
       throw new ValidationError("Invalid course type");
     }
     courseTypeSelection = input.courseTypeSelection;
-    amount = finiteNumber(input.amount, "Course amount");
     totalLessons = finiteNumber(input.totalLessons, "Total lessons", 1);
     selectedModules = stringArray(input.selectedModules, "Selected modules");
     modulePrices = numberRecord(input.modulePrices, "Module prices");
     unlockedLessons = numberArray(input.unlockedLessons, "Unlocked lessons");
-
-    if (
-      input.installmentType !== "full" &&
-      input.installmentType !== "installment"
-    ) {
-      throw new ValidationError("Invalid payment type");
-    }
-    installmentType = input.installmentType;
-    installment1Amount = finiteNumber(
-      input.installment1Amount,
-      "First payment amount",
-    );
-    installment2Amount = finiteNumber(
-      input.installment2Amount,
-      "Second payment amount",
-    );
-
-    if (
-      installmentType === "installment" &&
-      Math.abs(installment1Amount + installment2Amount - amount) > 0.01
-    ) {
-      throw new ValidationError(
-        "Installment amounts must equal the course amount",
-      );
-    }
 
     const rawCourseId = input.courseId;
     if (courseTypeSelection === "predefined") {
@@ -243,10 +239,10 @@ export function validateCreateLearnerRequest(
         );
         if (
           !Number.isFinite(moduleTotal) ||
-          Math.abs(moduleTotal - amount) > 0.01
+          (caseType === "classes_only" && Math.abs(moduleTotal - amount) > 0.01)
         ) {
           throw new ValidationError(
-            "Custom module prices must equal the course amount",
+            "Custom module prices must equal the total amount",
           );
         }
       } else if (
@@ -258,12 +254,7 @@ export function validateCreateLearnerRequest(
     }
   } else {
     const hiddenCourseValuesPresent = [
-      "vehicleType",
       "courseId",
-      "amount",
-      "installmentType",
-      "installment1Amount",
-      "installment2Amount",
       "selectedModules",
       "modulePrices",
       "unlockedLessons",
@@ -273,14 +264,13 @@ export function validateCreateLearnerRequest(
 
     if (hiddenCourseValuesPresent) {
       throw new ValidationError(
-        "RTO-only cases cannot include hidden course or course-payment values",
+        "RTO-only cases cannot include hidden course values",
       );
     }
   }
 
   let twoWheelerRequirement: LicenceRequirement | null = null;
   let fourWheelerRequirement: LicenceRequirement | null = null;
-  let rtoFee = 0;
   let rtoAddressChangeRequired = false;
 
   if (hasRto) {
@@ -313,26 +303,14 @@ export function validateCreateLearnerRequest(
       );
     }
 
-    rtoFee = finiteNumber(input.rtoFee, "RTO fee");
     rtoAddressChangeRequired = optionalBoolean(
       input.rtoAddressChangeRequired,
       "RTO address change",
     );
-
-    if (
-      rtoAddressChangeRequired &&
-      !includesDl(twoWheelerRequirement) &&
-      !includesDl(fourWheelerRequirement)
-    ) {
-      throw new ValidationError(
-        "Address change is only available when a DL service is required",
-      );
-    }
   } else {
     const hiddenRtoValuesPresent =
       input.twoWheelerRequirement !== undefined ||
       input.fourWheelerRequirement !== undefined ||
-      input.rtoFee !== undefined ||
       input.rtoAddressChangeRequired !== undefined;
     if (hiddenRtoValuesPresent) {
       throw new ValidationError(
@@ -376,7 +354,6 @@ export function validateCreateLearnerRequest(
       : false,
     twoWheelerRequirement,
     fourWheelerRequirement,
-    rtoFee,
     rtoAddressChangeRequired,
   };
 }
