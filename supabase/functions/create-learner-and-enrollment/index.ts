@@ -129,7 +129,6 @@ export async function createLearnerAndEnrollment(input: unknown) {
         unlocked_lessons: unlockedLessons,
         progress,
         case_type: caseType,
-        vehicle_type: vehicleType,
         two_wheeler_requirement: twoWheelerRequirement,
         four_wheeler_requirement: fourWheelerRequirement,
         rto_address_change_required: rtoAddressChangeRequired,

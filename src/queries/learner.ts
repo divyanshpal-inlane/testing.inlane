@@ -6,6 +6,7 @@ import {
 } from "@tanstack/react-query";
 
 import { useUser } from "@/context/auth-context";
+import { selectLatestLearnerServiceEnrollment } from "@/lib/learner-service";
 import { supabase } from "@/lib/supabaseClient";
 import { Database } from "@/types/database.types";
 import { getAllPhoneFormats } from "@/utils/phoneNormalization";
@@ -746,7 +747,7 @@ export function useLearnerEnrollment({ learnerId }: { learnerId?: string }) {
       if (error) throw error;
       if (!data || data.length === 0) return null;
 
-      // Pick the enrollment that should drive the learner's experience.
+      // Pick the enrollment that should drive course progress and scheduling.
       // A stray demo/topup enrollment must never shadow a real course
       // enrollment, so rank by intent (course > topup > demo) rather than
       // just recency. `data` is newest-first and Array.sort is stable, so
@@ -761,6 +762,37 @@ export function useLearnerEnrollment({ learnerId }: { learnerId?: string }) {
       return [...rows].sort((a, b) => tier(a) - tier(b))[0];
     },
     staleTime: 0, // Always refetch to get latest enrollment status
+    enabled: !!learnerId,
+  });
+}
+
+/**
+ * Reads the service selected in Learner Management's Create New Learner flow.
+ * That flow persists its selection as enrollment.case_type. The newest
+ * explicit selection wins even when it is pending, which is normal for RTO.
+ */
+export function useLearnerServiceEnrollment({
+  learnerId,
+}: {
+  learnerId?: string;
+}) {
+  return useQuery({
+    queryKey: ["learner-service-enrollment", learnerId],
+    queryFn: async () => {
+      if (!learnerId) return null;
+
+      const { data, error } = await supabase
+        .from("enrollment")
+        .select("id, learner_id, case_type, status, created_at")
+        .eq("learner_id", learnerId)
+        .in("status", ["active", "pending"])
+        .not("case_type", "is", null)
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+      return selectLatestLearnerServiceEnrollment(data ?? []);
+    },
+    staleTime: 0,
     enabled: !!learnerId,
   });
 }
