@@ -53,6 +53,7 @@ export default function InstructorAuth() {
 
     try {
       setIsRequestingOtp(true);
+      setErrorMessage("");
       await requestPasswordReset(phone, "instructor");
       setResetRequested(true);
       setTimer(30);
@@ -60,7 +61,12 @@ export default function InstructorAuth() {
         "OTP sent to your WhatsApp. Please check and enter below.",
       );
     } catch (error) {
-      setErrorMessage("Failed to send OTP. Please try again.");
+      setSuccessMessage("");
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to send OTP. Please try again.",
+      );
     } finally {
       setIsRequestingOtp(false);
     }
@@ -68,11 +74,17 @@ export default function InstructorAuth() {
 
   const handleVerifyOtp = async () => {
     try {
+      setErrorMessage("");
       await verifyOtpAndResetPassword(phone, otp, null);
       setOtpVerified(true);
       setSuccessMessage("OTP verified successfully. Set your new password.");
     } catch (error) {
-      setErrorMessage("Invalid OTP. Please try again.");
+      setSuccessMessage("");
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Invalid OTP. Please try again.",
+      );
     }
   };
 
