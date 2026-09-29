@@ -57,12 +57,17 @@ import {
 } from "@/components/ui/tooltip";
 import { LESSON_CONTENT } from "@/constants/Lesson";
 import { SALES_PHONE_TEL, telHref } from "@/constants/support";
+import {
+  learnerHomeExperience,
+  shouldRenderLearnerLLFlow,
+} from "@/lib/learner-service";
 import { supabase } from "@/lib/supabaseClient";
 // useUpdateScheduleStatus removed — lesson status changes are handled by instructor OTP flow only
 import {
   useLearner,
   useLearnerEnrollment,
   useLearnerSchedule,
+  useLearnerServiceEnrollment,
   useLearnerUpdate,
   useLessonSchedule,
   useUpcomingLesson,
@@ -86,12 +91,32 @@ const isLessonCompleted = (lesson) => {
   return lesson?.status?.toUpperCase() === "COMPLETED";
 };
 
+function LearnerHomeHeader({ learnerName }: { learnerName?: string | null }) {
+  return (
+    <header className="sticky top-0 z-10 flex items-center justify-between p-4">
+      <h1 className="text-2xl font-medium">Hi {learnerName || "Learner"}!</h1>
+      <Link to="/profile" className="rounded-full bg-white p-1">
+        <User size={24} className="hover:text-primary-dark text-primary" />
+      </Link>
+    </header>
+  );
+}
+
 export default function Home() {
   const navigate = useNavigate();
 
   const { data: learner, isLoading, error } = useLearner();
-  const { data: enrolledCourse, isLoading: isEnrolledCourseLoading } =
-    useLearnerEnrollment({ learnerId: learner?.id });
+  const {
+    data: enrolledCourse,
+    isFetching: isEnrolledCourseFetching,
+    isLoading: isEnrolledCourseLoading,
+  } = useLearnerEnrollment({ learnerId: learner?.id });
+  const {
+    data: serviceEnrollment,
+    error: serviceEnrollmentError,
+    isFetching: isServiceEnrollmentFetching,
+    isLoading: isServiceEnrollmentLoading,
+  } = useLearnerServiceEnrollment({ learnerId: learner?.id });
 
   const [showPolicyModal, setShowPolicyModal] = useState(false);
   const { data: scheduleRequests, isLoading: scheduleRequestsLoading } =
@@ -162,8 +187,41 @@ export default function Home() {
     enrolledCourse?.payment_status === "half_paid" ||
     enrolledCourse?.payment_status === "full_paid";
 
-  if (paymentLoading || isLoading) {
+  if (
+    paymentLoading ||
+    isLoading ||
+    isEnrolledCourseLoading ||
+    isEnrolledCourseFetching ||
+    isServiceEnrollmentLoading ||
+    isServiceEnrollmentFetching
+  ) {
     return <div>Loading...</div>;
+  }
+
+  if (error || serviceEnrollmentError) {
+    return <p>Error: {error?.message || serviceEnrollmentError?.message}</p>;
+  }
+
+  const selectedCaseType = serviceEnrollment?.case_type;
+  const homeExperience = learnerHomeExperience(selectedCaseType);
+  const shouldRenderLLFlow = shouldRenderLearnerLLFlow(
+    selectedCaseType,
+    learner?.LL_received,
+    isDemo,
+  );
+
+  if (homeExperience === "rto") {
+    return (
+      <div className="flex min-h-screen flex-col">
+        <LearnerHomeHeader learnerName={learner?.name} />
+        <main
+          className="scrollbar-none flex h-[calc(100vh-50px)] flex-col overflow-y-auto p-4 pb-20"
+          style={{ scrollbarWidth: "none" }}
+        >
+          <LLFlow />
+        </main>
+      </div>
+    );
   }
 
   // FIRST: Check if onboarding is complete (before checking payment)
@@ -289,8 +347,8 @@ export default function Home() {
     return <div>Loading...</div>;
   }
 
-  if (error || LessonError) {
-    return <p>Error: {error?.message || LessonError?.message}</p>;
+  if (LessonError) {
+    return <p>Error: {LessonError.message}</p>;
   }
 
   // Show payment completion prompt for half-paid enrollments
@@ -848,15 +906,7 @@ export default function Home() {
     // lesson 1 getting scheduled
     return (
       <div className="flex min-h-screen flex-col">
-        {/* Static header */}
-        <header className="sticky top-0 z-10 flex items-center justify-between p-4">
-          <h1 className="text-2xl font-medium">
-            Hi {learner?.name || "Learner"}!
-          </h1>
-          <Link to="/profile" className="rounded-full bg-white p-1">
-            <User size={24} className="hover:text-primary-dark text-primary" />
-          </Link>
-        </header>
+        <LearnerHomeHeader learnerName={learner?.name} />
 
         {renderLesson1ScheduleState()}
       </div>
@@ -960,15 +1010,7 @@ export default function Home() {
 
   return (
     <div className="flex min-h-screen flex-col">
-      {/* Static header */}
-      <header className="sticky top-0 z-10 flex items-center justify-between p-4">
-        <h1 className="text-2xl font-medium">
-          Hi {learner?.name || "Learner"}!
-        </h1>
-        <Link to="/profile" className="rounded-full bg-white p-1">
-          <User size={24} className="hover:text-primary-dark text-primary" />
-        </Link>
-      </header>
+      <LearnerHomeHeader learnerName={learner?.name} />
 
       <main
         className="scrollbar-none flex h-[calc(100vh-50px)] flex-col overflow-y-auto p-4 pb-20"
@@ -1033,7 +1075,7 @@ export default function Home() {
               (needsScheduleOnboarding ||
                 !(scheduleRequests && scheduleRequests.length > 0)) && (
                 <>
-                  {learner && !learner.LL_received && !isDemo ? (
+                  {learner && shouldRenderLLFlow ? (
                     <LLFlow />
                   ) : learner ? (
                     // Demo course handling

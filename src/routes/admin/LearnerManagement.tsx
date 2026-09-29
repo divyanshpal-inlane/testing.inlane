@@ -32,6 +32,80 @@ import { IncompletePaymentsCard } from "./IncompletePaymentsCard";
 // Course type options
 type CourseType = "predefined" | "custom" | "demo";
 
+type CaseType = "classes_only" | "rto_only" | "lessons_with_rto";
+type VehicleType = "two_wheeler" | "four_wheeler";
+type LicenceRequirement = "ll" | "dl" | "ll_and_dl" | "not_required";
+
+interface RtoPrototypeData {
+  twoWheelerRequirement: LicenceRequirement;
+  fourWheelerRequirement: LicenceRequirement;
+  addressChangeRequired: boolean;
+}
+
+const DEFAULT_RTO_PROTOTYPE_DATA: RtoPrototypeData = {
+  twoWheelerRequirement: "not_required",
+  fourWheelerRequirement: "not_required",
+  addressChangeRequired: false,
+};
+
+interface CreateLearnerBasePayload {
+  name: string;
+  email: string;
+  phone: string;
+  vehicleType: VehicleType;
+  amount: number;
+  installmentType: "full" | "installment";
+  installment1Amount: number;
+  installment2Amount: number;
+}
+
+interface CreateLearnerCoursePayload {
+  courseId: string | null;
+  unlockedLessons: number[];
+  courseTypeSelection: CourseType;
+  totalLessons: number;
+  selectedModules: string[];
+  modulePrices: Record<string, number>;
+}
+
+interface CreateLearnerLegacyLicencePayload {
+  has_a_DL: boolean;
+  has_two_wheeler_license: boolean;
+  LL_received: boolean;
+}
+
+interface CreateLearnerRtoPayload {
+  twoWheelerRequirement: LicenceRequirement;
+  fourWheelerRequirement: LicenceRequirement;
+  rtoAddressChangeRequired: boolean;
+}
+
+type CreateLearnerPayload = CreateLearnerBasePayload &
+  (
+    | ({ caseType: "classes_only" } & CreateLearnerCoursePayload &
+        CreateLearnerLegacyLicencePayload)
+    | ({ caseType: "rto_only" } & CreateLearnerRtoPayload)
+    | ({ caseType: "lessons_with_rto" } & CreateLearnerCoursePayload &
+        CreateLearnerRtoPayload)
+  );
+
+interface CreateLearnerResponse {
+  learner: { id: string };
+  enrollment?: { id: string } | null;
+}
+
+interface PaymentLinkLearner {
+  id: string | null;
+  name: string;
+  email: string;
+  phone: string;
+}
+
+interface PaymentLinkCourse {
+  name: string;
+  duration: number;
+}
+
 // Predefined courses with their IDs and durations
 const PREDEFINED_COURSES = [
   {
@@ -104,6 +178,14 @@ const SKILL_MODULES = [
 const DEMO_CONFIG = { hours: 1, price: 1 };
 
 export default function LearnerManagement() {
+  // Service-specific state stays separate from learner identity and the
+  // existing course form so switching cases can clear only incompatible data.
+  const [caseType, setCaseType] = useState<CaseType>("classes_only");
+  const [vehicleType, setVehicleType] = useState<VehicleType>("four_wheeler");
+  const [rtoPrototypeData, setRtoPrototypeData] = useState<RtoPrototypeData>(
+    DEFAULT_RTO_PROTOTYPE_DATA,
+  );
+
   // Course selection state
   const [courseType, setCourseType] = useState<CourseType>("predefined");
   const [selectedCourseId, setSelectedCourseId] = useState("");
@@ -125,12 +207,12 @@ export default function LearnerManagement() {
     installment2Amount: 0,
     unlockedLessons: [] as number[],
     has_a_DL: false,
-    address_change_required: false,
     has_two_wheeler_license: false,
     // New fields for course type tracking
     courseTypeSelection: "predefined" as CourseType,
     selectedModules: [] as string[],
     totalLessons: 0,
+    enrollmentId: null as string | null,
   });
 
   const [createdLearnerId, setCreatedLearnerId] = useState<string | null>(null);
@@ -174,15 +256,6 @@ export default function LearnerManagement() {
     }
     return "";
   }, [courseType, selectedCourseId, selectedModules]);
-
-  // Toggle module selection for custom courses
-  const toggleModule = (moduleId: string) => {
-    setSelectedModules((prev) =>
-      prev.includes(moduleId)
-        ? prev.filter((id) => id !== moduleId)
-        : [...prev, moduleId],
-    );
-  };
 
   // A module's list price from the Courses table (default before any discount).
   const standardModulePrice = (courseId: string): number => {
@@ -236,11 +309,11 @@ export default function LearnerManagement() {
     syncCustomAmount(selectedModules, newPrices);
   };
 
-  // Legacy courses array for compatibility
-  const courses = PREDEFINED_COURSES;
-
   // Reset form when dialog opens
   const openCreateDialog = () => {
+    setCaseType("classes_only");
+    setVehicleType("four_wheeler");
+    setRtoPrototypeData(DEFAULT_RTO_PROTOTYPE_DATA);
     setCourseType("predefined");
     setSelectedCourseId("");
     setSelectedModules([]);
@@ -257,16 +330,54 @@ export default function LearnerManagement() {
       installment2Amount: 0,
       unlockedLessons: [],
       has_a_DL: false,
-      address_change_required: false,
       has_two_wheeler_license: false,
       courseTypeSelection: "predefined",
       selectedModules: [],
       totalLessons: 0,
+      enrollmentId: null,
     });
     setIsCreateLearnerDialogOpen(true);
   };
 
-  const handleInputChange = (e) => {
+  const clearCoursePrototypeFields = () => {
+    setCourseType("predefined");
+    setSelectedCourseId("");
+    setSelectedModules([]);
+    setModulePrices({});
+    setLearnerData((prev) => ({
+      ...prev,
+      courseId: "",
+      courseName: "",
+      amount: 0,
+      installmentType: "installment",
+      installment1Amount: 0,
+      installment2Amount: 0,
+      unlockedLessons: [],
+      courseTypeSelection: "predefined",
+      selectedModules: [],
+      totalLessons: 0,
+    }));
+  };
+
+  const handleCaseTypeChange = (value: CaseType) => {
+    if (value === "rto_only") {
+      clearCoursePrototypeFields();
+    }
+    if (value === "classes_only") {
+      setRtoPrototypeData(DEFAULT_RTO_PROTOTYPE_DATA);
+      setVehicleType("four_wheeler");
+    }
+    setCaseType(value);
+  };
+
+  const handleLicenceRequirementChange = (
+    field: "twoWheelerRequirement" | "fourWheelerRequirement",
+    value: LicenceRequirement,
+  ) => {
+    setRtoPrototypeData((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     // Destructure properties from the event target
     const { name, value, type, checked } = e.target;
 
@@ -311,16 +422,7 @@ export default function LearnerManagement() {
     }
   };
 
-  const handleCourseChange = (courseId) => {
-    const selectedCourse = courses.find((course) => course.id === courseId);
-    setLearnerData((prev) => ({
-      ...prev,
-      courseId,
-      courseName: selectedCourse?.name || "",
-    }));
-  };
-
-  const handleUnlockedLessonsChange = (value) => {
+  const handleUnlockedLessonsChange = (value: string) => {
     // If value is empty, don't update the state yet
     if (value === "") return;
 
@@ -331,7 +433,8 @@ export default function LearnerManagement() {
     }));
   };
 
-  const handleInstallmentTypeChange = (value) => {
+  const handleInstallmentTypeChange = (value: string) => {
+    if (value !== "full" && value !== "installment") return;
     setLearnerData((prev) => {
       const updatedData = {
         ...prev,
@@ -352,7 +455,12 @@ export default function LearnerManagement() {
 
   const createLearnerAndEnrollment = async () => {
     try {
-      // Validate required fields based on course type
+      const hasCourse = caseType !== "rto_only";
+      const hasRto = caseType !== "classes_only";
+      const totalAmount = Number(learnerData.amount);
+      const firstPaymentAmount = Number(learnerData.installment1Amount);
+      const secondPaymentAmount = Number(learnerData.installment2Amount);
+
       if (!learnerData.name || !learnerData.phone) {
         toast({
           title: "Error",
@@ -362,7 +470,89 @@ export default function LearnerManagement() {
         return;
       }
 
-      // Check if learner with this phone already exists
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(learnerData.email)) {
+        toast({
+          title: "Error",
+          description: "Invalid email address.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (!/^\d{10}$/.test(learnerData.phone)) {
+        toast({
+          title: "Error",
+          description: "Phone must contain exactly 10 digits.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      if (hasCourse && courseType === "predefined" && !selectedCourseId) {
+        toast({
+          title: "Error",
+          description: "Please select a course.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      if (
+        hasCourse &&
+        courseType === "custom" &&
+        selectedModules.length === 0
+      ) {
+        toast({
+          title: "Error",
+          description: "Please select at least one module for custom course.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      if (!Number.isFinite(totalAmount) || totalAmount < 0) {
+        toast({
+          title: "Error",
+          description: "Amount must be at least 0.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      if (
+        learnerData.installmentType === "installment" &&
+        (!Number.isFinite(firstPaymentAmount) ||
+          !Number.isFinite(secondPaymentAmount) ||
+          firstPaymentAmount < 0 ||
+          secondPaymentAmount < 0 ||
+          Math.abs(firstPaymentAmount + secondPaymentAmount - totalAmount) >
+            0.01)
+      ) {
+        toast({
+          title: "Error",
+          description: "Installment amounts must equal the total amount.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      if (hasRto) {
+        if (
+          rtoPrototypeData.twoWheelerRequirement === "not_required" &&
+          rtoPrototypeData.fourWheelerRequirement === "not_required"
+        ) {
+          toast({
+            title: "Error",
+            description:
+              "Select at least one 2-wheeler or 4-wheeler RTO service.",
+            variant: "destructive",
+          });
+          return;
+        }
+      }
+
+      // Keep the existing duplicate check for a fast, familiar admin error;
+      // the Edge Function repeats it because the client cannot be trusted.
       const { data: existingLearners, error: checkError } = await supabase
         .from("Learner")
         .select("id")
@@ -386,99 +576,105 @@ export default function LearnerManagement() {
         return;
       }
 
-      // Validate course selection based on type
-      if (courseType === "predefined" && !selectedCourseId) {
-        toast({
-          title: "Error",
-          description: "Please select a course.",
-          variant: "destructive",
-        });
-        return;
+      const selectedCourse = PREDEFINED_COURSES.find(
+        (course) => course.id === selectedCourseId,
+      );
+      const submissionCourseName = hasCourse
+        ? courseType === "predefined"
+          ? selectedCourse?.name || ""
+          : courseType === "custom"
+            ? courseName
+            : "Demo Lesson"
+        : "";
+
+      const normalizedCourseId =
+        courseType === "predefined" ? selectedCourseId : null;
+      const normalizedUnlockedLessons =
+        learnerData.unlockedLessons.length > 0
+          ? [...learnerData.unlockedLessons]
+          : [1];
+      const normalizedSelectedModules =
+        courseType === "custom" ? [...selectedModules] : [];
+      const normalizedModulePrices =
+        courseType === "custom" ? { ...modulePrices } : {};
+
+      let payload: CreateLearnerPayload;
+      if (caseType === "classes_only") {
+        payload = {
+          name: learnerData.name.trim(),
+          email: learnerData.email.trim(),
+          phone: learnerData.phone,
+          caseType: "classes_only",
+          vehicleType,
+          courseId: normalizedCourseId,
+          amount: totalAmount,
+          installmentType: learnerData.installmentType as
+            | "full"
+            | "installment",
+          installment1Amount: firstPaymentAmount,
+          installment2Amount: secondPaymentAmount,
+          unlockedLessons: normalizedUnlockedLessons,
+          courseTypeSelection: courseType,
+          totalLessons,
+          selectedModules: normalizedSelectedModules,
+          modulePrices: normalizedModulePrices,
+          has_a_DL: learnerData.has_a_DL,
+          has_two_wheeler_license: learnerData.has_two_wheeler_license,
+          LL_received: learnerData.has_a_DL,
+        };
+      } else if (caseType === "rto_only") {
+        payload = {
+          name: learnerData.name.trim(),
+          email: learnerData.email.trim(),
+          phone: learnerData.phone,
+          caseType: "rto_only",
+          vehicleType,
+          amount: totalAmount,
+          installmentType: learnerData.installmentType as
+            | "full"
+            | "installment",
+          installment1Amount: firstPaymentAmount,
+          installment2Amount: secondPaymentAmount,
+          twoWheelerRequirement: rtoPrototypeData.twoWheelerRequirement,
+          fourWheelerRequirement: rtoPrototypeData.fourWheelerRequirement,
+          rtoAddressChangeRequired: rtoPrototypeData.addressChangeRequired,
+        };
+      } else {
+        payload = {
+          name: learnerData.name.trim(),
+          email: learnerData.email.trim(),
+          phone: learnerData.phone,
+          caseType: "lessons_with_rto",
+          vehicleType,
+          courseId: normalizedCourseId,
+          amount: totalAmount,
+          installmentType: learnerData.installmentType as
+            | "full"
+            | "installment",
+          installment1Amount: firstPaymentAmount,
+          installment2Amount: secondPaymentAmount,
+          unlockedLessons: normalizedUnlockedLessons,
+          courseTypeSelection: courseType,
+          totalLessons,
+          selectedModules: normalizedSelectedModules,
+          modulePrices: normalizedModulePrices,
+          twoWheelerRequirement: rtoPrototypeData.twoWheelerRequirement,
+          fourWheelerRequirement: rtoPrototypeData.fourWheelerRequirement,
+          rtoAddressChangeRequired: rtoPrototypeData.addressChangeRequired,
+        };
       }
-
-      if (courseType === "custom" && selectedModules.length === 0) {
-        toast({
-          title: "Error",
-          description: "Please select at least one module for custom course.",
-          variant: "destructive",
-        });
-        return;
-      }
-
-      // --- Email Validation Check ---
-      const isValidEmail = (email) => {
-        // Regex to check for a basic email structure (e.g., user@domain.com)
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        return emailRegex.test(email);
-      };
-      if (!isValidEmail(learnerData.email)) {
-        toast({
-          title: "Error",
-          description: "Invalid email address.",
-          variant: "destructive",
-        });
-        return;
-      }
-      if (learnerData.phone.length != 10) {
-        toast({
-          title: "Error",
-          description: "Invalid phone number",
-          variant: "destructive",
-        });
-        return;
-      }
-
-      // Build data to send based on course type
-      const dataToSend = { ...learnerData, modulePrices };
-
-      // Set course type specific data
-      dataToSend.courseTypeSelection = courseType;
-      dataToSend.totalLessons = totalLessons;
-      dataToSend.selectedModules = selectedModules;
-
-      // For predefined courses, use the selected course ID
-      if (courseType === "predefined") {
-        dataToSend.courseId = selectedCourseId;
-        const selectedCourse = PREDEFINED_COURSES.find(
-          (c) => c.id === selectedCourseId,
-        );
-        dataToSend.courseName = selectedCourse?.name || "";
-      } else if (courseType === "custom") {
-        // For custom courses, course_id is NULL in database
-        dataToSend.courseId = "";
-        dataToSend.courseName = courseName;
-      } else if (courseType === "demo") {
-        // For demo, course_id is NULL. Amount is whatever the admin entered
-        // (defaults to DEMO_CONFIG.price but is editable — no longer forced).
-        dataToSend.courseId = "";
-        dataToSend.courseName = "Demo Lesson";
-      }
-
-      // Set unlocked lessons - unlock 1 lesson for half_paid
-      if (dataToSend.unlockedLessons.length === 0) {
-        const unlockCount = 1;
-        dataToSend.unlockedLessons = Array.from(
-          { length: unlockCount },
-          (_, i) => i + 1,
-        );
-      }
-
-      // Relational attributes set
-      // Following attributes are derived from form data and set
-      // to render correct pages later
-      dataToSend.LL_received = dataToSend.has_a_DL ? true : false;
 
       // Close the dialog before sending to backend to disable multiple clicks
       setIsCreateLearnerDialogOpen(false); // Close the create learner dialog
 
       // send to backend
-      let responseData: any = null;
+      let responseData: CreateLearnerResponse | null = null;
 
       try {
         const response = await supabase.functions.invoke(
           "create-learner-and-enrollment",
           {
-            body: JSON.stringify(dataToSend),
+            body: payload,
           },
         );
 
@@ -499,27 +695,38 @@ export default function LearnerManagement() {
           throw new Error("Learner data missing from response");
         }
 
-        responseData = data;
-      } catch (error: any) {
+        responseData = data as CreateLearnerResponse;
+      } catch (error: unknown) {
         // Try to extract error message from the edge function error
         let errorMessage = "Failed to create learner";
+        const functionError = error as {
+          context?: { response?: unknown };
+          message?: unknown;
+        };
 
         // Check if context.response exists (Supabase FunctionsHttpError format)
-        if (error && error.context && error.context.response) {
+        if (functionError.context?.response) {
           try {
-            let errorData = error.context.response;
+            let errorData = functionError.context.response;
 
             if (typeof errorData === "string") {
               errorData = JSON.parse(errorData);
             }
 
-            if (errorData && errorData.error) {
+            if (
+              typeof errorData === "object" &&
+              errorData !== null &&
+              "error" in errorData &&
+              typeof errorData.error === "string"
+            ) {
               errorMessage = errorData.error;
             }
-          } catch (parseError) {}
-        } else if (error && error.message) {
+          } catch {
+            errorMessage = "Failed to read the server error response";
+          }
+        } else if (typeof functionError.message === "string") {
           // Fallback: Use the error message directly
-          errorMessage = error.message;
+          errorMessage = functionError.message;
         }
 
         throw new Error(errorMessage);
@@ -535,11 +742,15 @@ export default function LearnerManagement() {
 
         toast({
           title: "Success",
-          description: "Learner and enrollment created successfully!",
+          description:
+            caseType === "classes_only"
+              ? "Learner and enrollment created successfully!"
+              : "Learner and RTO details saved. No payment link was sent.",
         });
 
-        // Open payment dialog if enrollment was created
-        if (enrollmentId) {
+        // The existing payment page understands course/demo/custom enrollments
+        // only. Never send a partial course-only payment for an RTO case.
+        if (enrollmentId && caseType === "classes_only") {
           // Store enrollment ID in state for use when sending payment link
           setLearnerData((prev) => ({
             ...prev,
@@ -553,7 +764,7 @@ export default function LearnerManagement() {
           const paymentAmount =
             learnerData.installmentType === "installment"
               ? learnerData.installment1Amount
-              : learnerData.amount || dataToSend.amount;
+              : learnerData.amount || totalAmount;
           sendPaymentLink(
             {
               id: data.learner.id,
@@ -562,7 +773,7 @@ export default function LearnerManagement() {
               phone: learnerData.phone,
             },
             {
-              name: dataToSend.courseName,
+              name: submissionCourseName,
               duration: totalLessons,
             },
             paymentAmount,
@@ -596,11 +807,11 @@ export default function LearnerManagement() {
   };
 
   const sendPaymentLink = async (
-    learner,
-    course,
-    amount,
-    installmentMode,
-    enrollmentId,
+    learner: PaymentLinkLearner,
+    course: PaymentLinkCourse,
+    amount: number,
+    installmentMode: string,
+    enrollmentId: string,
     linkCourseType?: CourseType,
   ) => {
     // Close the payment dialog if it's open (for newly created learners)
@@ -667,7 +878,8 @@ export default function LearnerManagement() {
     } catch (err) {
       toast({
         title: "Error",
-        description: err.message || "Failed to send payment link",
+        description:
+          err instanceof Error ? err.message : "Failed to send payment link",
         variant: "destructive",
       });
     }
@@ -777,8 +989,61 @@ export default function LearnerManagement() {
                     className="col-span-3"
                   />
                 </div>
-                {/* Course Type Selection */}
                 <div className="grid grid-cols-4 items-center gap-4">
+                  <Label htmlFor="caseType" className="text-right">
+                    Case Type
+                  </Label>
+                  <Select
+                    onValueChange={(value: CaseType) =>
+                      handleCaseTypeChange(value)
+                    }
+                    value={caseType}
+                  >
+                    <SelectTrigger id="caseType" className="col-span-3">
+                      <SelectValue placeholder="Select case type" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="classes_only">Classes Only</SelectItem>
+                      <SelectItem value="rto_only">RTO Only</SelectItem>
+                      <SelectItem value="lessons_with_rto">
+                        RTO + Classes
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div
+                  className={`grid grid-cols-4 items-center gap-4 ${
+                    caseType === "rto_only" ? "hidden" : ""
+                  }`}
+                >
+                  <Label htmlFor="vehicleType" className="text-right">
+                    Vehicle Type
+                  </Label>
+                  <Select
+                    onValueChange={(value: VehicleType) =>
+                      setVehicleType(value)
+                    }
+                    value={vehicleType}
+                  >
+                    <SelectTrigger id="vehicleType" className="col-span-3">
+                      <SelectValue placeholder="Select vehicle" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {caseType !== "classes_only" && (
+                        <SelectItem value="two_wheeler">2-Wheeler</SelectItem>
+                      )}
+                      <SelectItem value="four_wheeler">4-Wheeler</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {/* Course Type Selection */}
+                <div
+                  className={`grid grid-cols-4 items-center gap-4 ${
+                    caseType === "rto_only" ? "hidden" : ""
+                  }`}
+                >
                   <Label htmlFor="courseType" className="text-right">
                     Course Type
                   </Label>
@@ -810,7 +1075,7 @@ export default function LearnerManagement() {
                     }}
                     value={courseType}
                   >
-                    <SelectTrigger className="col-span-3">
+                    <SelectTrigger id="courseType" className="col-span-3">
                       <SelectValue placeholder="Select course type" />
                     </SelectTrigger>
                     <SelectContent>
@@ -824,7 +1089,7 @@ export default function LearnerManagement() {
                 </div>
 
                 {/* Predefined Course Selection */}
-                {courseType === "predefined" && (
+                {caseType !== "rto_only" && courseType === "predefined" && (
                   <div className="grid grid-cols-4 items-center gap-4">
                     <Label htmlFor="courseId" className="text-right">
                       Select Course
@@ -858,7 +1123,7 @@ export default function LearnerManagement() {
                 )}
 
                 {/* Custom Course - Module Selection */}
-                {courseType === "custom" && (
+                {caseType !== "rto_only" && courseType === "custom" && (
                   <div className="grid grid-cols-4 items-start gap-4">
                     <Label className="pt-2 text-right">Select Modules</Label>
                     <div className="col-span-3 space-y-2">
@@ -917,7 +1182,7 @@ export default function LearnerManagement() {
                 )}
 
                 {/* Demo Course Info */}
-                {courseType === "demo" && (
+                {caseType !== "rto_only" && courseType === "demo" && (
                   <div className="grid grid-cols-4 items-center gap-4">
                     <Label className="text-right">Course Info</Label>
                     <div className="col-span-3">
@@ -929,7 +1194,7 @@ export default function LearnerManagement() {
                 )}
 
                 {/* Total Lessons Display */}
-                {totalLessons > 0 && (
+                {caseType !== "rto_only" && totalLessons > 0 && (
                   <div className="grid grid-cols-4 items-center gap-4">
                     <Label className="text-right">Total Lessons</Label>
                     <div className="col-span-3">
@@ -941,6 +1206,111 @@ export default function LearnerManagement() {
                     </div>
                   </div>
                 )}
+                {caseType !== "classes_only" && (
+                  <>
+                    <div className="grid grid-cols-4 items-center gap-4">
+                      <Label
+                        htmlFor="twoWheelerRequirement"
+                        className="text-right"
+                      >
+                        2-Wheeler Licence
+                      </Label>
+                      <Select
+                        onValueChange={(value: LicenceRequirement) =>
+                          handleLicenceRequirementChange(
+                            "twoWheelerRequirement",
+                            value,
+                          )
+                        }
+                        value={rtoPrototypeData.twoWheelerRequirement}
+                      >
+                        <SelectTrigger
+                          id="twoWheelerRequirement"
+                          className="col-span-3"
+                        >
+                          <SelectValue placeholder="Select requirement" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="ll">LL</SelectItem>
+                          <SelectItem value="dl">DL</SelectItem>
+                          <SelectItem value="ll_and_dl">LL and DL</SelectItem>
+                          <SelectItem value="not_required">
+                            Not Required
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="grid grid-cols-4 items-center gap-4">
+                      <Label
+                        htmlFor="fourWheelerRequirement"
+                        className="text-right"
+                      >
+                        4-Wheeler Licence
+                      </Label>
+                      <Select
+                        onValueChange={(value: LicenceRequirement) =>
+                          handleLicenceRequirementChange(
+                            "fourWheelerRequirement",
+                            value,
+                          )
+                        }
+                        value={rtoPrototypeData.fourWheelerRequirement}
+                      >
+                        <SelectTrigger
+                          id="fourWheelerRequirement"
+                          className="col-span-3"
+                        >
+                          <SelectValue placeholder="Select requirement" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="ll">LL</SelectItem>
+                          <SelectItem value="dl">DL</SelectItem>
+                          <SelectItem value="ll_and_dl">LL and DL</SelectItem>
+                          <SelectItem value="not_required">
+                            Not Required
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="grid grid-cols-4 items-center gap-4">
+                      <Label
+                        htmlFor="prototypeAddressChange"
+                        className="text-right"
+                      >
+                        Address Change
+                      </Label>
+                      <Select
+                        value={
+                          rtoPrototypeData.addressChangeRequired
+                            ? "required"
+                            : "not_required"
+                        }
+                        onValueChange={(value) =>
+                          setRtoPrototypeData((prev) => ({
+                            ...prev,
+                            addressChangeRequired: value === "required",
+                          }))
+                        }
+                      >
+                        <SelectTrigger
+                          id="prototypeAddressChange"
+                          className="col-span-3"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="required">Required</SelectItem>
+                          <SelectItem value="not_required">
+                            Not Required
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </>
+                )}
+
                 <div className="grid grid-cols-4 items-center gap-4">
                   <Label htmlFor="amount" className="text-right">
                     Amount (₹)
@@ -953,10 +1323,13 @@ export default function LearnerManagement() {
                     onChange={handleInputChange}
                     min={0}
                     className="col-span-3"
-                    onWheel={(e) => e.currentTarget.blur()}
-                    disabled={courseType === "custom"}
+                    onWheel={(event) => event.currentTarget.blur()}
+                    disabled={
+                      caseType === "classes_only" && courseType === "custom"
+                    }
                   />
                 </div>
+
                 {/* Hide installment options for demo courses */}
                 {courseType !== "demo" && (
                   <>
@@ -968,7 +1341,10 @@ export default function LearnerManagement() {
                         onValueChange={handleInstallmentTypeChange}
                         value={learnerData.installmentType}
                       >
-                        <SelectTrigger className="col-span-3">
+                        <SelectTrigger
+                          id="installmentType"
+                          className="col-span-3"
+                        >
                           <SelectValue placeholder="Select type" />
                         </SelectTrigger>
                         <SelectContent>
@@ -1035,40 +1411,39 @@ export default function LearnerManagement() {
                     placeholder={`Leave empty to unlock half the course`}
                   />
                 </div>
-                <div className="flex items-center space-x-2">
-                  <input
-                    type="checkbox"
-                    id="has_a_DL"
-                    name="has_a_DL"
-                    checked={learnerData.has_a_DL}
-                    onChange={handleInputChange}
-                  />
-                  <Label htmlFor="has_a_DL">Has a 4-wheeler license</Label>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <input
-                    type="checkbox"
-                    id="has_two_wheeler_license"
-                    name="has_two_wheeler_license"
-                    checked={learnerData.has_two_wheeler_license}
-                    onChange={handleInputChange}
-                  />
-                  <Label htmlFor="has_a_DL">
-                    Has a 2-wheeler license, not 4-wheeler
-                  </Label>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <input
-                    type="checkbox"
-                    id="address_change_required"
-                    name="address_change_required"
-                    checked={learnerData.address_change_required}
-                    onChange={handleInputChange}
-                  />
-                  <Label htmlFor="address_change_required">
-                    License address change required
-                  </Label>
-                </div>
+                {caseType === "classes_only" && (
+                  <>
+                    <div className="flex items-center space-x-2">
+                      <input
+                        type="checkbox"
+                        id="has_a_DL"
+                        name="has_a_DL"
+                        checked={learnerData.has_a_DL}
+                        onChange={handleInputChange}
+                      />
+                      <Label htmlFor="has_a_DL">Has a 4-wheeler license</Label>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      <input
+                        type="checkbox"
+                        id="has_two_wheeler_license"
+                        name="has_two_wheeler_license"
+                        checked={learnerData.has_two_wheeler_license}
+                        onChange={handleInputChange}
+                      />
+                      <Label htmlFor="has_two_wheeler_license">
+                        Has a 2-wheeler license, not 4-wheeler
+                      </Label>
+                    </div>
+                  </>
+                )}
+                {caseType !== "classes_only" && (
+                  <p className="text-center text-sm text-muted-foreground">
+                    RTO payment processing is not supported yet. This saves the
+                    learner and enrollment details, but no payment link will be
+                    created or sent.
+                  </p>
+                )}
                 <Button onClick={createLearnerAndEnrollment}>
                   Create Learner
                 </Button>
@@ -1092,6 +1467,7 @@ export default function LearnerManagement() {
                 </p>
                 <Button
                   onClick={() => {
+                    if (!learnerData.enrollmentId) return;
                     const paymentAmount =
                       learnerData.installmentType === "installment"
                         ? learnerData.installment1Amount
@@ -1114,6 +1490,7 @@ export default function LearnerManagement() {
                       courseType,
                     );
                   }}
+                  disabled={!learnerData.enrollmentId}
                 >
                   Send Payment Link
                 </Button>
