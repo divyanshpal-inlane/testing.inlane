@@ -70,9 +70,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const location = useLocation();
 
-  // Stores the short-lived JWT reset token returned by POST /auth/otp/verify (Go flow).
-  // Held in a ref so it persists across renders without triggering re-renders.
-  const goResetTokenRef = useRef<string | null>(null);
+  // Password-reset state is kept outside React state because it is only needed
+  // between the OTP verification and password update requests.
+  const passwordResetProviderRef = useRef<"go" | "supabase" | null>(null);
+  const passwordResetTokenRef = useRef<string | null>(null);
 
   useEffect(() => {
     // Check active sessions and sets the user
@@ -754,16 +755,58 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const invokePasswordResetFunction = async (body: Record<string, unknown>) => {
+    const { data, error } = await supabase.functions.invoke(
+      "password-reset-otp",
+      { body },
+    );
+
+    if (error) {
+      let message = "Unable to process the password reset. Please try again.";
+      const response = (error as { context?: Response }).context;
+
+      if (response) {
+        const errorBody = await response
+          .clone()
+          .json()
+          .catch(() => null);
+        message = errorBody?.error || errorBody?.message || message;
+      } else if (error.message) {
+        message = error.message;
+      }
+
+      throw new Error(message);
+    }
+
+    if (data?.error) throw new Error(data.error);
+    return data;
+  };
+
   const requestPasswordResetAlternative = async (
     phone: string,
     context?: "learner" | "instructor" | "admin",
   ) => {
-    // Normalize to last 10 digits — Go service expects 10-digit phone
-    const last10 = phone.replace(/\D/g, "").slice(-10);
-    console.log(
-      `[AUTH] Password reset OTP requested for phone: ${last10}, context: ${context || "auto-detect"}`,
-    );
+    const digits = phone.replace(/\D/g, "");
+    if (digits.length < 10) throw new Error("Enter a valid phone number.");
 
+    const last10 = digits.slice(-10);
+    passwordResetProviderRef.current = null;
+    passwordResetTokenRef.current = null;
+
+    // Learner and instructor records still use Supabase Auth. Generate, store,
+    // and send their OTP entirely in the Edge Function so no OTP or service-role
+    // credential is exposed in the browser.
+    if (context === "learner" || context === "instructor") {
+      await invokePasswordResetFunction({
+        action: "send_otp",
+        phone: last10,
+        context,
+      });
+      passwordResetProviderRef.current = "supabase";
+      return;
+    }
+
+    // Admin accounts are owned by the Go auth service.
     const res = await fetch(`${BACKEND_API}/auth/otp/request`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -777,7 +820,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       );
     }
 
-    console.log("[AUTH] ✅ OTP request accepted by Go service.");
+    passwordResetProviderRef.current = "go";
   };
 
   const verifyOtpAndResetPassword = async (
@@ -787,10 +830,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   ) => {
     const last10 = phone.replace(/\D/g, "").slice(-10);
 
-    if (!newPassword) {
-      // ── Step 1: Verify OTP → receive short-lived resetToken ──────────────
-      console.log("[AUTH] Verifying OTP via Go service for phone:", last10);
+    if (passwordResetProviderRef.current === "supabase") {
+      if (!newPassword) {
+        const data = await invokePasswordResetFunction({
+          action: "verify_otp",
+          phone: last10,
+          otp,
+        });
+        passwordResetTokenRef.current = data.resetToken;
+        return;
+      }
 
+      if (!passwordResetTokenRef.current) {
+        throw new Error("Reset session missing. Please verify your OTP again.");
+      }
+
+      await invokePasswordResetFunction({
+        action: "reset_password",
+        phone: last10,
+        resetToken: passwordResetTokenRef.current,
+        newPassword,
+      });
+      passwordResetProviderRef.current = null;
+      passwordResetTokenRef.current = null;
+      return;
+    }
+
+    if (passwordResetProviderRef.current !== "go") {
+      throw new Error("Please request a new OTP.");
+    }
+
+    if (!newPassword) {
       const res = await fetch(`${BACKEND_API}/auth/otp/verify`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -799,24 +869,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
-        if (res.status === 404) {
-          throw new Error("No user found with the provided phone number.");
-        }
         throw new Error(
           errBody.message || "The OTP is invalid, expired, or already used.",
         );
       }
 
       const data = await res.json();
-      goResetTokenRef.current = data.resetToken;
-      console.log("[AUTH] ✅ OTP verified. Reset token stored.");
+      passwordResetTokenRef.current = data.resetToken;
       return;
     }
 
-    // ── Step 2: Reset password using the stored resetToken ───────────────────
-    console.log("[AUTH] Resetting password via Go service for phone:", last10);
-
-    if (!goResetTokenRef.current) {
+    if (!passwordResetTokenRef.current) {
       throw new Error("Reset token missing. Please verify your OTP again.");
     }
 
@@ -824,25 +887,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${goResetTokenRef.current}`,
+        Authorization: `Bearer ${passwordResetTokenRef.current}`,
       },
       body: JSON.stringify({ newPassword }),
     });
 
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}));
-      if (res.status === 400) {
-        throw new Error(
-          errBody.message || "Password must be at least 6 characters.",
-        );
-      }
       throw new Error(
         errBody.message || "Failed to reset password. Please try again.",
       );
     }
 
-    goResetTokenRef.current = null;
-    console.log("[AUTH] ✅ Password reset successfully via Go service.");
+    passwordResetProviderRef.current = null;
+    passwordResetTokenRef.current = null;
   };
 
   const changePassword = async (
