@@ -141,8 +141,7 @@ async function resolveInstructor(
     .in("phone", variants);
   if (error) throw error;
   const row = data?.[0] as
-    | { id_instructor: string; name: string | null }
-    | undefined;
+    { id_instructor: string; name: string | null } | undefined;
   return row ? { id: row.id_instructor, name: row.name } : null;
 }
 

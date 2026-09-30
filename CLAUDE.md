@@ -160,8 +160,8 @@ Deployed manually: `supabase functions deploy <name>`
 | **Razorpay**            | Payment gateway                         | API key + webhook signature |
 | **ICICI Orange PG**     | Payment gateway (v2 HMAC-SHA256 signed) | MERCHANT_ID + SECRET_KEY    |
 | **Heltar**              | WhatsApp messaging (40+ templates)      | Bearer token                |
-| **Exotel**              | Learner↔Instructor masked calls        | Basic auth                  |
-| **MSG91**               | Instructor↔KAM click-to-call           | authkey header              |
+| **Exotel**              | Learner↔Instructor masked calls         | Basic auth                  |
+| **MSG91**               | Instructor↔KAM click-to-call            | authkey header              |
 | **Google Calendar API** | Instructor calendar sync                | OAuth2 + bearer token       |
 | **Google Maps**         | Address autocomplete + geocoding        | API key                     |
 | **Google Analytics 4**  | Event tracking (signups)                | Measurement Protocol        |

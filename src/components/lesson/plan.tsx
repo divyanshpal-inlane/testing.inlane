@@ -23,10 +23,9 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
-import { usePhoneVisibility } from "@/context/phone-visibility-context";
 import { COURSES_DATA } from "@/constants/courses";
+import { usePhoneVisibility } from "@/context/phone-visibility-context";
 import { numberToText } from "@/lib/utils";
-import { maskCarNumber } from "@/utils/phoneMasking";
 import {
   useLearner,
   useLearnerEnrollment,
@@ -34,6 +33,7 @@ import {
   useSchedule,
 } from "@/queries/learner";
 import { Database } from "@/types/database.types";
+import { maskCarNumber } from "@/utils/phoneMasking";
 
 import Signature from "./signature";
 
@@ -374,15 +374,15 @@ export function LessonPlan({
                     </p>
                   </div>
                   <div className="flex flex-col gap-0">
-                     <p className="text-sm font-light">Car Number</p>
-                     <p className="text-base">
-                       {schedule?.Instructor?.car_number
-                         ? canViewUnmaskedCarNumbers
-                           ? schedule?.Instructor?.car_number
-                           : maskCarNumber(schedule?.Instructor?.car_number)
-                         : "Not available"}
-                     </p>
-                   </div>
+                    <p className="text-sm font-light">Car Number</p>
+                    <p className="text-base">
+                      {schedule?.Instructor?.car_number
+                        ? canViewUnmaskedCarNumbers
+                          ? schedule?.Instructor?.car_number
+                          : maskCarNumber(schedule?.Instructor?.car_number)
+                        : "Not available"}
+                    </p>
+                  </div>
                   <div className="flex flex-col gap-0">
                     <p className="text-sm font-light">Pick Up location</p>
 

@@ -2,7 +2,6 @@ import { CircleCheckBig, ExternalLinkIcon } from "lucide-react";
 
 import { MaskedCallButton } from "@/components/MaskedCallButton";
 import { Button } from "@/components/ui/button";
-import { useUser } from "@/context/auth-context";
 import {
   Card,
   CardContent,
@@ -11,6 +10,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { LESSON_CONTENT } from "@/constants/Lesson";
+import { useUser } from "@/context/auth-context";
 
 interface ScheduleListProps {
   instructorData: any;

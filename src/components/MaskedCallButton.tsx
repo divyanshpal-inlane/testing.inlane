@@ -37,9 +37,7 @@ export function MaskedCallButton({
       ) : (
         <Phone size={14} />
       )}
-      <span className="ml-1.5">
-        {isCallLoading ? loadingLabel : label}
-      </span>
+      <span className="ml-1.5">{isCallLoading ? loadingLabel : label}</span>
     </Button>
   );
 }

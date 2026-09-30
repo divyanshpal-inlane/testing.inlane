@@ -25,7 +25,8 @@ const brushColors = {
 };
 
 export interface PaintedTextProps
-  extends React.HTMLAttributes<HTMLSpanElement>,
+  extends
+    React.HTMLAttributes<HTMLSpanElement>,
     VariantProps<typeof paintedTextVariants> {
   children: React.ReactNode;
 }

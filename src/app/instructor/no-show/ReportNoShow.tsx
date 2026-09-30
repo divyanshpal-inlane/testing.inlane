@@ -27,8 +27,7 @@ export default function ReportNoShow() {
   const { phone } = useUser();
   const { data: instructor } = useInstructor(phone ?? "");
   const instructorId = instructor?.instructorInfo?.id_instructor as
-    | string
-    | undefined;
+    string | undefined;
 
   const { data: lessons, isLoading } = useInstructorRecentLessons(instructorId);
   const report = useReportLearnerNoShow();

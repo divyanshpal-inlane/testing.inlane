@@ -50,9 +50,8 @@ serve(async (req) => {
       );
     }
 
-    const { createClient } = await import(
-      "https://esm.sh/@supabase/supabase-js@2.39.0"
-    );
+    const { createClient } =
+      await import("https://esm.sh/@supabase/supabase-js@2.39.0");
     const supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
 
     // Normalize phone to last 10 digits for reliable matching

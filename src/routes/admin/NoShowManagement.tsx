@@ -53,9 +53,7 @@ function loadedRows<T>(
 ): T[] {
   return Array.from(
     new Map(
-      (pages ?? [])
-        .flatMap((page) => page.rows)
-        .map((row) => [key(row), row]),
+      (pages ?? []).flatMap((page) => page.rows).map((row) => [key(row), row]),
     ).values(),
   );
 }
@@ -104,7 +102,8 @@ function LoadMoreCases({
         return;
       hasScrolledRef.current = true;
       const bounds = sentinel.getBoundingClientRect();
-      if (bounds.top <= window.innerHeight + 200 && bounds.bottom >= 0) loadMore();
+      if (bounds.top <= window.innerHeight + 200 && bounds.bottom >= 0)
+        loadMore();
     };
     // Opening a tab fetches only its first batch, even in a tall viewport.
     // A failed next-page request can be retried by scrolling again, without

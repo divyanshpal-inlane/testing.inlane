@@ -1623,7 +1623,24 @@ function Instructor() {
 
   if (instructorLoading) return <div>Loading...</div>;
   if (instructorError)
-    return <div>An error occurred: {instructorError.message}</div>;
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
+        <div>An error occurred: {instructorError.message}</div>
+        {/* This screen is only reachable with a stale/corrupt session, and
+            retrying the query cannot fix that. Offer a real way out instead
+            of a dead end. */}
+        <button
+          className="underline underline-offset-4"
+          onClick={() => {
+            void supabase.auth.signOut({ scope: "local" }).finally(() => {
+              window.location.href = "/instructor-login";
+            });
+          }}
+        >
+          Sign out and sign in again
+        </button>
+      </div>
+    );
 
   const handleLessonEndNavigation = async (
     learnerId: string,

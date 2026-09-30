@@ -1,12 +1,17 @@
+import { createClient } from "@supabase/supabase-js";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ArrowRight, Loader2, UserPlus } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
 import { supabaseAdmin } from "@/context/auth-context";
+import {
+  insertZone,
+  invalidateDbZoneCache,
+} from "@/lib/sales-dashboard/zones-db";
 import { supabase } from "@/lib/supabaseClient";
 
 import { StepIndicator } from "./StepIndicator";
@@ -33,10 +38,111 @@ interface ValidationResult {
   errors: string[];
 }
 
+const AUTH_LIST_PAGE_SIZE = 1000;
+const AUTH_LIST_MAX_PAGES = 20;
+
+/**
+ * Find an existing auth user by phone or email.
+ *
+ * `auth.admin.listUsers()` is paginated and defaults to a single page, so
+ * scanning only the first response silently misses most accounts. The admin
+ * account list is well past one page in production, which is how duplicate
+ * onboardings got past this check. Walk every page before concluding "free".
+ */
+const findExistingAuthUser = async (
+  phoneNumber: string,
+  email: string,
+): Promise<{ id: string; phone?: string; email?: string } | null> => {
+  const phoneDigits = phoneNumber.replace(/\D/g, "").slice(-10);
+  const normalizedEmail = email.trim().toLowerCase();
+
+  const matches = (u: { id: string; phone?: string; email?: string }) => {
+    const candidateDigits = (u.phone || "").replace(/\D/g, "").slice(-10);
+    if (phoneDigits.length === 10 && candidateDigits === phoneDigits) {
+      return true;
+    }
+    if (u.email && u.email.trim().toLowerCase() === normalizedEmail) {
+      return true;
+    }
+    return false;
+  };
+
+  for (let page = 1; page <= AUTH_LIST_MAX_PAGES; page++) {
+    const { data, error } = await supabaseAdmin.auth.admin.listUsers({
+      page,
+      perPage: AUTH_LIST_PAGE_SIZE,
+    });
+
+    if (error) {
+      // Fail closed: if the listing itself breaks we must not report "no
+      // duplicate" and then hit an opaque createUser conflict below.
+      throw new Error(
+        `Could not verify whether this phone/email is already registered: ${error.message}`,
+      );
+    }
+
+    const found = data?.users?.find(matches);
+    if (found) {
+      return {
+        id: found.id,
+        phone: found.phone ?? undefined,
+        email: found.email ?? undefined,
+      };
+    }
+
+    if (!data || data.users.length < AUTH_LIST_PAGE_SIZE) {
+      return null;
+    }
+  }
+
+  throw new Error(
+    "Could not verify whether this phone/email is already registered: too many auth users to scan.",
+  );
+};
+
+/**
+ * Sign-up fallback client, deliberately isolated from the shared `supabase`
+ * instance in `@/lib/supabaseClient`.
+ *
+ * The admin creating an instructor is signed in on the same browser tab. If
+ * sign-up runs on the shared client and returns a session, Supabase overwrites
+ * the admin's stored session with the new instructor's, `onAuthStateChange`
+ * fires SIGNED_IN, and the app navigates the admin into the instructor app as
+ * the freshly created user. That produced "Instructor not found" followed by a
+ * blank page requiring a fresh login. `persistSession: false` keeps the
+ * admin's session untouched.
+ */
+const createIsolatedSignUpClient = () =>
+  createClient(
+    import.meta.env.VITE_SUPABASE_URL,
+    import.meta.env.VITE_SUPABASE_ANON_KEY,
+    {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+      },
+    },
+  );
+
 export function OnboardingWizard() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+
+  /**
+   * Cleared on unmount. Submitting walks three tables in sequence, and a
+   * reload or navigation part-way through would otherwise leave the auth user
+   * behind with no Instructor row — the orphan that then blocked the next
+   * attempt with "an auth account already exists for this email".
+   */
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const [currentStep, setCurrentStep] = useState(1);
   const [formData, setFormData] = useState<InstructorOnboardingData>(
@@ -94,18 +200,8 @@ export function OnboardingWizard() {
         break;
 
       case 4: // Service Area
-        if (!formData.address.trim()) {
-          errors.push("Address is required");
-        }
-        if (!formData.latitude || !formData.longitude) {
-          errors.push("Please select a valid address from the dropdown");
-        }
-        if (!formData.radius || formData.radius < 1) {
-          errors.push("Service radius is required");
-        }
-        if (formData.areas.length === 0) {
-          errors.push("At least one serviceable area is required");
-        }
+        // The drawn polygon is the service area. Optional, so an instructor can
+        // still be onboarded before their coverage is mapped.
         break;
 
       case 5: // Unavailability
@@ -183,26 +279,18 @@ export function OnboardingWizard() {
       const userEmail = data.email || `${data.phone}@instructor.inlane.app`;
       console.log("Creating auth user for phone:", phoneNumber);
 
-      // First check if auth user already exists
-      try {
-        const { data: existingUsers } =
-          await supabaseAdmin.auth.admin.listUsers();
-        const existingUser = existingUsers?.users?.find(
-          (u) =>
-            u.phone === phoneNumber ||
-            u.phone === data.phone ||
-            u.email === userEmail,
+      // Check if auth user already exists. listUsers() is paginated, so page 1
+      // alone silently misses anyone past the first page — that false negative
+      // is what let a duplicate create through before.
+      const existingUser = await findExistingAuthUser(phoneNumber, userEmail);
+      if (existingUser) {
+        const matchedPhone = existingUser.phone
+          ? `phone ${existingUser.phone}`
+          : `email ${existingUser.email}`;
+        throw new Error(
+          `An auth account already exists for this ${matchedPhone} (User ID: ${existingUser.id}). ` +
+            `Delete that auth user (Auth → Users, or Admin → User Management) before onboarding this instructor again.`,
         );
-        if (existingUser) {
-          throw new Error(
-            `A user with this phone (${phoneNumber}) or email (${userEmail}) already exists in auth system. User ID: ${existingUser.id}`,
-          );
-        }
-      } catch (listError: any) {
-        if (listError.message?.includes("already exists")) {
-          throw listError;
-        }
-        console.warn("Could not check existing users:", listError);
       }
 
       // Try creating with phone using admin API
@@ -236,10 +324,11 @@ export function OnboardingWizard() {
         console.warn("Admin API exception:", err);
       }
 
-      // Method 2: Fallback to signUp with phone if admin fails
+      // Method 2: Fallback to signUp with phone if admin fails.
+      // Uses the isolated client so the admin's own session is never replaced.
       if (!authData?.user) {
         console.log("Trying signUp with phone...");
-        const signUpResult = await supabase.auth.signUp({
+        const signUpResult = await createIsolatedSignUpClient().auth.signUp({
           phone: phoneNumber,
           password: data.initialPassword,
           options: {
@@ -260,10 +349,10 @@ export function OnboardingWizard() {
         }
       }
 
-      // Method 3: Last resort - create with email only
+      // Method 3: Last resort - create with email only (isolated client)
       if (!authData?.user) {
         console.log("Trying signUp with email only...");
-        const emailResult = await supabase.auth.signUp({
+        const emailResult = await createIsolatedSignUpClient().auth.signUp({
           email: userEmail,
           password: data.initialPassword,
           options: {
@@ -285,40 +374,91 @@ export function OnboardingWizard() {
         }
       }
 
-      // If all auth methods fail, still create the instructor record
-      // The auth user can be created manually later
+      // Everything created in this run, so any later failure can unwind all of
+      // it. `auth.users` is Supabase's own identity store and cannot join a
+      // database transaction, and there is no FK from it to `Instructor` — the
+      // app joins the two on phone number. So atomicity has to be built by hand:
+      // either all three tables have a row for this instructor, or none do.
       let authUserId: string | null = null;
+      let createdInstructorId: string | null = null;
 
-      if (authData?.user) {
-        authUserId = authData.user.id;
-        console.log(
-          "Auth user created:",
-          authUserId,
-          "Phone login:",
-          createdWithPhone,
+      if (!authData?.user) {
+        // Previously this logged a warning and carried on, which produced the
+        // inverse orphan: an Instructor row that can never receive an OTP login
+        // because no auth identity exists for it. Fail loudly instead.
+        throw new Error(
+          `Could not create the login account for ${userEmail}` +
+            (authError?.message ? `: ${authError.message}` : ".") +
+            " Nothing was saved — fix the details above and try again.",
         );
-      } else {
-        console.warn(
-          "Auth user creation failed - creating instructor without auth account",
-        );
-        console.warn("Auth error:", authError?.message);
-        // Don't throw - continue to create instructor record
       }
 
-      // 4. Add new areas to Serviceable_Areas if needed
-      for (const area of data.areas) {
-        const { data: existingArea } = await supabase
-          .from("Serviceable_Areas")
-          .select("id, name")
-          .ilike("name", area)
-          .maybeSingle();
+      // Use a local const for the value we know is non-null here, so TS narrows.
+      // The `let` is kept for the unwind closure (it can be null if auth creation
+      // fails before this point, but that path throws above).
+      const newAuthUserId = authData.user.id;
+      authUserId = newAuthUserId;
+      console.log(
+        "Auth user created:",
+        newAuthUserId,
+        "Phone login:",
+        createdWithPhone,
+      );
 
-        if (!existingArea) {
-          await supabase.from("Serviceable_Areas").insert({ name: area });
+      /**
+       * Undoes everything this run created, newest first. The zone row goes
+       * with the instructor (`instructor_service_zones.instructor_id` is
+       * `ON DELETE CASCADE`), so it is not deleted separately.
+       */
+      const unwind = async () => {
+        if (createdInstructorId) {
+          const { error } = await supabase
+            .from("Instructor")
+            .delete()
+            .eq("id_instructor", createdInstructorId);
+          if (error) {
+            console.error("Unwind: instructor delete failed:", error.message);
+          } else {
+            console.log("Unwound instructor row:", createdInstructorId);
+          }
         }
+        if (authUserId) {
+          const { error } =
+            await supabaseAdmin.auth.admin.deleteUser(authUserId);
+          if (error) {
+            console.error("Unwind: auth delete failed:", error.message);
+          } else {
+            console.log("Unwound auth user:", authUserId);
+          }
+        }
+      };
+
+      // The email-only fallback (:341) leaves the `phone` column empty and only
+      // records the number in `user_metadata`, so that instructor could never
+      // sign in by phone — which is how the app resolves them. Pin the phone on
+      // the identity explicitly so all three creation paths agree.
+      if (authData.user.phone !== phoneNumber) {
+        const { error: phoneErr } =
+          await supabaseAdmin.auth.admin.updateUserById(newAuthUserId, {
+            phone: phoneNumber,
+            phone_confirm: true,
+          });
+        if (phoneErr) {
+          // Fatal, not a warning: the app resolves an instructor by phone, so
+          // an identity without one can never sign in. Better to leave nothing
+          // behind than a login that cannot work.
+          console.error("Could not set phone on auth user:", phoneErr.message);
+          await unwind();
+          throw new Error(
+            `That phone number could not be attached to the login account` +
+              (phoneErr.message ? `: ${phoneErr.message}` : ".") +
+              " Nothing was saved.",
+          );
+        }
+        createdWithPhone = true;
       }
 
-      // 5. Create Instructor record (only include columns that exist in the table)
+      // 4. Create Instructor record (only include columns that exist in the table)
       const instructorRecord: Record<string, any> = {
         name: data.name,
         phone: data.phone,
@@ -329,11 +469,6 @@ export function OnboardingWizard() {
         car_number: data.car_number,
         car_fuel_type: data.car_fuel_type,
         experience: data.experience || null,
-        address: data.address,
-        latitude: data.latitude,
-        longitude: data.longitude,
-        radius: data.radius,
-        areas: data.areas,
         unavailability: data.unavailability,
         enabled: true,
         signed_up: new Date().toISOString(),
@@ -360,20 +495,55 @@ export function OnboardingWizard() {
 
       if (instructorError) {
         console.error("Instructor insert error:", instructorError);
-
-        // Rollback: Try to delete the auth user if instructor creation fails
-        if (authUserId) {
-          try {
-            const deleteResult =
-              await supabaseAdmin.auth.admin.deleteUser(authUserId);
-            console.log("Rolled back auth user:", deleteResult);
-          } catch (rollbackError) {
-            console.error("Failed to rollback auth user:", rollbackError);
-          }
-        }
+        // Unwind the auth user, or it is stranded with no Instructor row — the
+        // exact orphan that blocked the next onboarding attempt.
+        await unwind();
         throw new Error(
-          `Failed to create instructor: ${instructorError.message}`,
+          `Failed to create instructor: ${instructorError.message}` +
+            " Nothing was saved.",
         );
+      }
+
+      createdInstructorId = newInstructor.id_instructor;
+
+      // The admin navigated away or reloaded while this was in flight. Unwind
+      // rather than leave a half-written set that nothing can complete later.
+      if (!mountedRef.current) {
+        await unwind();
+        throw new Error(
+          "Onboarding was cancelled before it finished, so nothing was saved. Please start again.",
+        );
+      }
+
+      // The service area polygon references instructor_id, so it can only be
+      // written after the Instructor row exists.
+      if (data.serviceZone && data.serviceZone.length >= 3) {
+        // insertZone, not upsert-on-instructor_id: the Instructor row was just
+        // created, so this is unambiguously their first and only polygon, and
+        // there is no existing row for a conflict target to resolve. Editing it
+        // later happens in the Zone Map or the Edit Details dialog.
+        try {
+          await insertZone({
+            instructorId: newInstructor.id_instructor,
+            coordinates: data.serviceZone,
+          });
+          // The sales dashboard caches instructor_service_zones at module
+          // scope, so drop it or the new zone goes unseen for the rest of
+          // this SPA session.
+          invalidateDbZoneCache();
+        } catch (zoneErr) {
+          // The polygon is optional, so an admin can always add the area later
+          // from the Zone Map — but leaving a half-written set behind is what
+          // this whole flow is meant to prevent, so unwind completely instead
+          // of reporting a partial success.
+          console.error("Service zone insert error:", zoneErr);
+          await unwind();
+          throw new Error(
+            "Failed to save the service area, so nothing was saved: " +
+              (zoneErr instanceof Error ? zoneErr.message : String(zoneErr)) +
+              ". Draw the area first, or leave it blank and add it later from the Zone Map.",
+          );
+        }
       }
 
       return {
@@ -383,7 +553,6 @@ export function OnboardingWizard() {
           email: userEmail,
           password: data.initialPassword,
           usePhoneLogin: createdWithPhone,
-          authCreated: !!authUserId,
         },
       };
     },
@@ -391,24 +560,14 @@ export function OnboardingWizard() {
       queryClient.invalidateQueries({ queryKey: ["instructors"] });
       queryClient.invalidateQueries({ queryKey: ["serviceable-areas"] });
 
-      if (!result.credentials.authCreated) {
-        // Auth user was not created - show warning
-        toast({
-          title: "Instructor Record Created",
-          description:
-            "WARNING: Login account could not be created due to Supabase auth error. Create auth user manually.",
-          variant: "destructive",
-        });
-      } else {
-        const loginMethod = result.credentials.usePhoneLogin
-          ? `Phone: +91${result.credentials.phone}`
-          : `Email: ${result.credentials.email}`;
+      const loginMethod = result.credentials.usePhoneLogin
+        ? `Phone: +91${result.credentials.phone}`
+        : `Email: ${result.credentials.email}`;
 
-        toast({
-          title: "Instructor Created Successfully!",
-          description: loginMethod,
-        });
-      }
+      toast({
+        title: "Instructor Created Successfully!",
+        description: loginMethod,
+      });
 
       // Copy credentials to clipboard
       const credentials = result.credentials.usePhoneLogin

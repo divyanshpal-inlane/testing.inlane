@@ -311,9 +311,7 @@ export function useEnrollmentTypesByLearner(learnerIds: string[]) {
       for (const e of data || []) {
         if (latestByLearner.has(e.learner_id)) continue;
         const progress = e.progress as
-          | { type?: string; total_hours?: number }
-          | null
-          | undefined;
+          { type?: string; total_hours?: number } | null | undefined;
         latestByLearner.set(e.learner_id, {
           type: progress?.type ?? (e.course_id ? "course" : null),
           hours: progress?.total_hours ?? null,

@@ -1,7 +1,6 @@
 import { ExternalLinkIcon } from "lucide-react";
 
 import { MaskedCallButton } from "@/components/MaskedCallButton";
-import { useUser } from "@/context/auth-context";
 import {
   Card,
   CardContent,
@@ -9,6 +8,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { useUser } from "@/context/auth-context";
 
 interface LessonListProps {
   instructorData: any;

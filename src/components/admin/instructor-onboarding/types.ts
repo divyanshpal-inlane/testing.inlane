@@ -1,5 +1,6 @@
 // Types for Instructor Onboarding Wizard
 
+import type { ZoneCoordinate } from "@/components/instructor-zones/types";
 import { ParsedCalendarEvent } from "@/utils/icsParser";
 
 export type IdProofType = "aadhar" | "pan" | "voter_id" | "passport";
@@ -47,12 +48,12 @@ export interface InstructorOnboardingData {
   car_fuel_type: CarFuelType | null;
   experience: number;
 
-  // Step 4: Service Area
-  address: string;
-  latitude: number | null;
-  longitude: number | null;
-  radius: number;
-  areas: string[];
+  // Step 4: Drawn service area polygon (saved to instructor_service_zones after
+  // the Instructor row exists, since zones reference instructor_id). One polygon
+  // per instructor, so this is a single ring rather than a list.
+  // address/latitude/longitude/radius/areas were removed from this step: the
+  // polygon is now the only service-area source of truth.
+  serviceZone: ZoneCoordinate[] | null;
 
   // Step 5: Unavailability
   unavailability: Unavailability[];
@@ -86,11 +87,7 @@ export const initialOnboardingData: InstructorOnboardingData = {
   experience: 0,
 
   // Step 4
-  address: "",
-  latitude: null,
-  longitude: null,
-  radius: 0,
-  areas: [],
+  serviceZone: null,
 
   // Step 5
   unavailability: [],

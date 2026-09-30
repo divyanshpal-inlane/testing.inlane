@@ -570,6 +570,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
               Customer Address *
             </label>
             <AddressAutocomplete
+              id="customerAddress"
               value={formData.customerAddress}
               onChange={(address) => set("customerAddress", address)}
               placeholder="Search address..."

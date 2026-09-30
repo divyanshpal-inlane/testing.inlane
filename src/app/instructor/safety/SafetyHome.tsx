@@ -76,8 +76,7 @@ export default function SafetyHome() {
   const { phone } = useUser();
   const { data: instructor } = useInstructor(phone ?? "");
   const instructorId = instructor?.instructorInfo?.id_instructor as
-    | string
-    | undefined;
+    string | undefined;
 
   const { data: incidents, isLoading } = useMySafetyIncidents(instructorId);
   const report = useReportSafetyIncident();

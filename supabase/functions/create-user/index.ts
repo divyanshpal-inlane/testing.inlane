@@ -107,9 +107,8 @@ serve(async (req) => {
         );
       }
 
-      const { createClient } = await import(
-        "https://esm.sh/@supabase/supabase-js@2.39.0"
-      );
+      const { createClient } =
+        await import("https://esm.sh/@supabase/supabase-js@2.39.0");
       const supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
 
       // Get the admin's permissions
@@ -190,9 +189,8 @@ serve(async (req) => {
     }
 
     // Import Supabase client inside try-catch
-    const { createClient } = await import(
-      "https://esm.sh/@supabase/supabase-js@2.39.0"
-    );
+    const { createClient } =
+      await import("https://esm.sh/@supabase/supabase-js@2.39.0");
     const supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
 
     // Create auth user with "user" role (created by admin for team members)

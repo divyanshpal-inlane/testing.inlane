@@ -668,14 +668,14 @@ export default function LLJourney() {
           },
           application?.status,
         ) && (
-        <LLExpiryWarning
-          application={application!}
-          expiryDays={expiryDays}
-          helpRequested={helpRequested}
-          pending={requestHelp.isPending}
-          onRequest={requestOnce}
-        />
-      )}
+          <LLExpiryWarning
+            application={application!}
+            expiryDays={expiryDays}
+            helpRequested={helpRequested}
+            pending={requestHelp.isPending}
+            onRequest={requestOnce}
+          />
+        )}
 
       <Button className="w-full py-3 text-lg" onClick={setPreferences}>
         Set Your Preferences

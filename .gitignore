@@ -54,3 +54,6 @@ OtherModule.md
 INFINITE_SCROLL_TEST_CHECKLIST.md
 E2E_TEST_REPORT.md
 pr_body.md
+# local dev server logs
+.devserver.log
+.devserver.err.log

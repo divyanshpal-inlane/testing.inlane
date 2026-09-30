@@ -40,16 +40,14 @@ import {
   validateOneHourBlock,
 } from "@/lib/sales-dashboard/availability";
 import {
+  isCompanyInstructor,
+  isCompanyInstructorId,
+} from "@/lib/sales-dashboard/company-instructors";
+import {
   bufferWaivedForCustomer,
   classifySlotConflict,
 } from "@/lib/sales-dashboard/conflict";
-import type { KmlZone } from "@/lib/sales-dashboard/kml";
-import {
-  fetchKmlData,
-  matchLocation,
-  normalizeName,
-  resolveInstructorName,
-} from "@/lib/sales-dashboard/kml";
+import { pointInPolygon } from "@/lib/sales-dashboard/kml";
 import {
   dateToWeekdayLower,
   minutesToTime,
@@ -58,6 +56,12 @@ import {
 } from "@/lib/sales-dashboard/validation";
 import type { InstructorWorkingHours } from "@/lib/sales-dashboard/workingHours";
 import { inferInstructorWorkingHours } from "@/lib/sales-dashboard/workingHours";
+import type { DbZone } from "@/lib/sales-dashboard/zones-db";
+import {
+  fetchCompanyInstructorIds,
+  fetchDbZones,
+  warnOnCompanyInstructorZones,
+} from "@/lib/sales-dashboard/zones-db";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentAdmin } from "@/queries/adminPermissions";
 import type { ReusableCustomer } from "@/queries/salesBookingCustomers";
@@ -986,8 +990,9 @@ export default function SalesDashboard() {
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
   const [theme, setTheme] = useState<"light" | "dark">(initialTheme);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [kmlZones, setKmlZones] = useState<KmlZone[] | null>(null);
-  const [kmlError, setKmlError] = useState<string | null>(null);
+  const [dbZones, setDbZones] = useState<DbZone[] | null>(null);
+  const [companyIds, setCompanyIds] = useState<Set<string> | null>(null);
+  const [zoneError, setZoneError] = useState<string | null>(null);
   const [locSearch, setLocSearch] = useState<{
     lat: number;
     lng: number;
@@ -1294,16 +1299,24 @@ export default function SalesDashboard() {
 
   useEffect(() => {
     let active = true;
-    void Promise.all([fetchKmlData(), loadInstructorIndex()])
-      .then(([zones]) => {
+    void Promise.all([
+      fetchDbZones(),
+      // Tolerant: resolves to an empty set until the is_company_instructor
+      // migration is applied, then becomes the rename-proof source of truth.
+      fetchCompanyInstructorIds(),
+      loadInstructorIndex(),
+    ])
+      .then(([zones, companyIds]) => {
         if (active) {
-          setKmlZones(zones);
-          setKmlError(null);
+          setDbZones(zones);
+          setCompanyIds(companyIds);
+          setZoneError(null);
+          warnOnCompanyInstructorZones(zones, companyIds);
         }
       })
       .catch((err: unknown) => {
         if (active)
-          setKmlError(err instanceof Error ? err.message : String(err));
+          setZoneError(err instanceof Error ? err.message : String(err));
       });
     return () => {
       active = false;
@@ -1376,9 +1389,21 @@ export default function SalesDashboard() {
 
   const pendingExpandRowId = isExpandTransitionPending ? pendingExpandId : null;
 
+  // Roster persistence is keyed by the account-scoped storage key, which only
+  // exists once useCurrentAdmin()/useCurrentUser() have resolved (that
+  // requires a network round trip to the get-current-user edge function).
+  // "Add instructor" used to call updateStoredRoster() directly, so clicking
+  // before that resolved was a SILENT no-op: the instructor appeared on the
+  // grid but was never written, and vanished on the next reload. Buffer the
+  // intent here and flush it as soon as the key becomes available.
+  const pendingRosterRef = useRef<{ id: string; shouldInclude: boolean }[]>([]);
+
   const updateStoredRoster = useCallback(
     (id: string, shouldInclude: boolean) => {
-      if (!rosterStorageKey) return;
+      if (!rosterStorageKey) {
+        pendingRosterRef.current.push({ id, shouldInclude });
+        return;
+      }
       try {
         const ids = new Set(
           parseStoredRoster(localStorage.getItem(rosterStorageKey)),
@@ -1397,6 +1422,16 @@ export default function SalesDashboard() {
     },
     [rosterStorageKey],
   );
+
+  useEffect(() => {
+    if (!rosterStorageKey) return;
+    const pending = pendingRosterRef.current;
+    if (pending.length === 0) return;
+    pendingRosterRef.current = [];
+    for (const { id, shouldInclude } of pending) {
+      updateStoredRoster(id, shouldInclude);
+    }
+  }, [rosterStorageKey, updateStoredRoster]);
 
   const addRosterInstructor = useCallback(
     (id: string) => {
@@ -1442,21 +1477,6 @@ export default function SalesDashboard() {
 
   const allInstructors = data?.allInstructors ?? EMPTY_LIGHT;
 
-  const dbNormNames = useMemo(() => {
-    const set = new Set<string>();
-    for (const i of allInstructors) set.add(normalizeName(i.name));
-    return set;
-  }, [allInstructors]);
-
-  const dbByName = useMemo(() => {
-    const map = new Map<string, LightInstructor>();
-    for (const i of allInstructors) {
-      const key = normalizeName(i.name);
-      if (!map.has(key)) map.set(key, i);
-    }
-    return map;
-  }, [allInstructors]);
-
   const instructorsById = useMemo(() => {
     const map = new Map<string, InstructorRow>();
     if (!data) return map;
@@ -1464,33 +1484,63 @@ export default function SalesDashboard() {
     return map;
   }, [data]);
 
-  const locMatch = useMemo(() => {
-    if (!locSearch || !kmlZones) return null;
-    const res = matchLocation(kmlZones, {
-      lat: locSearch.lat,
-      lng: locSearch.lng,
-    });
+  // Zones come from `instructor_service_zones`, which is already keyed by
+  // Instructor id, so a name match is exact by construction — the KML
+  // spelling-alias table is no longer needed on this read path.
+  const zoneIdByName = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const z of dbZones ?? [])
+      if (!map.has(z.name)) map.set(z.name, z.instructorId);
+    return map;
+  }, [dbZones]);
+
+  const locMatch = useMemo<{
+    ids: string[];
+    zones: string[];
+    via: "polygon" | "none";
+    zoneIds: Map<string, string>;
+  } | null>(() => {
+    if (!locSearch || !dbZones) return null;
+    // Polygon-only by design: an instructor matches when the searched point
+    // falls inside their `instructor_service_zones` polygon. There is no
+    // centroid/radius fallback — no zone row is a point, so it could never
+    // contribute a match.
+    // Company instructors are Ops-assigned backups and are skipped even if a
+    // zone is ever drawn for them. The `is_company_instructor` flag is
+    // authoritative; the name list covers the window before that migration is
+    // applied, and any zone whose Instructor.name changed. `z.name` is the
+    // authoritative `Instructor.name` (see zones-db.ts), not the KML spelling.
+    const names = dbZones
+      .filter(
+        (z) =>
+          !isCompanyInstructorId(z.instructorId, companyIds) &&
+          !isCompanyInstructor(z.name) &&
+          pointInPolygon({ lat: locSearch.lat, lng: locSearch.lng }, z.coords),
+      )
+      .map((z) => z.name);
     const ids: string[] = [];
-    const resolvedNames = new Map<string, string>();
-    for (const name of res.names) {
-      const resolved = resolveInstructorName(name, dbNormNames);
-      if (!resolved) continue;
-      const light = dbByName.get(resolved);
-      if (light && !ids.includes(light.id)) {
-        ids.push(light.id);
-        resolvedNames.set(name, light.id);
-      }
+    const zoneIds = new Map<string, string>();
+    for (const name of names) {
+      const id = zoneIdByName.get(name);
+      if (!id) continue;
+      zoneIds.set(name, id);
+      if (!ids.includes(id)) ids.push(id);
     }
-    return { ids, zones: res.names, via: res.via, resolvedNames };
-  }, [locSearch, kmlZones, dbNormNames, dbByName]);
+    return {
+      ids,
+      zones: names,
+      via: names.length ? "polygon" : "none",
+      zoneIds,
+    };
+  }, [locSearch, dbZones, companyIds, zoneIdByName]);
 
   useEffect(() => {
     if (locMatch && locMatch.ids.length > 0) loadInstructors(locMatch.ids);
   }, [locMatch, loadInstructors]);
 
   const locResult = useMemo(() => {
-    if (!locMatch || !kmlZones) return null;
-    const zoneByName = new Map(kmlZones.map((z) => [z.name, z]));
+    if (!locMatch || !dbZones) return null;
+    const zoneByName = new Map(dbZones.map((z) => [z.name, z]));
     const instrs: InstructorRow[] = [];
     const instrColors: Record<string, string> = {};
     const zoneInfo: Record<
@@ -1498,8 +1548,10 @@ export default function SalesDashboard() {
       { color: string; instructorName: string; rawName: string }
     > = {};
     for (const name of locMatch.zones) {
-      const lightId = locMatch.resolvedNames.get(name);
-      const instr = lightId ? instructorsById.get(lightId) : undefined;
+      const instructorId = locMatch.zoneIds.get(name);
+      const instr = instructorId
+        ? instructorsById.get(instructorId)
+        : undefined;
       if (!instr) continue;
       let color = instrColors[instr.id];
       if (!color) {
@@ -1520,7 +1572,7 @@ export default function SalesDashboard() {
       instrColors,
       zoneInfo,
     };
-  }, [locMatch, kmlZones, instructorsById]);
+  }, [locMatch, dbZones, instructorsById]);
 
   const rowColors = useMemo(
     () => new Map(Object.entries(locResult?.instrColors ?? {})),
@@ -1529,10 +1581,10 @@ export default function SalesDashboard() {
 
   const locStatus: LocateStatus = useMemo(() => {
     if (!locSearch) return "idle";
-    if (kmlZones === null) return "loading";
+    if (dbZones === null) return "loading";
     if (locResult && locResult.instrs.length > 0) return "found";
     return "none";
-  }, [locSearch, kmlZones, locResult]);
+  }, [locSearch, dbZones, locResult]);
 
   const toggleSelectRow = useCallback((id: string) => {
     setSelectedRows((prev) => {
@@ -2129,9 +2181,7 @@ export default function SalesDashboard() {
       const timeLabel = `${minutesToTime(minute)}–${minutesToTime(minute + (config?.gridMinutes ?? 30))}`;
 
       const unavail = (instr?.unavailability ?? null) as
-        | unknown[]
-        | null
-        | undefined;
+        unknown[] | null | undefined;
       const weekday = dateToWeekdayLower(date);
       const blockedByUnavail =
         unavail != null && isTimeUnavailable(unavail, date, weekday, minute);
@@ -2743,8 +2793,8 @@ export default function SalesDashboard() {
 
         <Suspense fallback={null}>
           <LocationSearch
-            zones={kmlZones}
-            zonesError={kmlError}
+            zones={dbZones}
+            zonesError={zoneError}
             status={locStatus}
             resultLabel={locSearch?.label ?? null}
             point={

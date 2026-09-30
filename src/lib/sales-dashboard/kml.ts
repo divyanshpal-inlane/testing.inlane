@@ -104,21 +104,12 @@ export function haversineKm(a: GeoPoint, b: GeoPoint): number {
   return 6371 * 2 * Math.asin(Math.sqrt(h));
 }
 
+// Spelling variants between the KML placemark names and Instructor.name.
+// Keys are normalizeName()d KML names, values are normalizeName()d DB names.
 const KML_ALIASES: Record<string, string> = {
-  "abhishek n.c": "abhishek",
-  suraj: "mohammed hassan (suraj)",
-  "mohammed imran a": "mohammed imran a(hsr)",
-  "a sagar rao bhonsela": "a sagar rao",
-  "vinod kumara b": "vinod kumar",
-  "vinod kumara": "vinod kumar",
-  adnan: "adnan shama",
-  "adnan yunus shama": "adnan shama",
-  nirmal: "nirmal s",
-  vamsi: "y vamsi krishna",
   "niteesh reddy": "nitheesh reddy",
-  "ravi kumar bs": "ravi kumar b s",
-  iftekar: "iftekhar",
-  "bhanu sir": "bhanu prakash",
+  // KML spells the initials out: "Mohan Kumar K S" -> "mohan kumar k s"
+  "mohan kumar k s": "mohan kumar ks",
 };
 
 export function resolveInstructorName(

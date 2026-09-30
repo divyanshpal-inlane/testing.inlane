@@ -2304,9 +2304,7 @@ function PaymentPlanEditor({
   const createAudit = useCreateEnrollmentPlanAudit();
   const { data: currentUser } = useCurrentUser();
   const editor = currentUser as
-    | { id?: string; name?: string; phone?: string }
-    | null
-    | undefined;
+    { id?: string; name?: string; phone?: string } | null | undefined;
 
   const enrollment = enrollments[0];
   const linkedCourse = (enrollment as any)?.Courses;

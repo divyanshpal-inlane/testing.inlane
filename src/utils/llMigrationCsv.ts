@@ -4,10 +4,7 @@
 import { COURSES_DATA } from "@/constants/courses";
 
 export type LLStage =
-  | "has_ll"
-  | "passed_waiting"
-  | "appointment_booked"
-  | "not_started";
+  "has_ll" | "passed_waiting" | "appointment_booked" | "not_started";
 
 export const LL_STAGES: LLStage[] = [
   "has_ll",

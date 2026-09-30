@@ -277,10 +277,7 @@ export default function CustomerInfo() {
   // Helper to format "due since" for a given date
   function getDateTimestamp(
     dayTimestampOrSchedule:
-      | string
-      | { date?: string; start_time?: string }
-      | null
-      | undefined,
+      string | { date?: string; start_time?: string } | null | undefined,
     hourTimestamp?: string | null,
   ): number | null {
     if (!dayTimestampOrSchedule) return null;
@@ -339,10 +336,7 @@ export default function CustomerInfo() {
 
   function formatDueSince(
     dayTimestampOrSchedule:
-      | string
-      | { date?: string; start_time?: string }
-      | null
-      | undefined,
+      string | { date?: string; start_time?: string } | null | undefined,
     hourTimestamp?: string | null,
     pendingText = "Lesson Pending",
   ): string {
@@ -364,10 +358,7 @@ export default function CustomerInfo() {
   // returns a number (number of hours) or null if invalid date
   function getHoursSince(
     dayTimestampOrSchedule:
-      | string
-      | { date?: string; start_time?: string }
-      | null
-      | undefined,
+      string | { date?: string; start_time?: string } | null | undefined,
     hourTimestamp?: string | null,
   ): number | null {
     const ts = getDateTimestamp(dayTimestampOrSchedule, hourTimestamp);

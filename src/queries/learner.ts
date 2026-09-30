@@ -73,8 +73,8 @@ export function useLearnerId() {
   const { phone } = useUser();
 
   const learnerData:
-    | Database["public"]["Tables"]["Learner"]["Row"]
-    | undefined = queryClient.getQueryData(["learner", phone]);
+    Database["public"]["Tables"]["Learner"]["Row"] | undefined =
+    queryClient.getQueryData(["learner", phone]);
 
   if (!learnerData) {
     throw new Error("Learner data not found in cache");

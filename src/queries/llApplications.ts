@@ -129,13 +129,11 @@ export const LL_PIPELINE_PAGE_SIZE = 15;
 export function normalizeLLPipelineFilters(
   filters: LLPipelineFilters,
 ): LLPipelineFilters {
-  const stages = [...new Set(filters.stages.map((s) => s.trim()).filter(Boolean))];
+  const stages = [
+    ...new Set(filters.stages.map((s) => s.trim()).filter(Boolean)),
+  ];
   let next: LLPipelineFilters = { ...filters, stages };
-  if (
-    next.dateFrom &&
-    next.dateTo &&
-    next.dateFrom > next.dateTo
-  ) {
+  if (next.dateFrom && next.dateTo && next.dateFrom > next.dateTo) {
     next = {
       ...next,
       dateFrom: next.dateTo,
@@ -241,8 +239,7 @@ function applyLLPipelineStatusFilter(
     phases,
     escalationsOnly,
   );
-  const phaseStatuses =
-    phases.length > 0 ? llStatusesForPhases(phases) : null;
+  const phaseStatuses = phases.length > 0 ? llStatusesForPhases(phases) : null;
 
   if (!escalationsOnly && !phaseStatuses && stageFilter.length === 0) {
     return query;
@@ -261,10 +258,7 @@ function applyLLPipelineStatusFilter(
   // Escalations scope: escalated flag and/or failure statuses, optionally
   // narrowed by phase and/or explicit stage multi-select.
   const baseScope = phaseStatuses ?? ALL_LL_PIPELINE_STATUSES;
-  const scoped =
-    stageFilter.length > 0
-      ? stageFilter
-      : baseScope;
+  const scoped = stageFilter.length > 0 ? stageFilter : baseScope;
 
   if (scoped.length === 0) {
     return query.in("status", ["__ll_pipeline_no_match__"]);

@@ -1,10 +1,5 @@
 export type UtilizationBucket =
-  | "off"
-  | "low"
-  | "medium"
-  | "high"
-  | "full"
-  | "overbooked";
+  "off" | "low" | "medium" | "high" | "full" | "overbooked";
 
 export interface UtilizationStyle {
   bucket: UtilizationBucket;

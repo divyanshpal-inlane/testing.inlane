@@ -21,12 +21,7 @@ export const mailtoHref = (subject?: string) =>
 
 // Ticket categories — must match the support_ticket.category CHECK constraint.
 export type TicketCategory =
-  | "learner"
-  | "vehicle"
-  | "payment"
-  | "app"
-  | "rto"
-  | "other";
+  "learner" | "vehicle" | "payment" | "app" | "rto" | "other";
 
 export const TICKET_CATEGORIES: { value: TicketCategory; label: string }[] = [
   { value: "learner", label: "Learner issue" },

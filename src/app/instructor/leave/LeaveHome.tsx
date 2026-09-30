@@ -56,8 +56,7 @@ export default function LeaveHome() {
   const { phone } = useUser();
   const { data: instructor } = useInstructor(phone ?? "");
   const instructorId = instructor?.instructorInfo?.id_instructor as
-    | string
-    | undefined;
+    string | undefined;
 
   const { data: requests, isLoading } = useMyLeaveRequests(instructorId);
   const createLeave = useCreateLeaveRequest();

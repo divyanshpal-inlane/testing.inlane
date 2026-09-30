@@ -128,7 +128,8 @@ export function useInstructorPerformance(
           .select("id, instructor_id")
           .in("id", missingIds)
           .abortSignal(signal);
-        for (const s of extra ?? []) instructorBySchedule.set(s.id, s.instructor_id);
+        for (const s of extra ?? [])
+          instructorBySchedule.set(s.id, s.instructor_id);
       }
 
       // Attribute each learner's feedback to the instructor who taught them

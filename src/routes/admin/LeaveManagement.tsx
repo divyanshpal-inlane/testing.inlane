@@ -336,7 +336,9 @@ export default function LeaveManagement() {
   } = useAllLeaveRequests({
     status: statusFilter === "all" ? undefined : statusFilter,
   });
-  const [selected, setSelected] = useState<LeaveRequestWithInstructor | null>(null);
+  const [selected, setSelected] = useState<LeaveRequestWithInstructor | null>(
+    null,
+  );
   const { data: selectedRequest } = useLeaveRequest(selected?.id);
   const { data: pendingCount = 0 } = usePendingLeaveRequestCount();
   const { toast } = useToast();
@@ -390,7 +392,10 @@ export default function LeaveManagement() {
       if (bounds.top <= window.innerHeight + 200 && bounds.bottom >= 0)
         loadMore();
     };
-    window.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    window.addEventListener("scroll", onScroll, {
+      capture: true,
+      passive: true,
+    });
     observer.observe(sentinel);
     return () => {
       observer.disconnect();

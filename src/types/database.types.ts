@@ -576,8 +576,7 @@ export type Database = {
           address: string | null;
           areas: string[];
           car_fuel_type:
-            | Database["public"]["Enums"]["car_fuel_type_new"]
-            | null;
+            Database["public"]["Enums"]["car_fuel_type_new"] | null;
           car_license: string | null;
           car_make: string | null;
           car_mode: string | null;
@@ -588,6 +587,7 @@ export type Database = {
           enabled: boolean | null;
           experience: number | null;
           id_instructor: string;
+          is_company_instructor: boolean;
           latitude: number | null;
           longitude: number | null;
           name: string | null;
@@ -602,8 +602,7 @@ export type Database = {
           address?: string | null;
           areas?: string[];
           car_fuel_type?:
-            | Database["public"]["Enums"]["car_fuel_type_new"]
-            | null;
+            Database["public"]["Enums"]["car_fuel_type_new"] | null;
           car_license?: string | null;
           car_make?: string | null;
           car_mode?: string | null;
@@ -614,6 +613,7 @@ export type Database = {
           enabled?: boolean | null;
           experience?: number | null;
           id_instructor?: string;
+          is_company_instructor?: boolean;
           latitude?: number | null;
           longitude?: number | null;
           name?: string | null;
@@ -628,8 +628,7 @@ export type Database = {
           address?: string | null;
           areas?: string[];
           car_fuel_type?:
-            | Database["public"]["Enums"]["car_fuel_type_new"]
-            | null;
+            Database["public"]["Enums"]["car_fuel_type_new"] | null;
           car_license?: string | null;
           car_make?: string | null;
           car_mode?: string | null;
@@ -640,6 +639,7 @@ export type Database = {
           enabled?: boolean | null;
           experience?: number | null;
           id_instructor?: string;
+          is_company_instructor?: boolean;
           latitude?: number | null;
           longitude?: number | null;
           name?: string | null;
@@ -1240,6 +1240,39 @@ export type Database = {
         };
         Relationships: [];
       };
+      instructor_service_zones: {
+        Row: {
+          coordinates: Json;
+          created_at: string;
+          description: string | null;
+          id: string;
+          instructor_id: string;
+          kind: string;
+          raw_name: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          coordinates: Json;
+          created_at?: string;
+          description?: string | null;
+          id?: string;
+          instructor_id: string;
+          kind?: string;
+          raw_name?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          coordinates?: Json;
+          created_at?: string;
+          description?: string | null;
+          id?: string;
+          instructor_id?: string;
+          kind?: string;
+          raw_name?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       [_ in never]: never;
@@ -1255,7 +1288,7 @@ export type Database = {
         };
         Returns: Json;
       };
-            get_earnings_instructors: {
+      get_earnings_instructors: {
         Args: { p_search?: string };
         Returns: {
           id_instructor: string;
@@ -1287,24 +1320,24 @@ export type Database = {
       get_car_lead_areas: {
         Args: Record<PropertyKey, never>;
         Returns: { area: string }[];
-       };
+      };
       get_leave_requests_paginated: {
         Args: { p_status: string; p_offset: number; p_limit: number };
         Returns: Database["public"]["Tables"]["instructor_leave_request"]["Row"][];
       };
       get_tentative_customers_paginated: {
         Args: { p_start_date: string; p_search?: string; p_page?: number };
-                Returns: Json;
+        Returns: Json;
       };
-get_daily_notification_schedules: {
-  Args: {
-    schedule_date: string;
-    recipient_tab?: string;
-    search_term?: string;
-    page_number?: number;
-  };
-  Returns: Json;
-};
+      get_daily_notification_schedules: {
+        Args: {
+          schedule_date: string;
+          recipient_tab?: string;
+          search_term?: string;
+          page_number?: number;
+        };
+        Returns: Json;
+      };
 
       get_instructors_by_performance: {
         Args: {
@@ -1458,10 +1491,7 @@ get_daily_notification_schedules: {
       enrollment_status: "pending" | "active" | "completed" | "cancelled";
       payment_type: "course" | "reschedule";
       reschedule_request_status:
-        | "pending_payment"
-        | "pending"
-        | "completed"
-        | "cancelled";
+        "pending_payment" | "pending" | "completed" | "cancelled";
       reschedule_request_type: "new" | "reschedule" | "lesson10";
       time_slot: "6-9" | "9-12" | "12-15" | "15-18" | "18-21";
       type: "new" | "reschedule" | "lesson10";
@@ -1478,10 +1508,10 @@ export type Tables<
   PublicTableNameOrOptions extends
     | keyof (PublicSchema["Tables"] & PublicSchema["Views"])
     | { schema: keyof Database },
-  TableName extends PublicTableNameOrOptions extends { schema: keyof Database }
+  TableName extends (PublicTableNameOrOptions extends { schema: keyof Database }
     ? keyof (Database[PublicTableNameOrOptions["schema"]]["Tables"] &
         Database[PublicTableNameOrOptions["schema"]]["Views"])
-    : never = never,
+    : never) = never,
 > = PublicTableNameOrOptions extends { schema: keyof Database }
   ? (Database[PublicTableNameOrOptions["schema"]]["Tables"] &
       Database[PublicTableNameOrOptions["schema"]]["Views"])[TableName] extends {
@@ -1501,11 +1531,10 @@ export type Tables<
 
 export type TablesInsert<
   PublicTableNameOrOptions extends
-    | keyof PublicSchema["Tables"]
-    | { schema: keyof Database },
-  TableName extends PublicTableNameOrOptions extends { schema: keyof Database }
+    keyof PublicSchema["Tables"] | { schema: keyof Database },
+  TableName extends (PublicTableNameOrOptions extends { schema: keyof Database }
     ? keyof Database[PublicTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = PublicTableNameOrOptions extends { schema: keyof Database }
   ? Database[PublicTableNameOrOptions["schema"]]["Tables"][TableName] extends {
       Insert: infer I;
@@ -1522,11 +1551,10 @@ export type TablesInsert<
 
 export type TablesUpdate<
   PublicTableNameOrOptions extends
-    | keyof PublicSchema["Tables"]
-    | { schema: keyof Database },
-  TableName extends PublicTableNameOrOptions extends { schema: keyof Database }
+    keyof PublicSchema["Tables"] | { schema: keyof Database },
+  TableName extends (PublicTableNameOrOptions extends { schema: keyof Database }
     ? keyof Database[PublicTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = PublicTableNameOrOptions extends { schema: keyof Database }
   ? Database[PublicTableNameOrOptions["schema"]]["Tables"][TableName] extends {
       Update: infer U;
@@ -1543,11 +1571,10 @@ export type TablesUpdate<
 
 export type Enums<
   PublicEnumNameOrOptions extends
-    | keyof PublicSchema["Enums"]
-    | { schema: keyof Database },
-  EnumName extends PublicEnumNameOrOptions extends { schema: keyof Database }
+    keyof PublicSchema["Enums"] | { schema: keyof Database },
+  EnumName extends (PublicEnumNameOrOptions extends { schema: keyof Database }
     ? keyof Database[PublicEnumNameOrOptions["schema"]]["Enums"]
-    : never = never,
+    : never) = never,
 > = PublicEnumNameOrOptions extends { schema: keyof Database }
   ? Database[PublicEnumNameOrOptions["schema"]]["Enums"][EnumName]
   : PublicEnumNameOrOptions extends keyof PublicSchema["Enums"]

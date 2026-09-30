@@ -5,8 +5,8 @@ import { MaskedCallButton } from "@/components/MaskedCallButton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { usePhoneVisibility } from "@/context/phone-visibility-context";
 import { useLearner } from "@/queries/learner";
-import { maskCarNumber } from "@/utils/phoneMasking";
 import { Database } from "@/types/database.types";
+import { maskCarNumber } from "@/utils/phoneMasking";
 
 type ScheduleType = "course" | "demo" | "topup";
 
@@ -98,15 +98,15 @@ export function SessionDetails({
             <p className="text-sm font-light">Instructor Name</p>
             <p className="text-sm font-medium">{instructor.name}</p>
           </div>
-            <div className="flex flex-col gap-1">
-              <p className="text-sm font-light">Call Instructor</p>
-              <MaskedCallButton
-                callerPhone={data?.phone}
-                calleePhone={instructor.phone}
-                label="Call Now"
-                className="flex w-fit items-center gap-1.5 text-sm font-medium"
-              />
-            </div>
+          <div className="flex flex-col gap-1">
+            <p className="text-sm font-light">Call Instructor</p>
+            <MaskedCallButton
+              callerPhone={data?.phone}
+              calleePhone={instructor.phone}
+              label="Call Now"
+              className="flex w-fit items-center gap-1.5 text-sm font-medium"
+            />
+          </div>
           <div className="flex flex-col gap-0">
             <p className="text-sm font-light">Car Model</p>
             <p className="text-sm font-medium">{instructor.car_make}</p>

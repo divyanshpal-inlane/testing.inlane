@@ -1,9 +1,12 @@
 // Pure availability engine for direct slot booking. No Deno imports — mirrors
-// the web-app's instructor matching (enabled gate + area/radius) and
-// isTimeUnavailable() semantics, expressed in integer minutes for determinism.
+// the web-app's instructor matching (enabled gate + service-area polygon, with
+// legacy area/radius fallback) and isTimeUnavailable() semantics, expressed in
+// integer minutes for determinism.
 // Ported from supabase/functions/_shared/availability.ts (direct-booking
 // backend) for client-side, read-only display in the sales dashboard.
 
+import { isCompanyInstructor } from "./company-instructors";
+import { type GeoPoint, pointInPolygon } from "./kml";
 import { dateToWeekdayLower, minutesToTime, timeToMinutes } from "./validation";
 
 // ---------------------------------------------------------------------------
@@ -12,11 +15,31 @@ import { dateToWeekdayLower, minutesToTime, timeToMinutes } from "./validation";
 
 export interface InstructorLike {
   id: string;
+  /** Service-area polygon ring from instructor_service_zones.coordinates.
+   *  Stored closed (first point repeated last). Takes precedence over the
+   *  legacy fields below. */
+  zone?: GeoPoint[] | null;
+  /** @deprecated legacy name-list coverage, superseded by `zone`. */
   areas?: string[] | null;
+  /** @deprecated legacy radius coverage, superseded by `zone`. */
   radiusKm?: number | null;
+  /** @deprecated legacy centroid latitude, superseded by `zone`. */
   lat?: number | null;
+  /** @deprecated legacy centroid longitude, superseded by `zone`. */
   lng?: number | null;
   gender?: string | null;
+  /** Instructor display name. Used to exclude company instructors (Ops-assigned
+   *  backups) from automatic area matching — see company-instructors.ts. */
+  name?: string | null;
+  /** `Instructor.is_company_instructor` — authoritative, rename-proof. No caller
+   *  in this repo populates it yet: the live matching path is
+   *  `SalesDashboard.locMatch`, which filters by the DB ids from
+   *  `fetchCompanyInstructorIds()`, and this engine is currently unreferenced.
+   *  Select the column when wiring a caller that does need this guard — but
+   *  note `useSalesData`'s Instructor select already omits `gender` because a
+   *  bad column makes PostgREST reject the whole query (400), so verify the
+   *  column exists before adding it. `name` remains the fallback. */
+  isCompany?: boolean | null;
   status?: string | null; // 'active' | 'on_break' | 'inactive'
   enabled?: boolean | null;
   unavailability?: unknown[] | null;
@@ -107,6 +130,39 @@ export function isFemale(gender?: string | null): boolean {
   return g === "female" || g === "f";
 }
 
+/** Rings are stored closed (first point repeated last, KML convention). The
+ *  duplicate closing vertex is harmless for ray-casting but stripping it keeps
+ *  the scan tight and avoids a degenerate final edge. */
+function stripClosure(ring: GeoPoint[]): GeoPoint[] {
+  if (ring.length < 4) return ring;
+  const first = ring[0];
+  const last = ring[ring.length - 1];
+  const isClosed = first.lat === last.lat && first.lng === last.lng;
+  return isClosed ? ring.slice(0, -1) : ring;
+}
+
+/** Ray-casting point-in-polygon against the instructor's drawn service area. */
+function zoneContainsPoint(
+  instructor: InstructorLike,
+  learner?: { lat?: number | null; lng?: number | null } | null,
+): boolean {
+  const ring = instructor.zone;
+  if (!Array.isArray(ring) || ring.length < 3) return false;
+  if (
+    !learner ||
+    typeof learner.lat !== "number" ||
+    typeof learner.lng !== "number"
+  ) {
+    return false;
+  }
+  return pointInPolygon(
+    { lat: learner.lat, lng: learner.lng },
+    stripClosure(ring),
+  );
+}
+
+/** @deprecated legacy name-list matching, kept for instructors not yet
+ *  migrated to a polygon. */
 function hasArea(instructor: InstructorLike, learnerArea: string): boolean {
   const target = learnerArea.trim().toLowerCase();
   if (!target) return false;
@@ -115,6 +171,8 @@ function hasArea(instructor: InstructorLike, learnerArea: string): boolean {
   );
 }
 
+/** @deprecated legacy centroid+radius matching, kept for instructors not yet
+ *  migrated to a polygon. */
 function withinRadius(
   instructor: InstructorLike,
   learner?: { lat?: number | null; lng?: number | null } | null,
@@ -145,6 +203,12 @@ export function instructorServesArea(
   learnerArea: string,
   learner?: { lat?: number | null; lng?: number | null } | null,
 ): boolean {
+  // Company instructors are Ops-assigned backups: never auto-match them, even
+  // though they carry legacy `areas`/`radius` values in the Instructor table.
+  if (instructor.isCompany === true) return false;
+  if (isCompanyInstructor(instructor.name)) return false;
+  // Polygon first: once an instructor has a drawn zone it is authoritative.
+  if (zoneContainsPoint(instructor, learner)) return true;
   return hasArea(instructor, learnerArea) || withinRadius(instructor, learner);
 }
 
@@ -616,6 +680,7 @@ export function pickBestInstructor(
   const area = opts.learnerArea.trim().toLowerCase();
 
   const scored = pool.map((i) => {
+    const zoneMatch = zoneContainsPoint(i, opts.learner);
     const areaMatch = (i.areas || []).some(
       (a) => typeof a === "string" && a.trim().toLowerCase() === area,
     );
@@ -633,10 +698,11 @@ export function pickBestInstructor(
       );
     }
     const load = opts.loadById ? (opts.loadById[i.id] ?? 0) : 0;
-    return { i, areaMatch, distance, load };
+    return { i, zoneMatch, areaMatch, distance, load };
   });
 
   scored.sort((a, b) => {
+    if (a.zoneMatch !== b.zoneMatch) return a.zoneMatch ? -1 : 1;
     if (a.areaMatch !== b.areaMatch) return a.areaMatch ? -1 : 1;
     // Prefer the instructor with fewer classes already booked.
     if (a.load !== b.load) return a.load - b.load;

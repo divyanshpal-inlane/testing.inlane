@@ -17,6 +17,7 @@ import {
   Loader2,
   Lock,
   LogOut,
+  Map,
   MessageSquare,
   PhoneCall,
   Radar,
@@ -306,6 +307,13 @@ const featureConfig: Record<
     icon: Search,
     link: "/admin/sales-dashboard",
     color: "text-cyan-500",
+  },
+  instructor_zone_map: {
+    title: "Instructor Zone Map",
+    description: "View and edit instructor service-area polygons on a map",
+    icon: Map,
+    link: "/admin/instructor-zone-map",
+    color: "text-indigo-500",
   },
 } as const;
 

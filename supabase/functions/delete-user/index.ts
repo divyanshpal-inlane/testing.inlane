@@ -58,9 +58,8 @@ serve(async (req) => {
     }
 
     // Import Supabase client inside try-catch
-    const { createClient } = await import(
-      "https://esm.sh/@supabase/supabase-js@2.39.0"
-    );
+    const { createClient } =
+      await import("https://esm.sh/@supabase/supabase-js@2.39.0");
     const supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
 
     console.log("[delete-user] Starting user deletion for phone:", phone);

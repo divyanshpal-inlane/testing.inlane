@@ -121,6 +121,14 @@ export const useInstructor = (phone: string) => {
 
       return { instructorInfo };
     },
+    // Do not fire on an empty phone. `useInstructorScheduleData(phone ?? "")`
+    // and the profile screen both call this while the auth session is still
+    // resolving; without this the query keys on "" , throws "Instructor not
+    // found", and that failure is cached for the life of the QueryClient
+    // because staleTime is Infinity — the screen stays broken even after the
+    // real phone arrives and the Instructor row exists.
+    enabled: phone.replace(/\D/g, "").length >= 10,
+    retry: 2,
     staleTime: Infinity,
   });
 };
@@ -128,6 +136,9 @@ export const useInstructor = (phone: string) => {
 export const useInstructorScheduleData = (phone: string) => {
   return useQuery({
     queryKey: ["instructor", phone],
+    // Same reasoning as useInstructor: an empty/unresolved phone must not
+    // produce a permanently cached "Instructor not found" error.
+    enabled: phone.replace(/\D/g, "").length >= 10,
     queryFn: async () => {
       const maxInstrScheduleWindow = 15;
       const startDate = subDays(new Date(), 2);
@@ -254,9 +265,7 @@ export const useInstructorScheduleData = (phone: string) => {
         for (const e of enrollmentRows || []) {
           if (enrollmentTypeByLearner.has(e.learner_id)) continue;
           const progress = e.progress as
-            | { type?: string; total_hours?: number }
-            | null
-            | undefined;
+            { type?: string; total_hours?: number } | null | undefined;
           enrollmentTypeByLearner.set(e.learner_id, {
             type: progress?.type ?? (e.course_id ? "course" : null),
             hours: progress?.total_hours ?? null,
@@ -339,6 +348,7 @@ export const useInstructorScheduleData = (phone: string) => {
         unavailability: instructorInfo?.unavailability,
       };
     },
+    retry: 2,
     refetchInterval: 30_000, // Refetch every 30s so paused/rescheduled lessons update promptly
     refetchOnWindowFocus: true,
   });

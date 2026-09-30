@@ -4,12 +4,7 @@ import { format } from "date-fns";
 import { supabase } from "@/lib/supabaseClient";
 
 export type LessonStatus =
-  | "active"
-  | "completed"
-  | "paused"
-  | "pending_payment"
-  | "cancelled"
-  | string;
+  "active" | "completed" | "paused" | "pending_payment" | "cancelled" | string;
 
 export type EnrollmentType = "course" | "demo" | "topup" | null;
 

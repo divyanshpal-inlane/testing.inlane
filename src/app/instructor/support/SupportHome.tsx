@@ -61,8 +61,7 @@ export default function SupportHome() {
   const { phone } = useUser();
   const { data: instructor } = useInstructor(phone ?? "");
   const instructorId = instructor?.instructorInfo?.id_instructor as
-    | string
-    | undefined;
+    string | undefined;
 
   const { data: tickets, isLoading } = useMySupportTickets(instructorId);
   const createTicket = useCreateSupportTicket();

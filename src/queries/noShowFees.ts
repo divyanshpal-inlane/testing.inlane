@@ -17,22 +17,11 @@ export const NO_SHOW_FEE_AMOUNT = 300; // ₹ — PRD-confirmed fee
 
 export type FeeType = "no_show" | "late_reschedule";
 export type FeeStatus =
-  | "pending"
-  | "confirmed"
-  | "deducted"
-  | "appealed"
-  | "waived"
-  | "paid";
+  "pending" | "confirmed" | "deducted" | "appealed" | "waived" | "paid";
 export type AppealReason =
-  | "instructor_no_show"
-  | "system_error"
-  | "emergency"
-  | "other";
+  "instructor_no_show" | "system_error" | "emergency" | "other";
 export type AppealStatus =
-  | "pending"
-  | "approved"
-  | "rejected"
-  | "partial_refund";
+  "pending" | "approved" | "rejected" | "partial_refund";
 
 export interface NoShowFee {
   id: string;
@@ -125,7 +114,8 @@ async function enrichFees(rows: any[]): Promise<NoShowFee[]> {
       lessonNumber: lesson?.number ?? null,
       // The pending section must review the matching pending appeal, even if
       // this fee also has an older, already-reviewed appeal.
-      appeal: first<NoShowAppeal>(r.pending_appeal) ?? appealByFee.get(r.id) ?? null,
+      appeal:
+        first<NoShowAppeal>(r.pending_appeal) ?? appealByFee.get(r.id) ?? null,
     };
   });
 }
