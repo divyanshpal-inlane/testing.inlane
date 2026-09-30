@@ -35,17 +35,19 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build
-        run: pnpm run build
+      - name: Build (static test deploy)
         env:
           VITE_BASE_PATH: /testing.inlane/
-          VITE_SUPABASE_KEY: ${{ secrets.VITE_SUPABASE_KEY }}
-          VITE_BACKEND_API: ${{ secrets.VITE_BACKEND_API }}
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+          VITE_GOOGLE_MAPS_API_KEY: ${{ vars.VITE_GOOGLE_MAPS_API_KEY }}
+          VITE_SUPABASE_SERVICE_ROLE_KEY: "not-a-real-key-placeholder-for-static-test-deploy"
+        run: pnpm run build
+      - name: SPA fallback for client-side routing
+        run: cp dist/index.html dist/404.html
+      - uses: actions/upload-pages-artifact@v3
         with:
-          path: ./dist
+          path: dist
 
   deploy:
     needs: build
