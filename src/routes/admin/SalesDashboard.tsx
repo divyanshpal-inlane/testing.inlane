@@ -1047,6 +1047,18 @@ export default function SalesDashboard() {
     blockId: number;
     tentativeDetails: Record<string, unknown> | null;
   } | null>(null);
+  // A tentative booking belongs to ONE instructor: once Sales has picked a
+  // slot, every additional class in that same booking must be the same
+  // instructor's, so the learner isn't handed between instructors
+  // mid-enrollment. Derived from the batch rather than stored as its own
+  // state, so it cannot outlive the batch - every path that ends a booking
+  // (cancel, successful submit, override) clears pendingSlots, and the lock
+  // disappears with it. An override is excluded because it never offers
+  // "+ Add another class" and is by definition a single-slot replacement.
+  const lockedInstructorId =
+    overrideContext || pendingSlots.length === 0
+      ? null
+      : pendingSlots[0].instructorId;
   const [slotNotice, setSlotNotice] = useState<string | null>(null);
   const slotNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
@@ -1081,7 +1093,20 @@ export default function SalesDashboard() {
   const handleAddAnotherSlot = useCallback(() => {
     setTentativeModalOpen(false);
     setAddingSlotMode(true);
-  }, []);
+    // Reuse the existing "Schedule" row control to open this instructor's
+    // own monthly timetable, so Sales picks the next class from the same
+    // view they'd reach manually - and can reach other days and months via
+    // its month arrows. Added directly rather than through toggleExpand,
+    // which would collapse the row if Sales had already opened it.
+    if (lockedInstructorId) {
+      setExpanded((prev) => {
+        if (prev.has(lockedInstructorId)) return prev;
+        const next = new Set(prev);
+        next.add(lockedInstructorId);
+        return next;
+      });
+    }
+  }, [lockedInstructorId]);
 
   const cancelAddingSlot = useCallback(() => {
     setAddingSlotMode(false);
@@ -1484,6 +1509,10 @@ export default function SalesDashboard() {
     return map;
   }, [data]);
 
+  const lockedInstructorName = lockedInstructorId
+    ? (instructorsById.get(lockedInstructorId)?.name ?? "")
+    : "";
+
   // Zones come from `instructor_service_zones`, which is already keyed by
   // Instructor id, so a name match is exact by construction — the KML
   // spelling-alias table is no longer needed on this read path.
@@ -1844,6 +1873,18 @@ export default function SalesDashboard() {
   // not just a lint nit.
   const handleSlotDoubleClick = useCallback(
     (instrId: string, date: string, minute: number) => {
+      // Defence in depth for the one-instructor-per-booking lock. Other
+      // instructors' rows aren't rendered while locked, so this should be
+      // unreachable - but gridRows is a render-time filter, and a stale
+      // render or a programmatic call must never be able to put a second
+      // instructor into a booking.
+      if (lockedInstructorId && instrId !== lockedInstructorId) {
+        showSlotNotice(
+          `This booking is for ${lockedInstructorName}. Cancel or submit it before booking a class with a different instructor.`,
+        );
+        return;
+      }
+
       // Re-verify instructor is still available
       const instr = instructorsById.get(instrId);
       if (
@@ -2020,6 +2061,8 @@ export default function SalesDashboard() {
       locSearch,
       activeCustomer,
       nextCustomerMode,
+      lockedInstructorId,
+      lockedInstructorName,
     ],
   );
 
@@ -2552,10 +2595,17 @@ export default function SalesDashboard() {
     timeStarts,
   ]);
 
+  // A locked booking shows only its own instructor's row, so there is no
+  // other instructor left to double-click while picking the next class. This
+  // is a render-time filter ONLY - `rows`/`visibleInstructors` (and the
+  // persisted roster behind them) are untouched, so the full grid comes back
+  // untouched the moment the booking ends.
   const gridRows = useMemo(() => {
-    if (compareIds.length === 0) return rows;
-    return sortRoster(compareInstructors);
-  }, [compareIds, compareInstructors, rows, sortRoster]);
+    const base =
+      compareIds.length === 0 ? rows : sortRoster(compareInstructors);
+    if (!lockedInstructorId) return base;
+    return base.filter((i) => i.id === lockedInstructorId);
+  }, [compareIds, compareInstructors, rows, sortRoster, lockedInstructorId]);
 
   // Guarantees the timeline (06:00 column onward) always starts exactly
   // where the Instructor column ends, for any name length. The table's own
@@ -2942,7 +2992,9 @@ export default function SalesDashboard() {
             pendingExpandId={pendingExpandRowId}
             selectedRows={selectedRows}
             rowColors={rowColors}
-            loadingRows={data?.loading ?? []}
+            loadingRows={(data?.loading ?? []).filter(
+              (li) => !lockedInstructorId || li.id === lockedInstructorId,
+            )}
             onToggleExpand={toggleExpand}
             onPreviousMonth={goPrev}
             onNextMonth={goNext}
@@ -2955,13 +3007,19 @@ export default function SalesDashboard() {
             onDeleteTentative={handleDeleteTentative}
             resolveInfo={resolveInfo}
           />
-          {gridRows.length === 0 && !locSearch && (
+          {gridRows.length === 0 && lockedInstructorId && (
+            <p className="empty">
+              {lockedInstructorName} is no longer on the grid. Cancel or
+              complete the booking, then search for the instructor again.
+            </p>
+          )}
+          {gridRows.length === 0 && !lockedInstructorId && !locSearch && (
             <p className="empty">
               No instructors loaded yet. Search by name above or use Search by
               location.
             </p>
           )}
-          {gridRows.length === 0 && locSearch && (
+          {gridRows.length === 0 && !lockedInstructorId && locSearch && (
             <p className="empty">
               No instructors match this location. Try another area.
             </p>
@@ -3359,10 +3417,13 @@ export default function SalesDashboard() {
             ➕
           </span>
           <span className="slot-toast-msg">
-            <strong>👉 Pick the next class now:</strong> double-click any green
-            (free) cell on the highlighted grid below to add it to this booking.
-            The form isn&apos;t closed — it will reopen with your selection
-            added.
+            <strong>
+              👉 Pick {lockedInstructorName}&apos;s next class now:
+            </strong>{" "}
+            double-click any green (free) cell on {lockedInstructorName}&apos;s
+            schedule below to add it to this booking. Other instructors are
+            hidden — this booking must stay with the same instructor. The form
+            isn&apos;t closed — it will reopen with your selection added.
           </span>
           <button
             type="button"
