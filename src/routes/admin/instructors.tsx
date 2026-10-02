@@ -96,6 +96,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import {
   Tooltip,
   TooltipContent,
@@ -190,6 +191,13 @@ interface InstructorData {
   // that one polygon, so it carries the row id to write against precisely.
   serviceZone: ZoneCoordinate[] | null;
   serviceZoneId: string | null;
+  /**
+   * Whether the edited polygon is provisional. Seeded from the stored row when
+   * the dialog opens (so editing preserves the flag) and defaulting to `false`
+   * here, because an Ops-shaped edit on this screen is normally a verified area
+   * being corrected rather than a new approximation.
+   */
+  serviceZoneIsRough: boolean;
 }
 
 const INSTRUCTOR_PAGE_SIZE = 6;
@@ -413,6 +421,9 @@ const initialInstructorData: InstructorData = {
   unavailability: [],
   serviceZone: null,
   serviceZoneId: null,
+  // Overwritten from the stored row by handleEditInstructor. A blank form has no
+  // polygon yet, so a new draw defaults to a verified area.
+  serviceZoneIsRough: false,
 };
 
 // Google Maps Autocomplete Component
@@ -1134,15 +1145,21 @@ export default function InstructorsManagement() {
         // serviceZoneId means the admin drew a polygon for an instructor who
         // had none.
         if (zone) {
+          // `isRough` is always sent, including `false`: refining a rough
+          // boundary through this dialog is how an area gets promoted to a
+          // verified serviceability zone, and omitting the key would leave
+          // is_rough = true behind.
           if (data.serviceZoneId) {
             await updateZoneById({
               zoneId: data.serviceZoneId,
               coordinates: zone,
+              isRough: data.serviceZoneIsRough,
             });
           } else {
             await insertZone({
               instructorId: data.id_instructor,
               coordinates: zone,
+              isRough: data.serviceZoneIsRough,
             });
           }
         } else if (data.serviceZoneId) {
@@ -1256,6 +1273,8 @@ export default function InstructorsManagement() {
       unavailability: instructor.unavailability || [],
       serviceZone: null,
       serviceZoneId: null,
+      // Replaced from the stored row below; this is only the pre-load value.
+      serviceZoneIsRough: false,
     });
     setIsDialogOpen(true);
 
@@ -1265,14 +1284,41 @@ export default function InstructorsManagement() {
     // instructor is re-created with a reused id. Taking the first row keeps the
     // dialog opening instead of failing.
     void (async () => {
-      const { data: zoneRows } = await supabase
-        .from("instructor_service_zones")
-        .select("id,coordinates")
-        .eq("instructor_id", instructor.id_instructor)
-        .eq("kind", "polygon")
-        .limit(1);
-
-      const zoneRow = zoneRows?.[0];
+      type ZoneRow = {
+        id: string;
+        coordinates: unknown;
+        is_rough?: boolean | null;
+      };
+      let zoneRow: ZoneRow | undefined;
+      {
+        const base = () =>
+          supabase
+            .from("instructor_service_zones")
+            .select("id,coordinates,is_rough")
+            .eq("instructor_id", instructor.id_instructor)
+            .eq("kind", "polygon")
+            .limit(1);
+        const first = await base();
+        if (first.error) {
+          // `is_rough` arrives with migration 20261001_100000, which is DDL and
+          // manually applied. A not-yet-migrated database rejects the whole
+          // select instead of omitting the column, so retry without it and treat
+          // the row as NOT rough: on a database that has never stored the flag
+          // there are no rough polygons, and every existing row is a verified
+          // service area.
+          const retry = await supabase
+            .from("instructor_service_zones")
+            .select("id,coordinates")
+            .eq("instructor_id", instructor.id_instructor)
+            .eq("kind", "polygon")
+            .limit(1);
+          if (retry.error) return;
+          zoneRow = (retry.data?.[0] ?? undefined) as ZoneRow | undefined;
+          if (zoneRow) zoneRow.is_rough = false;
+        } else {
+          zoneRow = (first.data?.[0] ?? undefined) as ZoneRow | undefined;
+        }
+      }
       if (!zoneRow || !Array.isArray(zoneRow.coordinates)) return;
       const coords = zoneRow.coordinates as ZoneCoordinate[];
       if (coords.length < 3) return;
@@ -1285,6 +1331,7 @@ export default function InstructorsManagement() {
               ...prev,
               serviceZone: coords,
               serviceZoneId: zoneRow.id as string,
+              serviceZoneIsRough: zoneRow.is_rough === true,
             }
           : prev,
       );
@@ -1859,6 +1906,36 @@ export default function InstructorsManagement() {
                     }
                     emptyHint="No service area drawn yet. Draw the area this instructor covers, then save the instructor."
                   />
+                  {/* Inside the instructor <form>, so this is a Switch (a
+                      <button type="button">) rather than a submit control —
+                      Enter in a field here must not save the instructor. */}
+                  <div className="mt-2 flex items-start justify-between gap-3 rounded-md border border-dashed p-2">
+                    <div className="min-w-0 space-y-0.5">
+                      <Label
+                        htmlFor="instructor-rough-polygon"
+                        className="text-xs font-medium"
+                      >
+                        Rough polygon
+                      </Label>
+                      <p className="text-[11px] text-muted-foreground">
+                        {instructorData.serviceZoneIsRough
+                          ? "Provisional area, hidden by default and never used to match customers. Operations can refine and clear this later."
+                          : "Verified service area, used to match customers to this instructor."}
+                      </p>
+                    </div>
+                    <Switch
+                      id="instructor-rough-polygon"
+                      aria-label="Rough polygon"
+                      checked={instructorData.serviceZoneIsRough}
+                      onCheckedChange={(serviceZoneIsRough) =>
+                        setInstructorData((prev) => ({
+                          ...prev,
+                          serviceZoneIsRough,
+                        }))
+                      }
+                      className="mt-0.5 shrink-0"
+                    />
+                  </div>
                 </div>
               </div>
               <div className="grid grid-cols-4 items-center gap-4">

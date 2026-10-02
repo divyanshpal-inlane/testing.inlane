@@ -1,9 +1,14 @@
 import { useMutation } from "@tanstack/react-query";
 import React, { useEffect, useState } from "react";
 
+import type { BulkType } from "@/lib/sales-dashboard/bulkSlots";
+import { generateBulkSlots } from "@/lib/sales-dashboard/bulkSlots";
+// TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+import { measureApi, trackEvent } from "@/lib/sales-dashboard/tempMonitoring";
 import { minutesToTime, timeToMinutes } from "@/lib/sales-dashboard/validation";
 import { isValidPhone, normalizePhone } from "@/lib/sales-dashboard/validation";
 import { supabase } from "@/lib/supabaseClient";
+import { checkInstructorAvailability } from "@/queries/instructor";
 import type { ReusableCustomer } from "@/queries/salesBookingCustomers";
 
 import { AddressAutocomplete } from "./AddressAutocomplete";
@@ -67,6 +72,17 @@ interface TentativeBookingModalProps {
   // Hides the modal (without losing formData/slots — both live in the
   // parent) and arms "pick another slot" mode on the grid.
   onAddAnotherSlot: () => void;
+  // "Change slot" on a conflicting class: hides the modal and sends Sales to
+  // the calendar; the next free slot they double-click REPLACES this row
+  // (index into `slots`) and the modal reopens.
+  onChangeSlot?: (index: number) => void;
+  // Adds multiple slots at once (from the Bulk Add dialog). The parent
+  // validates each one (overlap with the batch, instructor busy) and appends
+  // only those that pass. It reports what happened so the dialog can show
+  // Sales exactly which slots were skipped and why.
+  onAddBulkSlots?: (
+    newSlots: SlotPick[],
+  ) => Promise<{ added: number; skipped: string[] }>;
   // Fresh re-check of one slot's availability at submit time — the grid
   // could have changed since it was added to the batch. `reason` is only
   // present when `ok` is false, and explains *why* (e.g. a buffer
@@ -132,6 +148,8 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
   slots,
   onRemoveSlot,
   onAddAnotherSlot,
+  onChangeSlot,
+  onAddBulkSlots,
   validateSlot,
   formData,
   onFormDataChange,
@@ -142,6 +160,75 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
 }) => {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [successMessage, setSuccessMessage] = useState("");
+  // Bulk Add Schedules dialog state
+  const [isBulkDialogOpen, setIsBulkDialogOpen] = useState(false);
+  const [bulkType, setBulkType] = useState<BulkType>("single");
+  const [bulkDate, setBulkDate] = useState("");
+  const [bulkTimes, setBulkTimes] = useState({ start: "09:00", end: "10:00" });
+  const [repeatCount, setRepeatCount] = useState(1);
+  const [isApplyingBulk, setIsApplyingBulk] = useState(false);
+  const [bulkResult, setBulkResult] = useState<{
+    added: number;
+    skipped: string[];
+  } | null>(null);
+
+  // Conflict detection (matches Instructor Management)
+  const [availabilityMap, setAvailabilityMap] = useState<
+    Record<string, { available: boolean; reason?: string }>
+  >({});
+
+  // Free / Conflict for one row. Conflict = the instructor is busy (DB check,
+  // same query as Instructor Management) OR the row repeats an earlier row of
+  // this booking (same date + start), which would be rejected by the DB
+  // overlap constraint at submit. `checked` is false until the check returns.
+  const getSlotStatus = (index: number) => {
+    const s = slots[index];
+    const avail = availabilityMap[`${s.date}-${s.startTime}`];
+    const isDuplicate = slots.some(
+      (o, j) => j < index && o.date === s.date && o.startTime === s.startTime,
+    );
+    if (isDuplicate) {
+      return {
+        conflict: true,
+        checked: true,
+        reason: "Duplicate of an earlier class",
+      };
+    }
+    if (avail?.available === false) {
+      return {
+        conflict: true,
+        checked: true,
+        reason: avail.reason || "Not available",
+      };
+    }
+    return { conflict: false, checked: avail !== undefined, reason: "" };
+  };
+  const hasAnyConflict = slots.some((_, i) => getSlotStatus(i).conflict);
+
+  // Check instructor availability for all slots (matches Instructor Management)
+  useEffect(() => {
+    const checkAvailability = async () => {
+      if (slots.length === 0 || !slots[0]?.instructorId) {
+        setAvailabilityMap({});
+        return;
+      }
+      try {
+        const result = await checkInstructorAvailability(
+          slots.map((s) => ({
+            date: s.date,
+            start_time: s.startTime,
+            end_time: s.endTime,
+          })),
+          slots[0].instructorId,
+        );
+        setAvailabilityMap(result);
+      } catch (err) {
+        console.error("Availability Check Failed:", err);
+        setAvailabilityMap({});
+      }
+    };
+    checkAvailability();
+  }, [slots]);
 
   // This component never unmounts between bookings -- it just renders null
   // while isOpen is false (see the early return below) -- so without this,
@@ -153,6 +240,100 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
   useEffect(() => {
     if (isOpen) setErrors({});
   }, [isOpen]);
+
+  // Escape is now one of the ways out of the Bulk Add dialog (the backdrop no
+  // longer dismisses it -- see the overlay). Bound on document so it works
+  // wherever focus happens to be inside the dialog, and cleaned up so it cannot
+  // fire for a closed dialog.
+  useEffect(() => {
+    if (!isBulkDialogOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || isApplyingBulk) return;
+      e.stopPropagation();
+      setIsBulkDialogOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [isBulkDialogOpen, isApplyingBulk]);
+
+  // Opens the dialog seeded from the LAST class in the batch, so "daily" /
+  // "hourly" read naturally: the copies continue from the class Sales just
+  // picked (see generateBulkSlots - the first copy is the next day / hour).
+  const openBulkDialog = () => {
+    // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+    trackEvent("bulk_add_opened", {
+      instructorId: slots[0]?.instructorId,
+      slotDate: slots[slots.length - 1]?.date ?? null,
+      customerName: formData.customerName,
+      success: true,
+      details: { bulk_type: "single", repeat_count: 1 },
+    });
+    const last = slots[slots.length - 1];
+    if (last) {
+      setBulkDate(last.date);
+      setBulkTimes({
+        start: last.startTime.slice(0, 5),
+        end: last.endTime.slice(0, 5),
+      });
+    }
+    setBulkType("single");
+    setRepeatCount(1);
+    setBulkResult(null);
+    setIsBulkDialogOpen(true);
+  };
+
+  const handleApplyBulkSchedules = async () => {
+    if (!onAddBulkSlots || slots.length === 0 || isApplyingBulk) return;
+    // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+    trackEvent("bulk_add_opened", {
+      instructorId: slots[0]?.instructorId,
+      slotDate: bulkDate || null,
+      customerName: formData.customerName,
+      success: true,
+      details: { bulk_type: bulkType, repeat_count: repeatCount },
+    });
+    if (!bulkDate) {
+      setBulkResult({ added: 0, skipped: ["Pick a date first."] });
+      return;
+    }
+
+    // Every class in a booking belongs to the same instructor (the parent
+    // enforces the lock), so the batch's first slot supplies who.
+    const { instructorId, instructorName } = slots[0];
+    const generated: SlotPick[] = generateBulkSlots({
+      bulkType,
+      date: bulkDate,
+      startTime: bulkTimes.start,
+      endTime: bulkTimes.end,
+      repeatCount,
+    }).map((s) => ({ ...s, instructorId, instructorName }));
+
+    // Exactly like Instructor Management: EVERY generated slot is added to
+    // the list, none are filtered out here. Free/Conflict is shown per row by
+    // the availability effect on `slots`, and a conflicting row blocks submit
+    // until the user removes it. (Dropping conflicting slots here used to turn
+    // 10 copies into 7 and left the dialog open, so a second click re-added
+    // the same slots.)
+    setIsApplyingBulk(true);
+    try {
+      const result = await onAddBulkSlots(generated);
+      if (result.skipped.length === 0) {
+        setIsBulkDialogOpen(false);
+      } else {
+        setBulkResult({ added: result.added, skipped: result.skipped });
+      }
+    } catch (err) {
+      setBulkResult({
+        added: 0,
+        skipped: [
+          (err as { message?: string } | null)?.message ||
+            "Could not add the slots. Please try again.",
+        ],
+      });
+    } finally {
+      setIsApplyingBulk(false);
+    }
+  };
 
   const createTentativeMutation = useMutation({
     mutationFn: async () => {
@@ -195,10 +376,20 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
         // being submitted is actually half/full paid, then deletes the
         // old row and inserts the new one atomically. See the
         // override_tentative_slot SQL migration.
-        const { error } = await sb.rpc("override_tentative_slot", {
-          p_old_schedule_id: overrideContext.blockId,
-          p_new_tentative_details: tentativeDetails,
-        });
+        const { error } = await measureApi(
+          "schedule.override_tentative_slot",
+          () =>
+            sb.rpc("override_tentative_slot", {
+              p_old_schedule_id: overrideContext.blockId,
+              p_new_tentative_details: tentativeDetails,
+            }),
+          {
+            method: "POST",
+            details: { is_override: true },
+            resolveError: (res: unknown) =>
+              (res as { error?: unknown } | null)?.error ?? null,
+          },
+        );
         if (error) throw error;
         return;
       }
@@ -238,10 +429,35 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
       // statement and NONE of the rows are created. That's what gives
       // this batch "all or nothing" behavior using nothing more than the
       // existing single-row insert path, just called with N rows.
-      const { error } = await sb.from("Schedule").insert(rows);
+      const { error } = await measureApi(
+        "schedule.insert_tentative",
+        () => sb.from("Schedule").insert(rows),
+        {
+          method: "POST",
+          details: { rows: rows.length, is_override: false },
+          resolveError: (res: unknown) =>
+            (res as { error?: unknown } | null)?.error ?? null,
+        },
+      );
       if (error) throw error;
     },
     onSuccess: () => {
+      // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+      // One row per created hold (the parent logs the same rows from
+      // handleTentativeSuccess with the customer-side context); this is the
+      // authoritative "the database accepted it" signal, and it is the only
+      // place the row count of a multi-class batch is known for sure.
+      trackEvent("booking_written", {
+        instructorId: slots[0]?.instructorId,
+        customerName: formData.customerName,
+        success: true,
+        details: {
+          rows_written: overrideContext ? 1 : slots.length,
+          is_override: Boolean(overrideContext),
+          course: formData.course,
+          payment_status: formData.paymentStatus,
+        },
+      });
       setSuccessMessage(
         overrideContext
           ? "Slot handed to the new learner successfully!"
@@ -256,6 +472,22 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
       }, 1500);
     },
     onError: (error: Error) => {
+      // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+      // Every failed attempt, with the Postgres code kept intact (23P01 is the
+      // "another agent booked this slot first" race; 23505 a duplicate).
+      trackEvent("booking_failed", {
+        instructorId: slots[0]?.instructorId,
+        slotDate: slots[0]?.date ?? null,
+        slotStart: slots[0]?.startTime ?? null,
+        customerName: formData.customerName,
+        success: false,
+        error,
+        details: {
+          requested_rows: overrideContext ? 1 : slots.length,
+          is_override: Boolean(overrideContext),
+          message: friendlyBookingError(error).slice(0, 200),
+        },
+      });
       setErrors({ submit: friendlyBookingError(error) });
     },
   });
@@ -289,11 +521,46 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
     }
 
     setErrors(newErrors);
+    // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+    // A rejected form never reaches the database, so without this the
+    // "attempts vs bookings" funnel would count a validation failure as if it
+    // had never happened. Field NAMES only -- never the entered values.
+    if (Object.keys(newErrors).length > 0) {
+      trackEvent("booking_validation_failed", {
+        instructorId: slots[0]?.instructorId,
+        // The customer may be the very field that failed validation, so record
+        // whatever was typed -- an empty name is stored as null, not guessed.
+        customerName: formData.customerName,
+        success: false,
+        errorMessage: Object.keys(newErrors).sort().join(","),
+        details: {
+          fields: Object.keys(newErrors),
+          customer_mode: customerMode,
+          batch_size: slots.length,
+        },
+      });
+    }
     return Object.keys(newErrors).length === 0;
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+    // The attempt itself. Success/failure is recorded by the mutation's
+    // onSuccess/onError and by booking_validation_failed below.
+    trackEvent("booking_submitted", {
+      instructorId: slots[0]?.instructorId,
+      slotDate: slots[0]?.date ?? null,
+      slotStart: slots[0]?.startTime ?? null,
+      customerName: formData.customerName,
+      success: null,
+      details: {
+        batch_size: slots.length,
+        is_override: Boolean(overrideContext),
+        course: formData.course,
+        payment_status: formData.paymentStatus,
+      },
+    });
     if (validateForm()) {
       createTentativeMutation.mutate();
     }
@@ -339,7 +606,10 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        {/* Use div instead of <form> to avoid nested-form double-submit.
+            The modal is rendered inside the admin instructor form, so a native
+            <form onSubmit> would be nested and fire twice. */}
+        <div className="space-y-4">
           {/* Selected Slots */}
           <div className="rounded-lg border border-border bg-muted p-3">
             {overrideContext && (
@@ -361,38 +631,123 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                   : `Selected Slots (${slots.length})`}
               </span>
               {!overrideContext && (
-                <button
-                  type="button"
-                  className="rounded-full bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-200 dark:bg-blue-900 dark:text-blue-200 dark:hover:bg-blue-800"
-                  onClick={onAddAnotherSlot}
-                >
-                  + Add another class
-                </button>
+                <>
+                  {(() => {
+                    const statuses = slots.map((_, i) => getSlotStatus(i));
+                    const conflictCount = statuses.filter(
+                      (st) => st.conflict,
+                    ).length;
+                    const freeCount = statuses.filter(
+                      (st) => st.checked && !st.conflict,
+                    ).length;
+                    return (
+                      <>
+                        {freeCount > 0 && (
+                          <span className="ml-2 inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200">
+                            {freeCount} Free
+                          </span>
+                        )}
+                        {conflictCount > 0 && (
+                          <span className="ml-2 inline-flex items-center rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
+                            {conflictCount} Conflict
+                            {conflictCount > 1 ? "s" : ""}
+                          </span>
+                        )}
+                      </>
+                    );
+                  })()}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="rounded-full bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-200 dark:bg-blue-900 dark:text-blue-200 dark:hover:bg-blue-800"
+                      onClick={() => {
+                        // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+                        trackEvent("booking_add_another_class_clicked", {
+                          instructorId: slots[0]?.instructorId,
+                          customerName: formData.customerName,
+                          success: true,
+                          details: { batch_size: slots.length },
+                        });
+                        onAddAnotherSlot();
+                      }}
+                    >
+                      + Add another class
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-full bg-purple-100 px-3 py-1 text-xs font-semibold text-purple-700 hover:bg-purple-200 dark:bg-purple-900 dark:text-purple-200 dark:hover:bg-purple-800"
+                      onClick={openBulkDialog}
+                    >
+                      ⚡ Bulk Add
+                    </button>
+                  </div>
+                </>
               )}
             </div>
             <div className="space-y-1.5">
-              {slots.map((s, i) => (
-                <div
-                  key={`${s.instructorId}-${s.date}-${s.startTime}`}
-                  className="flex items-center justify-between gap-2 rounded-md bg-background px-2 py-1.5 text-sm text-foreground"
-                >
-                  <span>
-                    Class {i + 1}: {s.date} •{" "}
-                    {formatSlotTime(s.startTime, s.endTime)} •{" "}
-                    {s.instructorName}
-                  </span>
-                  {!overrideContext && slots.length > 1 && (
-                    <button
-                      type="button"
-                      className="flex-none rounded-full px-1.5 text-red-600 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900"
-                      aria-label={`Remove class ${i + 1}`}
-                      onClick={() => onRemoveSlot(i)}
-                    >
-                      ×
-                    </button>
-                  )}
-                </div>
-              ))}
+              {slots.map((s, i) => {
+                const status = getSlotStatus(i);
+                return (
+                  <div
+                    key={`${s.instructorId}-${s.date}-${s.startTime}-${i}`}
+                    className="flex items-center justify-between gap-2 rounded-md bg-background px-2 py-1.5 text-sm text-foreground"
+                  >
+                    <span className="flex items-center gap-2">
+                      Class {i + 1}: {s.date} •{" "}
+                      {formatSlotTime(s.startTime, s.endTime)} •{" "}
+                      {s.instructorName}
+                      {status.conflict ? (
+                        <>
+                          {/* Just "Conflict": the reason is not spelled out
+                              in the row (kept as a hover tooltip only). */}
+                          <span
+                            className="inline-flex items-center rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive"
+                            title={status.reason || undefined}
+                          >
+                            Conflict
+                          </span>
+                          {!overrideContext && onChangeSlot && (
+                            <button
+                              type="button"
+                              className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 hover:bg-amber-200 dark:bg-amber-900 dark:text-amber-200 dark:hover:bg-amber-800"
+                              aria-label={`Change slot for class ${i + 1}`}
+                              onClick={() => onChangeSlot(i)}
+                            >
+                              Change slot
+                            </button>
+                          )}
+                        </>
+                      ) : (
+                        status.checked && (
+                          <span className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200">
+                            Free
+                          </span>
+                        )
+                      )}
+                    </span>
+                    {!overrideContext && slots.length > 1 && (
+                      <button
+                        type="button"
+                        className="flex-none rounded-full px-1.5 text-red-600 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900"
+                        aria-label={`Remove class ${i + 1}`}
+                        onClick={() => {
+                          // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+                          trackEvent("booking_slot_removed_clicked", {
+                            instructorId: slots[i]?.instructorId,
+                            slotDate: slots[i]?.date,
+                            customerName: formData.customerName,
+                            success: true,
+                            details: { batch_size: slots.length },
+                          });
+                          onRemoveSlot(i);
+                        }}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
 
@@ -620,8 +975,9 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
               Cancel
             </button>
             <button
-              type="submit"
-              disabled={createTentativeMutation.isPending}
+              type="button"
+              onClick={handleSubmit}
+              disabled={createTentativeMutation.isPending || hasAnyConflict}
               className="flex-1 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             >
               {createTentativeMutation.isPending
@@ -635,8 +991,205 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                     : "Create Tentative Block"}
             </button>
           </div>
-        </form>
+        </div>
       </div>
+
+      {/* Bulk Add Schedules. Deliberately NOT the shared Radix <Dialog>: that
+          portals at z-50 (and so does its <Select> dropdown), which is BEHIND
+          this modal's z-100 backdrop - it would open invisibly. It would also
+          bubble clicks (React events cross portals) up to the backdrop's
+          onClick={onClose}, closing the whole booking and wiping the batch.
+          A plain overlay above the backdrop, with propagation stopped, avoids
+          both. */}
+      {isBulkDialogOpen && (
+        // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
+        <div
+          className="fixed inset-0 z-[110] flex items-center justify-center bg-black/50 p-6"
+          // Only ever stops propagation. It used to close the dialog, which
+          // made the feature look broken: the panel is 448px wide inside a
+          // full-viewport overlay, and the "Bulk Add" button that opens it sits
+          // ABOVE the panel's top edge -- i.e. over this overlay. The second
+          // click of a double-click (or any click landing beside the panel)
+          // therefore hit the backdrop and dismissed the dialog the instant it
+          // appeared, throwing away the seeded date/time. The screen darkened
+          // and no dialog was left, which is exactly "Bulk Add does not work".
+          // Dismissal is explicit instead: the x, Cancel/Close, or Escape.
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions, jsx-a11y/no-noninteractive-element-interactions */}
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="bulk-add-title"
+            className="max-h-[90vh] w-full max-w-md space-y-4 overflow-y-auto rounded-lg border border-border bg-background p-6 text-foreground shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 id="bulk-add-title" className="text-lg font-semibold">
+                Bulk Add Schedules
+              </h3>
+              <button
+                type="button"
+                aria-label="Close bulk add"
+                disabled={isApplyingBulk}
+                onClick={() => setIsBulkDialogOpen(false)}
+                className="rounded-full px-2 text-xl leading-none text-muted-foreground hover:text-foreground disabled:opacity-50"
+              >
+                ×
+              </button>
+            </div>
+
+            <p className="text-xs text-muted-foreground">
+              Adds classes for {slots[0]?.instructorName}. Daily and hourly
+              copies start from the day / hour <em>after</em> the date and time
+              below.
+            </p>
+
+            <div>
+              <label
+                htmlFor="bulkType"
+                className="block text-sm font-medium text-foreground"
+              >
+                Bulk Action
+              </label>
+              <select
+                id="bulkType"
+                value={bulkType}
+                onChange={(e) => setBulkType(e.target.value as BulkType)}
+                className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                <option value="single">Single Schedule</option>
+                <option value="daily">Bulk Daily</option>
+                <option value="hourly">Bulk Hourly</option>
+              </select>
+            </div>
+
+            <div>
+              <label
+                htmlFor="bulkDate"
+                className="block text-sm font-medium text-foreground"
+              >
+                Date
+              </label>
+              <input
+                id="bulkDate"
+                type="date"
+                value={bulkDate}
+                onChange={(e) => setBulkDate(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label
+                  htmlFor="bulkStart"
+                  className="block text-sm font-medium text-foreground"
+                >
+                  Start Time
+                </label>
+                <input
+                  id="bulkStart"
+                  type="time"
+                  step={1800}
+                  value={bulkTimes.start}
+                  onChange={(e) => {
+                    // Same as Instructor Management: moving the start moves
+                    // the end to start + 1h (Sales classes are 60 minutes).
+                    const start = e.target.value;
+                    setBulkTimes({
+                      start,
+                      end: start
+                        ? minutesToTime(
+                            Math.min(timeToMinutes(start) + 60, 24 * 60 - 1),
+                          )
+                        : bulkTimes.end,
+                    });
+                  }}
+                  className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                />
+              </div>
+              <div>
+                <label
+                  htmlFor="bulkEnd"
+                  className="block text-sm font-medium text-foreground"
+                >
+                  End Time
+                </label>
+                <input
+                  id="bulkEnd"
+                  type="time"
+                  step={1800}
+                  value={bulkTimes.end}
+                  onChange={(e) =>
+                    setBulkTimes({ ...bulkTimes, end: e.target.value })
+                  }
+                  className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                />
+              </div>
+            </div>
+
+            {bulkType !== "single" && (
+              <div>
+                <label
+                  htmlFor="bulkRepeat"
+                  className="block text-sm font-medium text-foreground"
+                >
+                  Number of copies
+                </label>
+                <input
+                  id="bulkRepeat"
+                  type="number"
+                  min={1}
+                  max={15}
+                  value={repeatCount}
+                  onChange={(e) =>
+                    setRepeatCount(parseInt(e.target.value) || 1)
+                  }
+                  className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                />
+              </div>
+            )}
+
+            {bulkResult && (
+              <div
+                role="status"
+                className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+              >
+                <p className="mb-1 font-semibold">
+                  {bulkResult.added > 0
+                    ? `${bulkResult.added} added, ${bulkResult.skipped.length} skipped:`
+                    : "Nothing was added:"}
+                </p>
+                <ul className="list-inside list-disc space-y-0.5">
+                  {bulkResult.skipped.map((reason) => (
+                    <li key={reason}>{reason}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="flex gap-3 pt-2">
+              <button
+                type="button"
+                disabled={isApplyingBulk}
+                onClick={() => setIsBulkDialogOpen(false)}
+                className="flex-1 rounded-lg border border-input bg-background px-4 py-2 text-sm font-medium text-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+              >
+                {bulkResult ? "Close" : "Cancel"}
+              </button>
+              <button
+                type="button"
+                disabled={isApplyingBulk}
+                onClick={() => void handleApplyBulkSchedules()}
+                className="flex-1 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+              >
+                {isApplyingBulk ? "Checking..." : "Add to Preview"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

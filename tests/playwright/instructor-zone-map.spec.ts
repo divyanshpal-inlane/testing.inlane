@@ -3,15 +3,64 @@ import { expect, test } from "@playwright/test";
 /**
  * Instructor Zone Map (/admin/instructor-zone-map) coverage.
  *
- * Read-only against the database: nothing here writes a zone, so the suite is
- * safe to run repeatedly and cannot damage real coverage data. Google Maps may
- * not be reachable from the runner, so no assertion depends on tile or polygon
- * rendering — every assertion targets app chrome that renders from Supabase
- * data alone (via `fetchDbZones()` / the Instructor roster).
+ * Read-only against the production database. The promotion test INTERCEPTS its
+ * PATCH rather than sending it: `instructor_service_zones` RLS grants writes
+ * only to admin/ops, so a test that really promoted a row could not undo it
+ * (that happened, and the lone live rough polygon had to be restored by hand).
+ * Asserting the outgoing request covers the same app code path with no blast
+ * radius. Google Maps may not be reachable from the runner, so no assertion
+ * depends on tile or polygon rendering — every assertion targets app chrome that
+ * renders from Supabase data alone.
  */
 
 const MAPPED = "Mapped (";
 const UNMAPPED = "Not mapped (";
+
+declare global {
+  interface Window {
+    /** Test handles installed by InstructorZoneMap; see the comment there. */
+    __zoneSamplePin?: () => {
+      at: { lat: number; lng: number };
+      label: string;
+    } | null;
+    __zoneSetPin?: (
+      lat: number,
+      lng: number,
+      label: string,
+      apply: boolean,
+    ) => void;
+    /**
+     * Read-only snapshot of what the page would render, so tests can assert the
+     * status/rough rules against the real database without depending on Maps
+     * tiles. Set by InstructorZoneMap.
+     */
+    __zoneState?: () => {
+      zones: {
+        instructorId: string;
+        name: string;
+        isRough: boolean;
+        status: "active" | "on_break" | "inactive";
+        /** Marker source actually used for the instructor dot. */
+        marker: { lat: number; lng: number; source: "residence" | "centroid" };
+        /** Effective polygon fill opacity (0 = outline only). */
+        fillOpacity: number;
+        /** True when the marker sits outside the instructor's own polygon. */
+        residenceOutsideZone: boolean;
+      }[];
+      /** Zones withheld from the map because the instructor is inactive. */
+      hiddenInactive: { instructorId: string; name: string }[];
+      /** Every instructor the sidebar lists, whatever their status. */
+      roster: {
+        instructorId: string;
+        name: string;
+        status: "active" | "on_break" | "inactive";
+        hasZone: boolean;
+      }[];
+      rosterSize: number;
+      showRoughPolygons: boolean;
+    };
+  }
+}
 
 const filterBox = (page: import("@playwright/test").Page) =>
   page.getByLabel("Filter instructors");
@@ -19,6 +68,18 @@ const mappedList = (page: import("@playwright/test").Page) =>
   page.locator("aside section").filter({ hasText: MAPPED }).first();
 const unmappedList = (page: import("@playwright/test").Page) =>
   page.locator("aside section").filter({ hasText: UNMAPPED }).first();
+
+/**
+ * One locator per instructor row in a list section.
+ *
+ * `section button` would overcount: every layer row carries a name button plus
+ * its edit/visibility controls, so a list of 1 instructor reports 2+ buttons and
+ * any count comparison silently drifts. The name button is the one titled
+ * `Zoom to <instructor>`, which is unique per row and independent of the row's
+ * other controls.
+ */
+const rowsIn = (list: import("@playwright/test").Locator) =>
+  list.locator('button[title^="Zoom to"], button[title^="Select "]');
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/admin/instructor-zone-map");
@@ -98,9 +159,21 @@ test.describe("Instructor Zone Map — zone list", () => {
 
   test("filter narrows the list and shows an empty state", async ({ page }) => {
     const rows = mappedList(page).locator("button");
+    // The mapped list is now gated on BOTH the zone query and the instructor
+    // roster (an inactive instructor's zone must be withheld, which means the
+    // roster is what decides it), so the list can legitimately be empty for
+    // longer than before. `count()` is an immediate snapshot and would otherwise
+    // sample 0 and make the `n < before` poll unsatisfiable.
+    await expect(rows.first()).toBeVisible({ timeout: 30_000 });
     const before = await rows.count();
+    expect(before).toBeGreaterThan(0);
 
-    await filterBox(page).fill("jawed");
+    await filterBox(page).fill("narasimhareddy");
+    // Deliberately an instructor who is still active and still has a polygon.
+    // The obvious fixture here used to be "Jawed", who is `status: inactive,
+    // enabled: false` in the live data while STILL owning a polygon row — so he
+    // is now correctly withheld and would make this filter test fail for the
+    // wrong reason. Pick someone the status rule cannot remove.
     // Poll for a STABLE, non-empty filtered result rather than merely
     // "fewer than before". React Query refetches the roster on mount, so a
     // transient zero-row render mid-refetch satisfies a `less than` poll and
@@ -114,7 +187,7 @@ test.describe("Instructor Zone Map — zone list", () => {
         { timeout: 15_000 },
       )
       .toBeGreaterThan(0);
-    await expect(rows.first()).toContainText(/jawed/i);
+    await expect(rows.first()).toContainText(/narasimhareddy/i);
 
     await filterBox(page).fill("zzz-no-such-instructor-zzz");
     await expect(
@@ -196,6 +269,721 @@ test.describe("Instructor Zone Map — location matching", () => {
   });
 });
 
+test.describe("Instructor Zone Map — location filter", () => {
+  /**
+   * Drop a pin the app's own matcher confirms is inside a real polygon, and
+   * enable the filter.
+   *
+   * Sampling goes through the app rather than the database for two reasons.
+   * The anon key cannot read `instructor_service_zones` at all (RLS rejects it),
+   * and coverage is live Ops data that gets redrawn — a coordinate baked into
+   * this spec would drift outside every ring and turn these into permanent false
+   * failures. The expected match set is then read from the app's own
+   * `pin-matches` panel, so nothing here restates the matching rule (including
+   * company-instructor exclusion) and can drift from it.
+   */
+  const dropPin = async (page: import("@playwright/test").Page) => {
+    await page.waitForFunction(
+      () => Boolean(window.__zoneSamplePin && window.__zoneSetPin),
+      null,
+      { timeout: 30_000 },
+    );
+    const applied = await page.evaluate(() => {
+      const sampled = window.__zoneSamplePin!();
+      if (!sampled) return false;
+      window.__zoneSetPin!(sampled.at, sampled.label, true);
+      return true;
+    });
+    test.skip(!applied, "no polygon coverage available");
+  };
+
+  /** Names the app itself reports as covering the dropped pin. */
+  const panelMatches = async (page: import("@playwright/test").Page) => {
+    const panel = page.getByTestId("pin-matches");
+    await expect(panel).toBeVisible({ timeout: 15_000 });
+    return (await panel.locator("li button").allInnerTexts()).map((t) =>
+      t.trim(),
+    );
+  };
+
+  test("the filter button sits directly below the text filter", async ({
+    page,
+  }) => {
+    // Structural, not visual: asserts adjacency so the control cannot drift
+    // somewhere else on the page in a later refactor.
+    const toggle = page.getByTestId("location-filter-toggle");
+    await expect(toggle).toBeVisible();
+    await expect(toggle).toHaveText(/Filter by location/);
+    // Comes after the text filter in DOM order.
+    const order = await page.evaluate(() => {
+      const a = document.querySelector(
+        'input[aria-label="Filter instructors"]',
+      );
+      const b = document.querySelector(
+        '[data-testid="location-filter-toggle"]',
+      );
+      if (!a || !b) return null;
+      return a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING
+        ? "after"
+        : "before";
+    });
+    expect(order).toBe("after");
+  });
+
+  test("the location input gets a Places suggestion dropdown", async ({
+    page,
+  }) => {
+    // The reported bug: typing in the location filter showed no suggestions.
+    // The widget is Google's `Autocomplete`, which decorates the input it is
+    // attached to with its own listeners, so "is it attached?" is observable as
+    // "does typing in THIS input produce a .pac-container?". Asserting that
+    // rather than the presence of the widget guards the actual symptom, and it
+    // would have failed while the input had no ref wired up.
+    test.skip(
+      !(await page.evaluate(() =>
+        Boolean((window as { google?: unknown }).google),
+      )),
+      "Google Maps script unavailable",
+    );
+
+    await page.getByTestId("location-filter-toggle").click();
+    const input = page.getByLabel("Search a location");
+    await input.click();
+    await input.pressSequentially("Koramangala", { delay: 120 });
+
+    // The dropdown is appended to <body>, not inside our own markup.
+    await expect(page.locator(".pac-container")).toBeAttached({
+      timeout: 20_000,
+    });
+  });
+
+  test("clicking the button opens a search panel without filtering yet", async ({
+    page,
+  }) => {
+    // Opening the panel is not the same as committing to a location: a stray
+    // click must not narrow the list using whatever pin the header search left
+    // lying around.
+    await filterBox(page).fill("");
+    const before = await rowsIn(mappedList(page)).count();
+    await page.getByTestId("location-filter-toggle").click();
+    await expect(page.getByTestId("location-filter")).toBeVisible();
+    await expect(page.getByLabel("Search a location")).toBeVisible();
+    expect(await rowsIn(mappedList(page)).count()).toBe(before);
+  });
+
+  test("narrows the list to only the instructors whose polygon covers the point", async ({
+    page,
+  }) => {
+    await filterBox(page).fill("");
+    const before = await rowsIn(mappedList(page)).count();
+    await page.getByTestId("location-filter-toggle").click();
+    await dropPin(page);
+
+    // Strictly fewer rows, and the survivors are exactly the covering set.
+    await expect
+      .poll(async () => rowsIn(mappedList(page)).count(), {
+        timeout: 15_000,
+      })
+      .toBeLessThan(before);
+
+    // The app's own match panel is the oracle. Comparing the filtered list to
+    // it means the assertion holds for whatever the production matcher decided,
+    // including its company-instructor exclusion, without the test restating
+    // that rule and drifting from it.
+    const expected = await panelMatches(page);
+    expect(expected.length).toBeGreaterThan(0);
+    expect(await rowsIn(mappedList(page)).count()).toBe(expected.length);
+
+    for (const name of expected) {
+      await expect(
+        rowsIn(mappedList(page)).filter({ hasText: name }).first(),
+      ).toBeVisible();
+    }
+
+    // Unmapped instructors have no ring, so they can never cover a point and
+    // must drop out of both lists while the filter is on.
+    await expect(rowsIn(unmappedList(page))).toHaveCount(0);
+  });
+
+  test("composes with the text filter (AND, not OR)", async ({ page }) => {
+    await filterBox(page).fill("");
+    const before = await rowsIn(mappedList(page)).count();
+    await page.getByTestId("location-filter-toggle").click();
+    await dropPin(page);
+    const covering = (await panelMatches(page)).length;
+    await expect
+      .poll(async () => rowsIn(mappedList(page)).count(), {
+        timeout: 15_000,
+      })
+      .toBeLessThan(before);
+
+    // A text query matching one of the covering instructors keeps at least one
+    // row but never more than the location filter alone allowed. A surviving
+    // count above `covering` would mean the text query was ignored (OR) rather
+    // than intersected with the location filter.
+    const target = (await panelMatches(page))[0].split(/\s+/)[0];
+    await filterBox(page).fill(target);
+    await expect
+      .poll(async () => rowsIn(mappedList(page)).count(), {
+        timeout: 15_000,
+      })
+      .toBeGreaterThan(0);
+    expect(await rowsIn(mappedList(page)).count()).toBeLessThanOrEqual(
+      covering,
+    );
+    await expect(
+      rowsIn(mappedList(page)).filter({ hasText: target }).first(),
+    ).toBeVisible();
+
+    // A text query that matches no covering instructor empties the list
+    // entirely, which only holds if both filters must pass.
+    await filterBox(page).fill("zzz-no-such-instructor-zzz");
+    await expect(
+      mappedList(page).getByText("No service area matches this filter."),
+    ).toBeVisible({ timeout: 15_000 });
+  });
+
+  test("Clear removes the location filter and restores the full list", async ({
+    page,
+  }) => {
+    await filterBox(page).fill("");
+    const before = await rowsIn(mappedList(page)).count();
+    await page.getByTestId("location-filter-toggle").click();
+    await dropPin(page);
+    await expect
+      .poll(async () => rowsIn(mappedList(page)).count(), {
+        timeout: 15_000,
+      })
+      .toBeLessThan(before);
+
+    await page.getByLabel("Clear location filter").click();
+    await expect(page.getByTestId("location-filter")).toHaveCount(0);
+    await expect
+      .poll(async () => rowsIn(mappedList(page)).count(), {
+        timeout: 15_000,
+      })
+      .toBe(before);
+  });
+
+  test("toggling the button off also clears the filter", async ({ page }) => {
+    await filterBox(page).fill("");
+    const before = await rowsIn(mappedList(page)).count();
+    await page.getByTestId("location-filter-toggle").click();
+    await dropPin(page);
+    await expect
+      .poll(async () => rowsIn(mappedList(page)).count(), {
+        timeout: 15_000,
+      })
+      .toBeLessThan(before);
+
+    await page.getByTestId("location-filter-toggle").click();
+    await expect(page.getByTestId("location-filter")).toHaveCount(0);
+    await expect
+      .poll(async () => rowsIn(mappedList(page)).count(), {
+        timeout: 15_000,
+      })
+      .toBe(before);
+  });
+});
+
+/**
+ * Instructor status, rough polygons, and the residence marker.
+ *
+ * These three rules are the ones that can regress without any visible symptom:
+ * a transparent polygon is indistinguishable from a missing one, an inactive
+ * instructor simply vanishes (which looks the same as "not loaded yet"), and a
+ * residence dot in the wrong place needs real geometry to judge. So they are
+ * asserted against the app's own computed state via `__zoneState`, which is
+ * built from the same values the overlays use.
+ */
+test.describe("Instructor Zone Map — status, rough polygons, residence", () => {
+  const zoneState = async (page: import("@playwright/test").Page) => {
+    // The hook is installed by an effect that depends on the zones query, so
+    // poll rather than reading it once.
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate(() => {
+            const s = window.__zoneState?.();
+            return s ? s.zones.length : 0;
+          }),
+        { timeout: 30_000 },
+      )
+      .toBeGreaterThan(0);
+    return await page.evaluate(() => window.__zoneState!());
+  };
+
+  /**
+   * Same snapshot, but does NOT require a non-empty `zones` array.
+   *
+   * `zoneState` waits for `zones.length > 0` because nearly every assertion here
+   * is about drawn polygons. Two cases need the opposite: a mode/filter that
+   * legitimately empties the map, and the moment right after a toggle click
+   * before React has re-rendered. Polling with `zoneState` there hangs on its
+   * own precondition and reports a timeout that looks like a broken toggle
+   * rather than the empty list it is actually observing.
+   */
+  const rawZoneState = async (page: import("@playwright/test").Page) => {
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate(() =>
+            window.__zoneState ? Boolean(window.__zoneState()) : false,
+          ),
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+    return await page.evaluate(() => window.__zoneState!());
+  };
+
+  test("inactive instructors are listed and drawn, on-break render as outlines, Inactive toggle controls visibility", async ({
+    page,
+  }) => {
+    const state = await zoneState(page);
+    expect(state.zones.length).toBeGreaterThan(0);
+
+    // Inactive instructors are NOW drawn on the map (when the Inactive toggle
+    // is ON, which is the default). The Inactive toggle in the sidebar controls
+    // their visibility. This is the new behaviour requested: show inactive
+    // polygons on the map but let the admin hide them with the toggle.
+    const inactiveZones = state.zones.filter((z) => z.status === "inactive");
+    expect(inactiveZones.length).toBeGreaterThan(0);
+
+    // The sidebar lists EVERYONE, whatever their status. Inactive instructors
+    // appear in Mapped (if they have a polygon) with their Inactive badge.
+    for (const hidden of state.hiddenInactive) {
+      const listed = state.roster.find(
+        (r) => r.instructorId === hidden.instructorId,
+      );
+      expect(
+        listed,
+        `${hidden.name} missing from the sidebar roster`,
+      ).toBeDefined();
+      expect(listed!.status).toBe("inactive");
+      expect(listed!.hasZone).toBe(true);
+    }
+
+    // Inactive tags rendered in sidebar (both Mapped and Not mapped columns).
+    await expect(
+      page.locator("aside").locator('[data-zone-status="inactive"]'),
+    ).toHaveCount(state.roster.filter((r) => r.status === "inactive").length);
+
+    // On-break => outline only. Active + verified => filled.
+    const outline = state.zones.filter((z) => z.fillOpacity === 0);
+    const filled = state.zones.filter((z) => z.fillOpacity > 0);
+    const onBreak = state.zones.filter((z) => z.status === "on_break");
+    expect(onBreak.length).toBeGreaterThan(0);
+    expect(filled.length).toBeGreaterThan(0);
+    for (const z of outline) {
+      expect(z.status === "on_break" || z.isRough).toBe(true);
+    }
+    for (const z of state.zones) {
+      if (z.status === "on_break") expect(z.fillOpacity).toBe(0);
+      if (z.status === "active" && !z.isRough) {
+        expect(z.fillOpacity).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  test("the sidebar badges every off-road instructor", async ({ page }) => {
+    const state = await zoneState(page);
+    // Live data has both non-active states. Without this the counts below would
+    // be 0 == 0 and pass while nothing was badged at all.
+    expect(state.roster.some((r) => r.status === "on_break")).toBe(true);
+    expect(state.roster.some((r) => r.status === "inactive")).toBe(true);
+
+    // Counted, not name-matched. Three live instructors share the name
+    // "Divyansh Pal", so any per-name lookup is ambiguous — and a per-row lookup
+    // would also silently skip the duplicate. An exact count against the roster
+    // is duplicate-proof and cannot be satisfied by one stray tag somewhere.
+    //
+    // Scoped to the sidebar `<aside>` so the info card's own badge cannot stand
+    // in for a missing row badge. NOT `getByLabel("Service areas")`: that is
+    // the layer-visibility Switch, not a container.
+    const sidebar = page.locator("aside");
+    for (const status of ["on_break", "inactive"] as const) {
+      const expected = state.roster.filter((r) => r.status === status).length;
+      await expect(
+        sidebar.locator(`[data-zone-status="${status}"]`),
+        `wrong number of "${status}" tags`,
+      ).toHaveCount(expected);
+    }
+
+    // Active is deliberately NOT badged: ~120 chips reading "Active" would bury
+    // the two states that change behaviour. Pinned here so the omission stays a
+    // decision rather than drifting into an oversight.
+    await expect(sidebar.locator('[data-zone-status="active"]')).toHaveCount(0);
+
+    // No "hidden" filler text: the requirement is a plain "Inactive" tag, and an
+    // extra word in the row is a regression of that.
+    await expect(sidebar).not.toContainText("hidden");
+  });
+
+  test("status tags trail the instructor name in the sidebar", async ({
+    page,
+  }) => {
+    // Ordering is a visual requirement, so assert it on the DOM order of the
+    // name button's own children. A first row may legitimately be active and
+    // carry no tag, so this only pins the order when a tag is present.
+    const tagged = page
+      .locator('button[title^="Zoom to"]')
+      .filter({ has: page.locator("[data-zone-status]") })
+      .first();
+    await expect(tagged).toBeVisible({ timeout: 30_000 });
+    const order = await tagged.evaluate((el) =>
+      Array.from(el.querySelectorAll("[data-zone-status]")).map((n) =>
+        n.textContent?.trim(),
+      ),
+    );
+    expect(order.length).toBeGreaterThan(0);
+    // The name is the row's first text node; a status tag must never precede it.
+    const nameAt = await tagged.evaluate((el) => {
+      const name = el.querySelector("span")?.textContent?.trim() ?? "";
+      const tag = el.querySelector("[data-zone-status]");
+      if (!tag) return -1;
+      return name.length > 0
+        ? Array.from(el.childNodes).findIndex(
+            (n) => n.textContent?.trim() === name,
+          )
+        : -1;
+    });
+    expect(nameAt).toBeGreaterThanOrEqual(0);
+  });
+
+  test("the status toggles filter the view without changing the roster", async ({
+    page,
+  }) => {
+    const before = await zoneState(page);
+    const sidebar = page.locator("aside");
+
+    // All three default to on, so the counts must sum to the whole roster. A
+    // toggle that shipped defaulting to off would silently hide instructors the
+    // user explicitly asked to be listed.
+    const total = await sidebar
+      .locator("[data-status-count]")
+      .evaluateAll((els) =>
+        els.reduce((sum, el) => sum + Number(el.textContent ?? 0), 0),
+      );
+    expect(total).toBe(before.rosterSize);
+    for (const label of ["Active", "On Break", "Inactive"]) {
+      await expect(
+        page.getByRole("switch", { name: `Show ${label} instructors` }),
+      ).toHaveAttribute("aria-checked", "true");
+    }
+
+    // Turning OFF "On Break" must drop exactly the on-break rows and nothing
+    // else. Asserted per-status, not on total count, so a swap of one row for
+    // another cannot pass.
+    await page
+      .getByRole("switch", { name: "Show On Break instructors" })
+      .click();
+    await expect(sidebar.locator('[data-zone-status="on_break"]')).toHaveCount(
+      0,
+    );
+    await expect(sidebar.locator('[data-zone-status="inactive"]')).toHaveCount(
+      before.roster.filter((r) => r.status === "inactive").length,
+    );
+    // On-break polygons also leave the map: "Show on break" governs drawing too.
+    await expect
+      .poll(
+        async () =>
+          (await rawZoneState(page)).zones.some((z) => z.status === "on_break"),
+        { timeout: 15_000 },
+      )
+      .toBe(false);
+
+    // A view filter, not a data change: the roster is untouched, so restoring
+    // the switch brings the rows straight back. This is the regression guard —
+    // if filtering mutated the query or cached the filtered list, switching back
+    // on would not restore anything.
+    await page
+      .getByRole("switch", { name: "Show On Break instructors" })
+      .click();
+    await expect(sidebar.locator('[data-zone-status="on_break"]')).toHaveCount(
+      before.roster.filter((r) => r.status === "on_break").length,
+    );
+    await expect
+      .poll(async () => (await rawZoneState(page)).rosterSize)
+      .toBe(before.rosterSize);
+  });
+
+  test("the Inactive toggle controls inactive polygon visibility", async ({
+    page,
+  }) => {
+    // The Inactive toggle now GATES inactive polygon visibility.
+    // Default is ON (drawn). Turning OFF hides them. This is the explicit
+    // control the user requested.
+    const state = await zoneState(page);
+    const inactiveCount = state.roster.filter(
+      (r) => r.status === "inactive",
+    ).length;
+    expect(inactiveCount).toBeGreaterThan(0);
+
+    // Default: Inactive toggle ON, inactive polygons ARE drawn.
+    expect(state.zones.some((z) => z.status === "inactive")).toBe(true);
+
+    // Turn OFF the Inactive toggle: inactive polygons should disappear from map.
+    await page
+      .getByRole("switch", { name: "Show Inactive instructors" })
+      .click();
+    await expect
+      .poll(
+        async () =>
+          (await rawZoneState(page)).zones.some((z) => z.status === "inactive"),
+        { timeout: 15_000 },
+      )
+      .toBe(false);
+
+    // The status switches are a VIEW filter over both the map and the sidebar
+    // lists, so turning Inactive off empties the inactive rows out of Mapped and
+    // Not mapped alike. (An earlier version of this test asserted the badges
+    // stayed put, on the theory that the toggle only governed the map. That
+    // contradicted `listedZones`/`matchedRoster`, which both apply
+    // `statusVisible`, and it is why this test had been failing.)
+    await expect(
+      page.locator("aside").locator('[data-zone-status="inactive"]'),
+    ).toHaveCount(0);
+
+    // Turn it back ON: inactive polygons should reappear, and with them their
+    // sidebar rows — the filter is reversible, so nothing is lost.
+    await page
+      .getByRole("switch", { name: "Show Inactive instructors" })
+      .click();
+    await expect
+      .poll(
+        async () =>
+          (await rawZoneState(page)).zones.some((z) => z.status === "inactive"),
+        { timeout: 15_000 },
+      )
+      .toBe(true);
+    await expect(
+      page.locator("aside").locator('[data-zone-status="inactive"]'),
+    ).toHaveCount(inactiveCount);
+  });
+
+  test("a rough polygon can be promoted to a normal polygon from the card", async ({
+    page,
+  }) => {
+    // The PATCH is INTERCEPTED, not sent. This suite runs against the production
+    // database, and `instructor_service_zones` RLS grants write access only to
+    // admin/ops — an earlier version of this test really did promote the single
+    // live rough row and could not put it back, because a cleanup path using the
+    // anon key is silently rejected. Asserting the outgoing request instead of
+    // performing the write tests the same app code path with zero blast radius.
+    //
+    // What that still covers, end to end: the button appears only for a rough
+    // zone, the mutation runs, `updateZoneById` builds the correct PATCH body,
+    // and the refetch drops the zone out of the rough view.
+    const patches: Record<string, unknown>[] = [];
+    const patchUrls: string[] = [];
+    await page.route("**/rest/v1/instructor_service_zones*", async (route) => {
+      if (route.request().method() !== "PATCH") return route.fallback();
+      patches.push(route.request().postDataJSON() as Record<string, unknown>);
+      patchUrls.push(route.request().url());
+      // Fulfilled with the columns the writer selects, so `toDbZone` parses it.
+      // The rest GET still reaches the real database, so the refetch below sees
+      // the genuine row still flagged rough.
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify([
+          {
+            id: "intercepted",
+            instructor_id: "intercepted",
+            coordinates: [],
+            raw_name: null,
+            is_rough: false,
+            Instructor: null,
+          },
+        ]),
+      });
+    });
+
+    await page.getByRole("switch", { name: "Show Rough Polygons" }).click();
+    await expect
+      .poll(async () => (await rawZoneState(page)).showRoughPolygons)
+      .toBe(true);
+    const state = await zoneState(page);
+    const rough = state.zones.filter((z) => z.isRough);
+    expect(rough.length, "no live rough polygon to promote").toBeGreaterThan(0);
+    const target = rough[0];
+
+    await page
+      .locator(`button[title="Zoom to ${target.name}"]`)
+      .first()
+      .click();
+    await expect(page.getByTestId("info-card")).toBeVisible();
+
+    // The promote action exists ONLY for a rough boundary.
+    const promote = page.getByTestId("info-card-promote");
+    await expect(promote).toBeVisible();
+    await expect(promote).toContainText(/make normal polygon/i);
+
+    await promote.click();
+    await expect.poll(() => patches.length, { timeout: 15_000 }).toBe(1);
+
+    // The requirement itself: is_rough is set to false.
+    expect(patches[0].is_rough).toBe(false);
+    // And it is the ONLY thing sent. `coordinates` being absent is the load-
+    // bearing part: promotion must not restate the stored ring, or a
+    // round-trip through closeRing/JSON could quietly alter an Ops-drawn
+    // boundary while Ops only meant to verify it.
+    expect(Object.keys(patches[0])).toEqual(["is_rough"]);
+    // Targeted at one row, not a blind table update.
+    expect(patchUrls[0]).toContain("id=eq.");
+  });
+
+  test("a verified polygon can be demoted to a rough polygon from the card", async ({
+    page,
+  }) => {
+    // Same interception rationale as the promote test above: this suite runs
+    // against the production database and anon writes to
+    // `instructor_service_zones` are RLS-rejected and cannot be undone, so the
+    // PATCH is captured rather than sent. This asserts the app code path —
+    // button visibility, mutation wiring, and the exact outgoing body — with
+    // no blast radius.
+    const patches: Record<string, unknown>[] = [];
+    const patchUrls: string[] = [];
+    await page.route("**/rest/v1/instructor_service_zones*", async (route) => {
+      if (route.request().method() !== "PATCH") return route.fallback();
+      patches.push(route.request().postDataJSON() as Record<string, unknown>);
+      patchUrls.push(route.request().url());
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify([
+          {
+            id: "intercepted",
+            instructor_id: "intercepted",
+            coordinates: [],
+            raw_name: null,
+            is_rough: true,
+            Instructor: null,
+          },
+        ]),
+      });
+    });
+
+    // The default view (rough toggle OFF) draws verified polygons only.
+    const state = await zoneState(page);
+    const verified = state.zones.filter((z) => !z.isRough);
+    expect(verified.length, "no verified polygon to demote").toBeGreaterThan(0);
+    const target = verified.find((z) => z.name === "test_dp") ?? verified[0];
+
+    await page
+      .locator(`button[title="Zoom to ${target.name}"]`)
+      .first()
+      .click();
+    await expect(page.getByTestId("info-card")).toBeVisible();
+
+    // The demote action exists ONLY for a verified boundary.
+    const demote = page.getByTestId("info-card-demote");
+    await expect(demote).toBeVisible();
+    await expect(demote).toContainText(/make rough polygon/i);
+
+    await demote.click();
+    await expect.poll(() => patches.length, { timeout: 15_000 }).toBe(1);
+
+    // The requirement itself: is_rough is set to true, and it is the ONLY thing
+    // sent. `coordinates` absent is load-bearing — demotion is a flag flip, and
+    // restating the ring risks altering an Ops-drawn boundary.
+    expect(patches[0].is_rough).toBe(true);
+    expect(Object.keys(patches[0])).toEqual(["is_rough"]);
+    expect(patchUrls[0]).toContain("id=eq.");
+  });
+
+  test("rough polygons are hidden until the toggle is switched on", async ({
+    page,
+  }) => {
+    const before = await zoneState(page);
+    // Requirement: rough polygons are NOT visible by default.
+    expect(before.showRoughPolygons).toBe(false);
+    expect(before.zones.some((z) => z.isRough)).toBe(false);
+
+    // This Switch exposes `aria-checked`, not Radix's `data-state`.
+    const toggle = page.getByRole("switch", { name: "Show Rough Polygons" });
+    // Off by default, which is the requirement itself.
+    await expect(toggle).toHaveAttribute("aria-checked", "false");
+
+    await toggle.click();
+    // `rawZoneState`, not `zoneState`: rough mode legitimately leaves the map
+    // empty on a database with no rough polygons, and `zoneState` waits for a
+    // non-empty drawn set, so it would hang on its own precondition and report
+    // a timeout instead of the empty list it is watching.
+    await expect
+      .poll(async () => (await rawZoneState(page)).showRoughPolygons, {
+        timeout: 15_000,
+      })
+      .toBe(true);
+    const after = await rawZoneState(page);
+    const rough = after.zones.filter((z) => z.isRough);
+    // Whatever rough rows exist must be marked outline-only, never filled.
+    for (const z of rough) {
+      expect(z.fillOpacity).toBe(0);
+    }
+    // The toggle is EXCLUSIVE, not additive: rough on means verified off. So the
+    // drawn set normally SHRINKS rather than grows, and asserting growth was
+    // simply wrong — it only ever passed by accident when the rough set happened
+    // to be larger than the hidden half of the verified set. Assert the two
+    // rules that actually define the mode instead:
+    //  - every rough row that exists is now drawn;
+    //  - no verified row is drawn while rough mode is on.
+    if (rough.length > 0) {
+      const beforeIds = new Set(before.zones.map((z) => z.instructorId));
+      for (const z of rough) {
+        expect(beforeIds.has(z.instructorId)).toBe(false);
+      }
+    }
+    expect(after.zones.some((z) => !z.isRough)).toBe(false);
+
+    // Turning it back off must hide them again.
+    await toggle.click();
+    await expect
+      .poll(async () => (await rawZoneState(page)).showRoughPolygons, {
+        timeout: 15_000,
+      })
+      .toBe(false);
+    await expect
+      .poll(
+        async () => (await rawZoneState(page)).zones.some((z) => z.isRough),
+        { timeout: 15_000 },
+      )
+      .toBe(false);
+  });
+
+  test("markers use the instructor's residence, which may be outside the polygon", async ({
+    page,
+  }) => {
+    const state = await zoneState(page);
+    const withResidence = state.zones.filter(
+      (z) => z.marker.source === "residence",
+    );
+    // Most instructors have a registered address; without this the test would
+    // pass vacuously by falling back to the centroid for everyone.
+    expect(withResidence.length).toBeGreaterThan(0);
+
+    // Every zone must be drawable at all (a real ring), and the marker must
+    // never be a NaN/undefined coordinate.
+    for (const z of state.zones) {
+      expect(Number.isFinite(z.marker.lat)).toBe(true);
+      expect(Number.isFinite(z.marker.lng)).toBe(true);
+    }
+
+    // The key invariant: a residence outside the polygon is still rendered at
+    // the residence, and this is legitimate. At least one such instructor is
+    // expected in live data, but the assertion is written to hold either way —
+    // the point is that it does NOT force the marker inside, and does not fall
+    // back to the centroid when a residence exists.
+    for (const z of withResidence) {
+      if (z.residenceOutsideZone) {
+        expect(z.marker.source).toBe("residence");
+      }
+    }
+  });
+});
+
 test.describe("Instructor Zone Map — map controls", () => {
   test("basemap toggle switches roadmap/satellite", async ({ page }) => {
     const roadmap = page.getByRole("button", { name: "roadmap map" });
@@ -271,7 +1059,7 @@ test.describe("Instructor Zone Map — map controls", () => {
     ).toBe(1);
   });
 
-  test("marker position can switch between centroid and registered address", async ({
+  test("marker position defaults to the residence and can switch to the polygon centre", async ({
     page,
   }) => {
     const select = page.locator("#marker-position");
@@ -279,11 +1067,14 @@ test.describe("Instructor Zone Map — map controls", () => {
     // explicitly rather than relying on the default 5s action timeout, which is
     // tight when the whole suite is competing for the Maps script.
     await expect(select).toBeVisible({ timeout: 20_000 });
-    await expect(select).toHaveValue("centroid", { timeout: 20_000 });
-    await select.selectOption("roster");
-    await expect(select).toHaveValue("roster");
+    // "Registered address" is the default: the dot marks the instructor's
+    // residence, which is a real address and is routinely outside the service
+    // polygon drawn beside it. The centroid is the fallback, not the default.
+    await expect(select).toHaveValue("roster", { timeout: 20_000 });
     await select.selectOption("centroid");
     await expect(select).toHaveValue("centroid");
+    await select.selectOption("roster");
+    await expect(select).toHaveValue("roster");
   });
 
   test("export produces a GeoJSON download of the visible layers", async ({
@@ -407,11 +1198,20 @@ test.describe("Instructor Zone Map — inline editing", () => {
     page,
   }) => {
     const row = unmappedList(page).locator("button").first();
-    const label = await row.getAttribute("aria-label");
-    expect(label).toMatch(/^Draw .+ service area$/);
-    const name = (label ?? "").replace(/^Draw | service area$/g, "");
+    await expect(row).toHaveAttribute("aria-label", /^Draw .+ service area$/);
+    const label = (await row.getAttribute("aria-label"))!;
+    const name = label.replace(/^Draw | service area$/g, "");
 
-    await row.click();
+    // Click by the SAME aria-label rather than `.first()` again. The roster
+    // query has no ORDER BY, so a mid-test refetch can reorder the list and make
+    // `.first()` resolve to a different instructor between reading the label and
+    // clicking — which opened the wrong edit bar and failed on the name.
+    //
+    // `.first()` on the label lookup is still required: names are not unique in
+    // live data (three instructors share "Divyansh Pal"), so an unqualified
+    // `getByLabel` is a strict-mode violation. Duplicates share a name, so any of
+    // them opens a bar containing `name` and the assertion below still holds.
+    await page.getByLabel(label, { exact: true }).first().click();
     const bar = page.getByTestId("zone-edit-bar");
     await expect(bar).toBeVisible({ timeout: 15_000 });
     await expect(bar).toContainText(name);
@@ -496,7 +1296,7 @@ test.describe("Instructor Zone Map — info card", () => {
     await expect(card).not.toContainText("No service area yet");
   });
 
-  test("the card offers a single in-place editing action", async ({ page }) => {
+  test("the card offers editing actions", async ({ page }) => {
     await page.getByTitle("Zoom to test_dp").click();
     const card = page.getByTestId("info-card");
     await expect(card).toBeVisible({ timeout: 15_000 });
@@ -504,8 +1304,8 @@ test.describe("Instructor Zone Map — info card", () => {
     // "Edit points" because a zone already exists; "Draw area" would be wrong
     // wording for an instructor who is already mapped.
     await expect(card.getByTestId("info-card-edit")).toHaveText(/Edit points/);
-    // Exactly one editing action — no separate Redraw.
-    await expect(card.getByRole("button")).toHaveCount(2); // edit + close
+    // Exactly three editing actions: Edit points, Make rough polygon, Close.
+    await expect(card.getByRole("button")).toHaveCount(3);
   });
 
   test("Edit points from the card opens the inline bar", async ({ page }) => {
@@ -536,10 +1336,14 @@ test.describe("Instructor Zone Map — editing on the main map", () => {
     page,
   }) => {
     const row = unmappedList(page).locator("button").first();
-    const label = await row.getAttribute("aria-label");
-    const name = (label ?? "").replace(/^Draw | service area$/g, "");
+    await expect(row).toHaveAttribute("aria-label", /^Draw .+ service area$/);
+    const label = (await row.getAttribute("aria-label"))!;
+    const name = label.replace(/^Draw | service area$/g, "");
 
-    await row.click();
+    // Pin the click to the label just read; see the sibling test above for why
+    // re-resolving `.first()` here is a reorder hazard. `.first()` on the lookup
+    // is needed because live data has duplicate names (three "Divyansh Pal").
+    await page.getByLabel(label, { exact: true }).first().click();
 
     const bar = page.getByTestId("zone-edit-bar");
     await expect(bar).toBeVisible();

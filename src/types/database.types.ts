@@ -1247,6 +1247,7 @@ export type Database = {
           description: string | null;
           id: string;
           instructor_id: string;
+          is_rough: boolean;
           kind: string;
           raw_name: string | null;
           updated_at: string;
@@ -1257,6 +1258,7 @@ export type Database = {
           description?: string | null;
           id?: string;
           instructor_id: string;
+          is_rough?: boolean;
           kind?: string;
           raw_name?: string | null;
           updated_at?: string;
@@ -1267,6 +1269,7 @@ export type Database = {
           description?: string | null;
           id?: string;
           instructor_id?: string;
+          is_rough?: boolean;
           kind?: string;
           raw_name?: string | null;
           updated_at?: string;

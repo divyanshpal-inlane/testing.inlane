@@ -526,6 +526,11 @@ export function OnboardingWizard() {
           await insertZone({
             instructorId: newInstructor.id_instructor,
             coordinates: data.serviceZone,
+            // Rough polygons are the common case during onboarding: the area is
+            // an admin's quick approximation, and Ops refine it later. Persisting
+            // the flag here is what keeps that approximation out of live
+            // customer matching from the moment the row exists.
+            isRough: data.serviceZoneIsRough === true,
           });
           // The sales dashboard caches instructor_service_zones at module
           // scope, so drop it or the new zone goes unseen for the rest of

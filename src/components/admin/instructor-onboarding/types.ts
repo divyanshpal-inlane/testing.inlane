@@ -55,6 +55,19 @@ export interface InstructorOnboardingData {
   // polygon is now the only service-area source of truth.
   serviceZone: ZoneCoordinate[] | null;
 
+  /**
+   * Step 4: mark the drawn polygon as ROUGH (provisional, pending Ops review).
+   *
+   * Defaults to TRUE, because an onboarding polygon is an admin's quick
+   * approximation drawn from a map, not a boundary Operations has verified
+   * against real driving routes. A rough polygon is stored but never used for
+   * customer/sales availability matching, so defaulting it on means a
+   * half-finished onboarding cannot put an unverified area into live matching.
+   * An admin who is entering a boundary Ops has already signed off can turn it
+   * off to save a verified service area instead.
+   */
+  serviceZoneIsRough: boolean;
+
   // Step 5: Unavailability
   unavailability: Unavailability[];
 
@@ -88,6 +101,7 @@ export const initialOnboardingData: InstructorOnboardingData = {
 
   // Step 4
   serviceZone: null,
+  serviceZoneIsRough: true,
 
   // Step 5
   unavailability: [],

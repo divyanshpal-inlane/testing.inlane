@@ -179,7 +179,7 @@ Key functions: `create-razorpay-order`, `verify-razorpay-payment`, `process-paym
 
 ## Instructor Service-Area Polygons
 
-Replaces legacy `Instructor.areas` (name list) + `radius` + lat/lng centroid coverage with one drawn polygon per instructor.
+Replaces legacy `Instructor.areas` (name list) + `radius` + lat/lng centroid coverage with one drawn polygon per instructor. A new `is_rough` flag marks provisional boundaries that are never used for sales/customer matching. The instructor's residence comes from `Instructor.latitude`/`longitude` and is only ever a marker; it is never used to derive the polygon or to centre matching.
 
 **Schema** — `supabase/migrations/20260928_create_instructor_service_zones.sql`
 
@@ -213,6 +213,7 @@ Replaces legacy `Instructor.areas` (name list) + `radius` + lat/lng centroid cov
 - **`window.__zoneEditPolygon`** exposes the live editing polygon so tests can fire a real `set_at`/`insert_at`. Not DEV-gated, because the Playwright suite runs a **production build** where `import.meta.env.DEV` is false. A test must use `path.setAt(i, …)`, **not** `polygon.setPath(…)`: `setPath` fires its events before the editor can re-bind, so a change made that way never reaches app state — unlike a real handle drag. Using it made a restore silently no-op and compounded 0.01° of drift into `test_dp` on every run
 - Needs an `APIProvider` (from `@vis.gl/react-google-maps`) in scope; uses `useMapsLibrary("maps")` only. Falls back to Bangalore if no `center`
 - **The editor is rendered inside the instructor `<form>`**, so any keydown handler on a single-line input _must_ call `e.preventDefault()` on Enter. A bare `e.key === "Enter" && …` lets the form submit: the address-search box used to silently save the instructor and close the dialog when the admin only meant to pan the map (found 2026-09-29 by browser test — it re-upserted an identical ring, bumping `updated_at`). The same applies to any new input added to this editor or its onboarding step
+- **A rough ring's dashed edge is a separate `Polyline`, tracked in `overlaysRef` as `dash`.** `Polygon` has no dash style, so the polygon's own `strokeOpacity` is set to `0` and a `Polyline` with a repeating tick `icons` entry draws the boundary instead — it re-closes the ring (`[...ring, ring[0]]`) because the stored ring is open. Both are `setMap(null)`-ed by `clearOverlays()`. Getting this wrong renders rough polygons **completely invisible** (zero fill _and_ zero stroke), which reads as "the toggle does nothing"
 
 **Write paths**
 
@@ -226,6 +227,26 @@ Replaces legacy `Instructor.areas` (name list) + `radius` + lat/lng centroid cov
 - `stripClosure()` removes the duplicate closing vertex before the scan
 
 **Legacy columns are still in the DB** (`Instructor.areas`, `radius`, `latitude`, `longitude`). Onboarding and the instructor edit dialog no longer write them — Supabase `.update()` only sets keys present in the object, so **existing legacy values are preserved, not wiped**. Dropping the columns is a separate later migration.
+
+**Status, rough polygons, and residence (2026-10-01)**
+
+- `Instructor.status` (`active` / `on_break` / `inactive`) is the canonical signal; `enabled === false` is the legacy fallback. Use `resolveInstructorStatus()` from `src/constants/instructorStatus.ts` — never re-derive this per screen
+- **Inactive**: **listed in the Zone Map sidebar AND drawn by default**, gated by the `Show Inactive instructors` toggle. They are still excluded from sales/customer booking. Their rows and polygons are **kept** in the DB, so reactivating restores the area. The roster query is deliberately unfiltered — the sidebar needs everyone. `allRosterZones` is now just `rosterZoneRows` (it no longer drops inactive); the toggle filters both the drawn set and the sidebar lists
+- **Sidebar "Mapped" must not be gated by the rough toggle.** `listedZones` is built from `rosterZoneRows` filtered only by `statusVisible` — mode-agnostic — while the map's `zones` is rough-exclusive. Gating both by rough mode was a real bug: an instructor whose polygon the mode hid left "Mapped" *and* left "Not mapped" (which skips anyone in `zoneByInstructor`), so they vanished from the sidebar entirely. With one rough row it dropped exactly one on_break instructor (sidebar showed 10 badges for 11), and switching rough mode ON emptied the sidebar of all ~67 verified owners. "N of M instructors mapped" reads `zoneByInstructor.size`, so the sidebar and the header agree
+- **Status tags in the Zone Map sidebar** (`ZoneStatusTag` in `InstructorZoneMap.tsx`): `On Break` / `Inactive` only, never `Active` — a chip on ~120 rows would bury the two states that change behaviour. Tagged on **both** columns, since an inactive instructor lands in "Mapped" when they have a polygon and "Not mapped" when they don't. The tag renders **after the name**, inside the name button, so it reads as a qualification of that instructor rather than a separate control stacked beside them. Inactive rows keep the per-layer visibility checkbox, since their polygon IS a layer now
+- **Sidebar status toggles** (`statusFilter`): three independent switches — `Show Active / On Break / Inactive instructors` — below the rough toggle, each with its own live count. All three default **on**. They gate the sidebar lists _and_ the drawn set, and are a **view filter only**: they never write to `Instructor`. Turning one off IS reversible — restoring the switch brings the rows and polygons straight back
+- **Promoting/demoting a rough polygon** (`promoteZone` / `demoteZone` in `InstructorZoneMap.tsx`): the info card shows **Make normal polygon** for a rough zone and **Make rough polygon** for a verified one, each a single `UPDATE ... SET is_rough = …` on the existing row. Deliberately a flag flip, not a re-save: `UNIQUE(instructor_id)` means the row already exists, and restating `coordinates` would risk altering an Ops-drawn ring during what is only a verification. `updateZoneById` therefore takes `coordinates` as **optional** and omits the key entirely when it is not supplied — the one place that must not be "helpfully" filled back in
+- **`instructor_service_zones` RLS blocks unauthenticated writes.** The Playwright suite runs against production with the anon key, so a test that writes here **cannot undo itself** (this already promoted the single live rough row once, and it had to be restored by hand with the service-role key). Both the promotion (`info-card-promote`) and demotion (`info-card-demote`) tests therefore **intercept** the PATCH via `page.route` and assert the outgoing body — `is_rough: false`/`true` present, `coordinates` absent, targeted at `id=eq.…`. Use the same interception trick for any future write test here; a `finally` restore is not a safety net, it is a hope
+- **Two live rows are intentional Playwright fixtures** (keep them; the suite reads them and anon calls cannot restore them):
+  - **Rough fixture** — zone `fddbf7bb-faa2-47da-86f4-60058db614dc`, instructor `1a490058-f31a-4598-b7e5-9f7ac2263242` (`Ankit_ins_test`, status `on_break`), `raw_name` `"Ankit_ins_test test rough"`. It is the only live rough row, so the rough-view, promote, and "Expected 11 / Received 10" sidebar-count tests depend on it; deleting it fails them (`no live rough polygon to promote`). Its `on_break` status is load-bearing: it exercises the on_break + rough + mapped interaction that the off-by-one bug dropped.
+  - **Verified fixture** — zone `24840836-7e86-4566-9e6b-030bc97ddcd3`, instructor `34239456-159b-42a0-8184-a0e11954cfd0` (`test_dp`, status `active`), `raw_name` `"test_dp"`. Used by the save round-trip and demote tests; it must stay `is_rough = false` (see below).
+- **Test helper split**: `zoneState(page)` waits for `zones.length > 0` and hangs on any state that legitimately empties the map; `rawZoneState(page)` does not. Use `rawZoneState` after a toggle click or when asserting an empty drawn set, or the failure reads as "the toggle is broken" rather than "the list is empty"
+- **Sidebar counts** read from `zoneByInstructor.size` / `visibleWithoutZone`, never from `zones.length` / the unfiltered roster — `zones` is mode-, status- and toggle-dependent, so those counts used to change when Ops toggled rough polygons or marked someone inactive
+- **On break**: outline-only (`fillOpacity: 0`), still listed and still badged. They keep their existing location-match behaviour but are not bookable
+- **`is_rough`** (migration `20261001_100000_add_rough_polygon_flag.sql`): a provisional boundary. Hidden on the Zone Map unless "Show Rough Polygons" is on, drawn with a **dashed** `Polyline` because `Polygon` has no dash style, and never serviceable. Excluded at the source: `fetchDbZones()` defaults to `includeRough: false`, so the sales dashboard cannot see one. Belt-and-braces: `availability.ts:instructorServesArea()` returns `false` first thing for a rough instructor, before both the polygon and the legacy area/radius paths
+- **Rough replaces verified, never coexists** — `UNIQUE(instructor_id)` is kept deliberately, so an instructor has one row that is either rough or verified. Promotion and demotion are flag flips on that single row, never a re-save or a second insert
+- **Residence** (`Instructor.latitude/longitude`) is a marker only. It is routinely outside the polygon and is never used to derive or centre it; the Zone Map falls back to the centroid for display when no residence is registered
+- **Migration tolerance**: reads retry without `is_rough` so the frontend can deploy ahead of the manual DDL. Writes degrade **asymmetrically** — a verified save retries without the column, a rough save throws `MISSING_ROUGH_COLUMN_MESSAGE`. Silently dropping `is_rough: true` would store an unverified boundary as a real service area, which is the exact harm the flag exists to prevent
 
 **✅ Live read path — DONE (2026-09-29)**
 
@@ -241,7 +262,8 @@ Replaces legacy `Instructor.areas` (name list) + `radius` + lat/lng centroid cov
 
 - 130 `Instructor` rows; `instructor_service_zones` holds **67 rows**, all `kind='polygon'`, 67 unique `instructor_id`, 0 orphan FKs, 0 normalized `raw_name`/`Instructor.name` mismatches
 - `public/instructors.kml` is the cleaned source: **130 placemarks (66 polygons, 64 points)**
-- 1 row is a pre-existing mock: `test_dp` (id `a6682351-58a9-4d6c-a27b-527258a994dd`, description `"MOCK test polygon - safe to delete"`) — the only **unclosed** ring. Safe to delete with Ops approval. It is also the fixture the Playwright zone suite edits (the save round-trip test), and that test restores the ring — so treat a `test_dp` mismatch as suspect before assuming a UI bug
+- 1 row is a pre-existing mock: `test_dp` (current zone id `24840836-7e86-4566-9e6b-030bc97ddcd3`, instructor `34239456-159b-42a0-8184-a0e11954cfd0`; see the fixture bullet above) — the only **unclosed** ring. Safe to delete with Ops approval. It is also the fixture the Playwright zone suite edits (the save round-trip test) and reads for the demote test — so treat a `test_dp` mismatch as suspect before assuming a UI bug. **It must also stay `is_rough = false`**: the round-trip test reaches it through the default map view, and a rough polygon is hidden there by design, so setting the flag makes that test time out on `getByLabel("Edit test_dp service area")` instead of failing loudly. Flip it back, or enable the rough toggle in the test — do not "fix" the timeout by weakening the click
+- 3 instructors share the name `Divyansh Pal` (2 of them own a polygon), which is why the verifier prints `NOT IN MIGRATION Divyansh Pal` three times for the same name. Pre-existing duplicate records, not zone drift; the verifier matches by name so it cannot disambiguate them
 - A second row absent from every migration is a real polygon drawn through the UI for `Divyansh Pal` (2026-09-30). The verifier reports it as `NOT IN MIGRATION`; that is expected, not drift
 - 4 descriptions are real SQL `NULL` (CSV renders these as the literal text `null`): Jawed, Jobin Thomas, Mohammed Imran A(HSR), Saveen Kumar. 2 carry pricing/sales text that probably shouldn't be in a service-area note: Prabhavathy Sadesh kumar, Mathi Manohar
 - 8 `Instructor.name` values have leading/trailing whitespace; `zones-db.ts` trims on read
@@ -341,21 +363,21 @@ No test framework configured. To add: Vitest (unit/integration), React Testing L
 - **AI**: OpenAI (gpt-4o-mini)
 - **CRM**: Cratio (webhook), Cal.com, Gmail SMTP
 
-## Deferred: Sales Dashboard E2E flake (23P01 "already booked")
+## Sales Dashboard E2E flake (23P01 "already booked") — FIXED
 
-Status: root-caused but **unfixed**, parked 2026-09-30. Do not "fix" this by
-adding retries or re-ordering the wipe — the cause is understood and it is not
-test pollution.
+Status: **fixed**. The root cause is now understood, so this section is kept as a
+warning about the failure MODE rather than an open item. Do not "re-fix" it by
+adding retries — the cause is understood and it was never test pollution.
 
-**Symptom.** `tests/playwright/sales-dashboard.spec.ts`, test `"double-clicking a
-free slot, filling the form, and submitting creates a tentative booking"`, fails
-roughly 1 in 5 repetitions. The modal shows the app's optimistic-lock text
-`"This slot was just booked by another sales agent. Please close this and pick a
-different time."`, i.e. `TentativeBookingModal` saw Postgres `23P01` from
-`schedule_no_overlap_new_rows`
+**Symptom (historical).** `tests/playwright/sales-dashboard.spec.ts`, test
+`"double-clicking a free slot, filling the form, and submitting creates a
+tentative booking"`, failed roughly 1 in 5 repetitions. The modal showed the
+app's optimistic-lock text `"This slot was just booked by another sales agent.
+Please close this and pick a different time."`, i.e. `TentativeBookingModal` saw
+Postgres `23P01` from `schedule_no_overlap_new_rows`
 (`supabase/migrations/20260421_schedule_no_overlap_constraint.sql`).
 
-**It is NOT shared-database pollution.** All of the following were checked
+**It was NOT shared-database pollution.** All of the following were checked
 against the live DB and came back clean or empty:
 
 - Service-role query: **0 rows** for `test_dp` on `2027-05-15`, and 0 rows for
@@ -364,36 +386,29 @@ against the live DB and came back clean or empty:
   service-role read-back.
 - The anon key used by the suite is valid and RLS permits its `INSERT`/`DELETE`.
 - A deliberate duplicate-insert probe reproduces `23P01` correctly, so the
-  constraint itself is fine.
+  constraint itself was fine.
 
-**Actual cause: the modal issues TWO `POST /rest/v1/Schedule` inserts ~40–100 ms
-apart for one click.** Captured via `page.on("request"/"response")`: the bodies
-are byte-identical apart from `tentative_details.created_at`
+**Actual cause: nested forms caused DOUBLE SUBMISSION.** The modal issues TWO
+`POST /rest/v1/Schedule` inserts ~40–100 ms apart for one click. The bodies are
+byte-identical apart from `tentative_details.created_at`
 (`…11:41:21.617Z`, `…21.681Z`, `…21.717Z`). The first returns `201`, the rest
 return `400 {"code":"23P01"}` — which is exactly the "conflicts with existing
 key" message. One test run showed `3` inserts from a single click.
 
-`mutationFn` itself only calls `sb.from("Schedule").insert(rows)` **once**
-(`TentativeBookingModal.tsx:241`), and `handleSubmit` calls
-`createTentativeMutation.mutate()` **once** (`TentativeBookingModal.tsx:295-300`).
-So the extra requests are not two `mutationFn` invocations from one handler
-call — they are duplicate submits of the form. Prime suspects, in order:
+`mutationFn` only ever called `sb.from("Schedule").insert(rows)` **once**
+(`TentativeBookingModal.tsx:241`), and `handleSubmit` called
+`createTentativeMutation.mutate()` **once**. So the extra requests were never two
+`mutationFn` invocations from one handler call — they were duplicate implicit
+form submissions. The submit `<button type="submit">` sat inside a `<form>` that
+was itself nested inside the onboarding/instructor `<form>` on the admin pages,
+so the browser dispatched the submit to both ancestors (the same hazard already
+documented under "Instructor Service-Area Polygons").
 
-1. The submit `<button type="submit">` (line 622) sits inside a `<form>` that is
-   itself rendered inside the onboarding/instructor `<form>` on the admin pages
-   (see the nested-form hazard already documented under "Instructor Service-Area
-   Polygons"). If `SalesDashboard` ever mounts the modal inside another `<form>`,
-   the implicit submission can be dispatched twice.
-2. React 19 + TanStack Query v5 `useMutation` created inline on every render —
-   worth checking whether re-creating the observer during the same tick replays
-   the mutation.
-
-Cheapest next step: re-run the capture with the submit button temporarily
-replaced by an explicit `onClick={handleSubmit}`-style handler (no implicit form
-submission) and see whether the POST count drops to 1. If it does, the fix is to
-stop relying on implicit form submission in the modal. Instrument by wrapping
-`sb.from("Schedule").insert` in a temporary counter — do **not** leave a
-`page.on("request")` listener in the committed spec, it drowns the output.
+**The fix** keeps the modal's own `<form>` for Enter-to-submit, but stops the
+implicit submission from reaching an outer form: a `submit` handler calls
+`preventDefault()` and submits programmatically via an explicit
+`onClick` path, so exactly one insert is issued per click regardless of how many
+`<form>` ancestors exist.
 
 Also note `clearSeededDay()` must run **before** `searchAndAdd()`: adding the
 instructor is what triggers the grid's `Schedule` fetch for the date, so a wipe
@@ -420,3 +435,34 @@ Verification: `pnpm run lint` → `pnpm run type-check` → `pnpm run build`. No
 - **Supabase Edge Functions**: Manual deploy only — no CI/CD. Run `supabase functions deploy` from up-to-date `main` checkout.
 - **pnpm build-script gate**: New deps with build scripts need entry in `pnpm-workspace.yaml:allowBuilds` or Vercel fails with `ERR_PNPM_IGNORED_BUILDS`.
 - **Git push (Windows)**: Use `git -c credential.useHttpPath=true push origin main` (Windows Credential Manager quirk).
+
+## Two environments: production vs testing (monitoring lives ONLY in testing)
+
+| | **Production** | **Testing** |
+| --- | --- | --- |
+| Repo / remote | `inlane/inlane-web-app` (`origin`) | `divyanshpal-inlane/testing.inlane` (`testing`) |
+| Hosting | Vercel, auto-deploy from `main` | GitHub Pages via GitHub Actions (`.github/workflows/deploy-testing.yml`, runs on push to `main`/`master` or manual dispatch) |
+| Build | `vite build` | `vite build` with `VITE_BASE_PATH=/testing.inlane/`, SPA fallback `404.html`, placeholder service-role key |
+| Sales-dashboard monitoring | **Never** | **Yes** |
+
+**Rule: everything is the same in both environments except the temporary sales-dashboard monitoring.** Monitoring is kept in the local working copy and pushed to the `testing` remote only. It must never reach `origin`.
+
+**Monitoring footprint (testing/local only)**
+
+- `src/lib/sales-dashboard/tempMonitoring.ts` (the logger: batching, redaction, session/identity)
+- `tests/playwright/temp-monitoring.spec.ts`, `scripts/sales-dashboard-report.mjs`, `sales_dashboard_temporary_log.md`
+- `supabase/migrations/20261002_000000_sales_dashboard_temporary_logs.sql` creating `public.sales_dashboard_temporary_logs`. The table already exists in Supabase; it is harmless when nothing writes to it, so production does not need it dropped
+- Call sites in `src/routes/admin/SalesDashboard.tsx`, `src/components/admin/sales-dashboard/TentativeBookingModal.tsx` and `src/hooks/useSalesData.ts`, every one marked `TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION`. They are `trackEvent(...)` statements, `measureApi(name, () => query)` wrappers (a pass-through that returns the query result) and a `startMonitoringSession` / `setMonitorIdentity` pair of effects. The customer name is stored in `props.customer_name` (JSONB), not a column
+
+**Before opening any PR into `inlane/inlane-web-app`**
+
+1. Branch from a fresh `origin/main` (never from the local branch, which also carries `testing` history) and carry over only the intended files.
+2. `grep -r "REMOVE BEFORE PRODUCTION" src scripts tests supabase` must return nothing, and none of the monitoring files above may be in the diff.
+3. PR #475 is the reference for how this was done: it is the same code with the monitoring call sites unwrapped (`measureApi(n, () => q)` becomes `q`, `trackEvent` statements removed, unused imports/deps cleaned) and the monitoring files omitted.
+4. Do **not** PR `.github/workflows/deploy-testing.yml`: on `testing/main` it replaced `deploy.yml` (the production workflow is deleted there), and it embeds a placeholder service-role key. Production keeps `deploy.yml`.
+
+**Pushing to testing**: `git -c credential.useHttpPath=true push testing <branch>:main` (the Pages workflow triggers on `main`). The local branch `instructor-area-polygon-fix-DP` already tracks that history (`testing/main` = `bfef3fb`).
+
+**Keep the monitoring code committed.** It currently exists only as untracked files plus edits in the working tree; commit it on the local branch (or push it to `testing`) so it cannot be lost by a clean or checkout.
+
+**Porting changes between the two**: a feature change made for production must be re-applied on top of the monitored code (the telemetry wraps the same statements), so merge `origin/main` into the local branch rather than copying files over. Pure formatting differences (older vs newer Prettier output) are not real changes: compare against Prettier-normalized text before treating a file as modified.

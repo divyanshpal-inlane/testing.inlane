@@ -40,6 +40,17 @@ export interface InstructorLike {
    *  bad column makes PostgREST reject the whole query (400), so verify the
    *  column exists before adding it. `name` remains the fallback. */
   isCompany?: boolean | null;
+  /**
+   * `instructor_service_zones.is_rough` — the boundary is a provisional
+   * onboarding approximation, not a verified serviceability zone.
+   *
+   * When true the instructor is excluded from ALL area matching
+   * (`instructorServesArea`), so a rough polygon can never be the reason a
+   * customer is matched to this instructor. Defaults to false when omitted, so
+   * existing callers that do not pass the column keep their current behaviour
+   * for the 66 verified polygons.
+   */
+  isRough?: boolean | null;
   status?: string | null; // 'active' | 'on_break' | 'inactive'
   enabled?: boolean | null;
   unavailability?: unknown[] | null;
@@ -207,6 +218,12 @@ export function instructorServesArea(
   // though they carry legacy `areas`/`radius` values in the Instructor table.
   if (instructor.isCompany === true) return false;
   if (isCompanyInstructor(instructor.name)) return false;
+  // A rough polygon is a provisional onboarding boundary that Operations has
+  // not verified, so it must not count as serviceability — not through the
+  // polygon path, and not through the legacy `areas`/`radius` fallbacks either.
+  // An instructor whose only zone is rough therefore serves nobody until the
+  // flag is cleared.
+  if (instructor.isRough === true) return false;
   // Polygon first: once an instructor has a drawn zone it is authoritative.
   if (zoneContainsPoint(instructor, learner)) return true;
   return hasArea(instructor, learnerArea) || withinRadius(instructor, learner);
@@ -214,6 +231,10 @@ export function instructorServesArea(
 
 export function isInstructorActive(instructor: InstructorLike): boolean {
   if (instructor.enabled === false) return false;
+  // Both columns are checked. They are only kept in sync by the admin UI, so a
+  // row with status='inactive' and enabled=true — a direct write, an older
+  // script, a partially-applied migration — must not be treated as bookable.
+  if (instructor.status === "inactive") return false;
   return (instructor.status ?? "active") === "active";
 }
 

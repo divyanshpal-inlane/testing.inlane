@@ -15,6 +15,8 @@ import {
   type BookingFlowConfig,
   readBookingFlowConfig,
 } from "@/lib/sales-dashboard/config";
+// TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+import { measureApi } from "@/lib/sales-dashboard/tempMonitoring";
 import {
   addDaysISO,
   istTodayISO,
@@ -149,9 +151,20 @@ async function fetchScheduleWindow(
         .lte("date", dateTo);
       if (excludeFilter) query = query.not("status", "in", excludeFilter);
       if (group) query = query.in("instructor_id", group);
-      const { data, error } = await query
-        .order("id", { ascending: true })
-        .range(offset, offset + PAGE_SIZE - 1);
+      // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+      const { data, error } = await measureApi(
+        "schedule.fetch_window",
+        () =>
+          query
+            .order("id", { ascending: true })
+            .range(offset, offset + PAGE_SIZE - 1),
+        {
+          method: "GET",
+          details: { page_offset: offset, instructor_groups: groups.length },
+          resolveError: (res: unknown) =>
+            (res as { error?: unknown } | null)?.error ?? null,
+        },
+      );
       if (error) throw error;
       rows.push(...((data ?? []) as ScheduleRow[]));
       if (!data || data.length < PAGE_SIZE) break;
@@ -305,26 +318,37 @@ export function useSalesData() {
         const [rawChunks, scheduleRows, companyIds] = await Promise.all([
           Promise.all(
             chunk(wanted, IN_CHUNK).map(async (part) => {
-              const { data: rows, error } = await sb
-                .from("Instructor")
-                .select(
-                  // No "gender" column here — the female-instructor-preference
-                  // matching in the ported availability engine expects
-                  // Instructor.gender, but this table doesn't have it. Selecting
-                  // it makes PostgREST reject the whole query (400), which was
-                  // silently breaking every instructor add. This dashboard never
-                  // exposes a female-preference control, so parseInstructors()
-                  // just falls back to gender: null (isFemale() -> false), which
-                  // matches this dashboard's actual behavior either way.
-                  //
-                  // "is_company_instructor" is likewise NOT selected here, for
-                  // the same reason: migration 20260929_100000 is manual-apply
-                  // only, so the column may not exist yet and adding it here
-                  // would 400 every instructor load. It arrives instead via
-                  // fetchCompanyInstructorIds(), which degrades to an empty set.
-                  "id_instructor, name, areas, unavailability, status, enabled",
-                )
-                .in("id_instructor", part);
+              // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+              const { data: rows, error } = await measureApi(
+                "instructor.fetch_roster",
+                () =>
+                  sb
+                    .from("Instructor")
+                    .select(
+                      // No "gender" column here — the female-instructor-preference
+                      // matching in the ported availability engine expects
+                      // Instructor.gender, but this table doesn't have it. Selecting
+                      // it makes PostgREST reject the whole query (400), which was
+                      // silently breaking every instructor add. This dashboard never
+                      // exposes a female-preference control, so parseInstructors()
+                      // just falls back to gender: null (isFemale() -> false), which
+                      // matches this dashboard's actual behavior either way.
+                      //
+                      // "is_company_instructor" is likewise NOT selected here, for
+                      // the same reason: migration 20260929_100000 is manual-apply
+                      // only, so the column may not exist yet and adding it here
+                      // would 400 every instructor load. It arrives instead via
+                      // fetchCompanyInstructorIds(), which degrades to an empty set.
+                      "id_instructor, name, areas, unavailability, status, enabled",
+                    )
+                    .in("id_instructor", part),
+                {
+                  method: "GET",
+                  details: { requested: part.length },
+                  resolveError: (res: unknown) =>
+                    (res as { error?: unknown } | null)?.error ?? null,
+                },
+              );
               if (error) throw error;
               return (rows ?? []) as Record<string, unknown>[];
             }),
@@ -554,9 +578,17 @@ export function useSalesData() {
   const loadInstructorIndex = useCallback(async () => {
     // Lazy-load instructor index only when needed (for search suggestions)
     if (allRef.current.length > 0) return;
-    const { data: listRes, error: listErr } = await sb
-      .from("Instructor")
-      .select("id_instructor, name, status, enabled");
+    // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+    const { data: listRes, error: listErr } = await measureApi(
+      "instructor.fetch_index",
+      () =>
+        sb.from("Instructor").select("id_instructor, name, status, enabled"),
+      {
+        method: "GET",
+        resolveError: (res: unknown) =>
+          (res as { error?: unknown } | null)?.error ?? null,
+      },
+    );
     if (listErr) throw listErr;
     allRef.current = parseLight((listRes ?? []) as Record<string, unknown>[]);
     // This runs in parallel with loadSession() on mount (Promise.all in
@@ -571,11 +603,21 @@ export function useSalesData() {
 
   const loadSession = useCallback(async () => {
     // Fast startup: only load config, not all instructors
-    const { data: settingRow, error: cfgErr } = await sb
-      .from("app_settings")
-      .select("value")
-      .eq("key", "booking_flow")
-      .maybeSingle();
+    // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+    const { data: settingRow, error: cfgErr } = await measureApi(
+      "app_settings.fetch_booking_flow",
+      () =>
+        sb
+          .from("app_settings")
+          .select("value")
+          .eq("key", "booking_flow")
+          .maybeSingle(),
+      {
+        method: "GET",
+        resolveError: (res: unknown) =>
+          (res as { error?: unknown } | null)?.error ?? null,
+      },
+    );
     if (cfgErr) throw cfgErr;
     const config = readBookingFlowConfig(settingRow?.value);
     if (!config.enabled) {

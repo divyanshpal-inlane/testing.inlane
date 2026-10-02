@@ -27,6 +27,14 @@ import type { GeoPoint, KmlZone } from "./kml";
 export interface DbZone extends KmlZone {
   id: string;
   instructorId: string;
+  /**
+   * A provisional boundary drawn during onboarding, pending Ops review.
+   *
+   * Rough zones are NOT serviceability zones and must never reach customer- or
+   * sales-facing matching. `fetchDbZones` excludes them by default, so the safe
+   * behaviour is the default one and a new caller cannot leak them by omission.
+   */
+  isRough: boolean;
 }
 
 interface ZoneRow {
@@ -34,8 +42,18 @@ interface ZoneRow {
   instructor_id: string;
   coordinates: unknown;
   raw_name: string | null;
+  /** Absent until migration 20261001_100000 is applied. */
+  is_rough?: boolean | null;
   Instructor: { name: string } | null;
 }
+
+/**
+ * Columns every zone read needs. `is_rough` is opt-in (see
+ * `selectZoneColumns`) so a not-yet-migrated database still returns real
+ * polygons instead of 400-ing the whole dashboard.
+ */
+const ZONE_COLUMNS_BASE =
+  "id,instructor_id,coordinates,raw_name,Instructor(name)";
 
 let cache: DbZone[] | null = null;
 let inflight: Promise<DbZone[]> | null = null;
@@ -121,28 +139,91 @@ function toDbZone(row: ZoneRow): DbZone | null {
     rawName: row.raw_name?.trim() || name,
     kind: "polygon",
     coords: coords as GeoPoint[],
+    isRough: row.is_rough === true,
   };
 }
 
 /**
- * Loads every instructor service-area polygon. ~70 rows / ~40 KB, so this is a
+ * Runs a zone read, retrying without `is_rough` when the column is missing.
+ *
+ * `is_rough` arrives with migration 20261001_100000, which is DDL and therefore
+ * manual-apply only. If the frontend shipped first, PostgREST would reject the
+ * whole select with 42703/PGRST204 and the sales dashboard — plus the zone
+ * map — would show nothing. Retrying degrades to "no rough zones exist yet",
+ * which is exactly correct for a database that has never stored one, so the app
+ * can be deployed ahead of the migration. Never throws for this reason.
+ */
+async function selectZones(
+  columns: string,
+): Promise<{ data: ZoneRow[] | null; error: unknown }> {
+  // `Instructor(name)` cannot be expressed in the generated types here — the
+  // zone table's `Relationships` is empty, so supabase-js types the embed as a
+  // relation error. Cast at the boundary rather than loosening the client.
+  const run = (cols: string) =>
+    supabase
+      .from("instructor_service_zones")
+      .select(cols)
+      .eq("kind", "polygon") as unknown as Promise<{
+      data: unknown;
+      error: unknown;
+    }>;
+
+  const first = (await run(columns)) as {
+    data: ZoneRow[] | null;
+    error: unknown;
+  };
+  if (!first.error || first.data) return first;
+  if (!columns.includes("is_rough")) return first;
+  if (import.meta.env.DEV) {
+    console.warn(
+      "[zones-db] could not read instructor_service_zones.is_rough; treating " +
+        "every polygon as a verified service area. Apply " +
+        "supabase/migrations/20261001_100000_add_rough_polygon_flag.sql",
+    );
+  }
+  return (await run(ZONE_COLUMNS_BASE)) as {
+    data: ZoneRow[] | null;
+    error: unknown;
+  };
+}
+
+/**
+ * Loads instructor service-area polygons. ~70 rows / ~40 KB, so this is a
  * single cheap query rather than a per-instructor fetch, and it is cached for
  * the lifetime of the module (the roster can be large).
  *
- * Returns a flat array ordered by instructor name then creation time. Callers
- * that need "all zones for this instructor" should use `groupZonesByInstructor`
- * rather than assuming one row per instructor.
+ * The module cache deliberately holds EVERY polygon, rough included, and the
+ * `includeRough` filter is applied to the returned copy. Filtering after the
+ * cache rather than before it means toggling the Zone Map's "Show Rough
+ * Polygons" switch never re-queries, and there is still only one shape of row
+ * in memory. Each call returns a fresh array, so a caller sorting or mutating
+ * the result cannot corrupt the cache.
+ *
+ * `includeRough` defaults to FALSE. Rough polygons are provisional onboarding
+ * boundaries, not serviceability zones, so the sales dashboard and every other
+ * matching consumer must be able to call this plainly and be guaranteed not to
+ * see one. Only the Zone Map opts in.
+ *
+ * Returns a flat array ordered by instructor name then creation time.
  */
-export async function fetchDbZones(force = false): Promise<DbZone[]> {
+export async function fetchDbZones(
+  options: { includeRough?: boolean } | boolean = {},
+  force = false,
+): Promise<DbZone[]> {
+  const includeRough =
+    typeof options === "boolean" ? options : options.includeRough === true;
+  const all = await fetchAllDbZones(force);
+  return includeRough ? all : all.filter((z) => !z.isRough);
+}
+
+/** Every polygon, rough or verified. Prefer {@link fetchDbZones}. */
+async function fetchAllDbZones(force = false): Promise<DbZone[]> {
   if (!force && cache) return cache;
   if (!force && inflight) return inflight;
 
   const epoch = cacheEpoch;
   const run = (async () => {
-    const { data, error } = await supabase
-      .from("instructor_service_zones")
-      .select("id,instructor_id,coordinates,raw_name,Instructor(name)")
-      .eq("kind", "polygon");
+    const { data, error } = await selectZones(`${ZONE_COLUMNS_BASE},is_rough`);
     if (error) throw error;
 
     const out: DbZone[] = [];
@@ -198,6 +279,72 @@ export const DUPLICATE_ZONE_MESSAGE =
   "edit the existing one instead of adding another.";
 
 /**
+ * True when a write failed because migration 20261001_100000 has not been
+ * applied yet. 42703 is `undefined_column`; PostgREST reports the same condition
+ * as PGRST204 on the embedded `Instructor(name)` select.
+ *
+ * Only a write that *rejected the rough flag* should be retried or reported:
+ * see {@link canDegradeWrite} for why a verified save is allowed to fall back and
+ * a rough save is not.
+ */
+export function isMissingRoughColumnError(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code ?? "";
+  const message = (error as { message?: string } | null)?.message ?? "";
+  // A bare 42703/PGRST204 is not enough on its own — it can name any column.
+  // Require that the message actually implicate is_rough when there is a
+  // message, so an unrelated schema problem is never silently retried.
+  if (/is_rough/i.test(message)) return true;
+  if (message) return false;
+  return code === "42703" || code === "PGRST204";
+}
+
+/**
+ * Whether a write may be retried without `is_rough` after a missing-column
+ * error.
+ *
+ * ASYMMETRIC ON PURPOSE. The two cases must not be treated alike:
+ *
+ *   - `isRough === true` → NEVER degrade. Dropping the flag would store a rough
+ *     boundary as a VERIFIED serviceability zone, so real customers could be
+ *     auto-matched to an instructor Ops has never confirmed covers them. That is
+ *     the exact harm the rough-polygon concept exists to prevent, so this fails
+ *     loudly with actionable copy instead.
+ *   - `isRough === false`/absent → safe to degrade. On a database that has never
+ *     had the column there is no way to store a rough polygon at all, so every
+ *     existing row is already a verified service area. Retrying without the
+ *     column therefore stores exactly the intended state, and it keeps the
+ *     existing "edit a polygon" path working during the window between deploying
+ *     the frontend and manually applying the DDL.
+ */
+function canDegradeWrite(isRough: boolean | undefined): boolean {
+  return isRough !== true;
+}
+
+/** Actionable copy when a ROUGH save is attempted before the migration exists. */
+export const MISSING_ROUGH_COLUMN_MESSAGE =
+  "Could not save the rough polygon: the database is missing " +
+  "instructor_service_zones.is_rough, and saving without it would store an " +
+  "unverified boundary as a real service area. Apply " +
+  "supabase/migrations/20261001_100000_add_rough_polygon_flag.sql and retry.";
+
+/** Re-throws a raw PostgREST error as actionable copy where we can. */
+function rethrowZoneWriteError(
+  error: unknown,
+  isRough: boolean | undefined,
+): never {
+  if (isDuplicateZoneError(error)) throw new Error(DUPLICATE_ZONE_MESSAGE);
+  if (isMissingRoughColumnError(error)) {
+    throw new Error(
+      canDegradeWrite(isRough)
+        ? `Missing instructor_service_zones.is_rough (apply ` +
+            `supabase/migrations/20261001_100000_add_rough_polygon_flag.sql): ${error}`
+        : MISSING_ROUGH_COLUMN_MESSAGE,
+    );
+  }
+  throw error;
+}
+
+/**
  * Creates the instructor's service-area polygon. Only valid for an instructor
  * who does not have one yet; `UNIQUE(instructor_id)` rejects a second.
  */
@@ -206,30 +353,42 @@ export async function insertZone(params: {
   coordinates: GeoPoint[];
   rawName?: string | null;
   description?: string | null;
+  /** Mark this boundary as rough/provisional (default false). */
+  isRough?: boolean;
 }): Promise<DbZone> {
-  const { data, error } = await supabase
-    .from("instructor_service_zones")
-    .insert({
-      instructor_id: params.instructorId,
-      kind: "polygon",
-      // The generated types declare `coordinates` as `Json`, which does not
-      // structurally admit a GeoPoint[] literal. This is the same cast the
-      // original one-zone upsert used; toDbZone re-validates the shape on the
-      // way out.
-      coordinates: params.coordinates as unknown as never,
-      raw_name: params.rawName ?? null,
-      description: params.description ?? null,
-    })
-    .select("id,instructor_id,coordinates,raw_name,Instructor(name)")
-    .single();
-  if (error) {
-    if (isDuplicateZoneError(error)) {
-      throw new Error(DUPLICATE_ZONE_MESSAGE);
-    }
-    throw error;
-  }
+  const row = {
+    instructor_id: params.instructorId,
+    kind: "polygon",
+    // The generated types declare `coordinates` as `Json`, which does not
+    // structurally admit a GeoPoint[] literal. This is the same cast the
+    // original one-zone upsert used; toDbZone re-validates the shape on the
+    // way out.
+    coordinates: params.coordinates as unknown as never,
+    raw_name: params.rawName ?? null,
+    description: params.description ?? null,
+  };
+  const withFlag = { ...row, is_rough: params.isRough === true };
+  const withoutFlag = row;
 
-  const zone = toDbZone(data as unknown as ZoneRow);
+  let res = await supabase
+    .from("instructor_service_zones")
+    .insert(withFlag)
+    .select(`${ZONE_COLUMNS_BASE},is_rough`)
+    .single();
+  if (
+    res.error &&
+    isMissingRoughColumnError(res.error) &&
+    canDegradeWrite(params.isRough)
+  ) {
+    res = await supabase
+      .from("instructor_service_zones")
+      .insert(withoutFlag)
+      .select(ZONE_COLUMNS_BASE)
+      .single();
+  }
+  if (res.error) rethrowZoneWriteError(res.error, params.isRough);
+
+  const zone = toDbZone(res.data as unknown as ZoneRow);
   if (!zone) throw new Error("Saved zone came back malformed.");
   invalidateDbZoneCache();
   return zone;
@@ -238,29 +397,69 @@ export async function insertZone(params: {
 /** Updates ONE zone in place, addressed by its primary key. */
 export async function updateZoneById(params: {
   zoneId: string;
-  coordinates: GeoPoint[];
+  /**
+   * Omit to leave the geometry untouched. Promotion (rough -> verified) passes
+   * nothing, so it flips `is_rough` without rewriting `coordinates` — a
+   * promotion must not restate the stored ring, or a round-trip through
+   * `closeRing`/JSON could quietly alter an Ops-drawn boundary.
+   */
+  coordinates?: GeoPoint[];
   rawName?: string | null;
   description?: string | null;
+  /**
+   * Explicitly re-stamp the rough flag. Pass `false` to promote a rough
+   * boundary to a verified service area; pass `true` to send a refined-on-
+   * screen polygon back to provisional.
+   */
+  isRough?: boolean;
 }): Promise<DbZone> {
   const patch: {
+    /**
+     * `never` rather than `GeoPoint[]`: PostgREST's generated type widens
+     * `coordinates` to `Json`, and this is the one assignment that bridges the
+     * two. The `never` makes the whole patch structurally assignable to the
+     * generated update body without a cast at the call site.
+     */
     coordinates?: never;
     raw_name?: string | null;
     description?: string | null;
-  } = {
-    coordinates: params.coordinates as unknown as never,
-  };
+    is_rough?: boolean;
+  } = {};
+  if (params.coordinates !== undefined) {
+    patch.coordinates = params.coordinates as unknown as never;
+  }
   if (params.rawName !== undefined) patch.raw_name = params.rawName;
   if (params.description !== undefined) patch.description = params.description;
+  // Always sent when the caller states it, including `false`: an Ops edit that
+  // refines a rough boundary into the real one has to clear the flag, and
+  // omitting the key would leave is_rough = true behind.
+  if (params.isRough !== undefined) patch.is_rough = params.isRough;
 
-  const { data, error } = await supabase
-    .from("instructor_service_zones")
-    .update(patch)
-    .eq("id", params.zoneId)
-    .select("id,instructor_id,coordinates,raw_name,Instructor(name)")
-    .single();
-  if (error) throw error;
+  const runUpdate = (body: typeof patch, columns: string) =>
+    supabase
+      .from("instructor_service_zones")
+      .update(body)
+      .eq("id", params.zoneId)
+      .select(columns)
+      .single();
 
-  const zone = toDbZone(data as unknown as ZoneRow);
+  let res = await runUpdate(patch, `${ZONE_COLUMNS_BASE},is_rough`);
+  if (
+    res.error &&
+    isMissingRoughColumnError(res.error) &&
+    canDegradeWrite(params.isRough)
+  ) {
+    // Pre-migration database: retry without the column. See canDegradeWrite —
+    // this is only reached when the row is being saved as verified. Rebuilt by
+    // dropping the flag rather than re-listing the other keys, so an optional
+    // `coordinates` cannot leak into this retry as `undefined`.
+    const rest: typeof patch = { ...patch };
+    delete rest.is_rough;
+    res = await runUpdate(rest, ZONE_COLUMNS_BASE);
+  }
+  if (res.error) rethrowZoneWriteError(res.error, params.isRough);
+
+  const zone = toDbZone(res.data as unknown as ZoneRow);
   if (!zone) throw new Error("Updated zone came back malformed.");
   invalidateDbZoneCache();
   return zone;

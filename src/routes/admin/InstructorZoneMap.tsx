@@ -7,6 +7,7 @@ import {
   Download,
   Layers,
   Loader2,
+  MapPin,
   Maximize,
   Maximize2,
   Menu,
@@ -46,6 +47,12 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/use-toast";
+import {
+  INSTRUCTOR_STATUSES,
+  type InstructorStatus,
+  instructorStatusMeta,
+  resolveInstructorStatus,
+} from "@/constants/instructorStatus";
 import { isCompanyInstructor } from "@/lib/sales-dashboard/company-instructors";
 import { pointInPolygon } from "@/lib/sales-dashboard/kml";
 import {
@@ -85,7 +92,87 @@ interface ZoneView {
   instructorId: string;
   name: string;
   ring: ZoneCoordinate[];
+  /** Provisional boundary awaiting Ops review; never a serviceability zone. */
+  isRough: boolean;
 }
+
+/**
+ * The Places dropdown is appended to `<body>`, so it needs an explicit z-index to
+ * clear the header (`z-30`) and sidebar (`z-20`), plus pointer events restored
+ * for its items.
+ *
+ * Reference-counted because two widgets can be live at once (the header search
+ * and the sidebar location filter). A naive per-effect append/remove would let
+ * whichever effect cleaned up first strip the override out from under the other,
+ * leaving the open dropdown unclickable.
+ */
+let pacStyleEl: HTMLStyleElement | null = null;
+let pacStyleUsers = 0;
+const acquirePacStyles = (): (() => void) => {
+  pacStyleUsers += 1;
+  if (!pacStyleEl) {
+    const el = document.createElement("style");
+    el.dataset.mapPac = "1";
+    el.textContent =
+      ".pac-container{z-index:10000 !important;pointer-events:auto !important}" +
+      ".pac-item{cursor:pointer !important}";
+    document.head.appendChild(el);
+    pacStyleEl = el;
+  }
+  return () => {
+    pacStyleUsers -= 1;
+    if (pacStyleUsers > 0 || !pacStyleEl) return;
+    pacStyleEl.remove();
+    pacStyleEl = null;
+  };
+};
+
+/**
+ * Attach a Google Places suggestion dropdown to one text input.
+ *
+ * `onPlace` fires only when the user picks a suggestion, which is the commit
+ * point: half-typed text is not a location, so nothing is filtered on keystroke.
+ * Free text is still handled separately by the Geocoder path, so both the header
+ * search and the sidebar location filter get suggestions *and* accept an address
+ * that has no matching suggestion.
+ *
+ * Country-restricted to IN: every service area is in Bengaluru, and without this
+ * "Koramangala" resolves to a same-named street on another continent.
+ */
+const usePlacesAutocomplete = (
+  inputRef: React.RefObject<HTMLInputElement | null>,
+  enabled: boolean,
+  onPlace: (place: { at: ZoneCoordinate; label: string }) => void,
+) => {
+  // Held in a ref so re-rendering with a new callback does not tear the widget
+  // down and re-attach it mid-typing, which drops the open dropdown.
+  const onPlaceRef = useRef(onPlace);
+  onPlaceRef.current = onPlace;
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!enabled || !input) return;
+    if (!window.google?.maps?.places) return;
+
+    const releaseStyles = acquirePacStyles();
+    const ac = new window.google.maps.places.Autocomplete(input, {
+      componentRestrictions: { country: "IN" },
+      fields: ["formatted_address", "geometry"],
+    });
+    const listener = ac.addListener("place_changed", () => {
+      const place = ac.getPlace();
+      const loc = place?.geometry?.location;
+      if (!loc) return;
+      onPlaceRef.current({
+        at: { lat: loc.lat(), lng: loc.lng() },
+        label: place?.formatted_address ?? "Pinned location",
+      });
+    });
+    return () => {
+      if (listener) google.maps.event.removeListener(listener);
+      releaseStyles();
+    };
+  }, [enabled, inputRef]);
+};
 
 /**
  * My Maps-style categorical palette. Distinct enough to tell 66 polygons apart
@@ -141,6 +228,8 @@ interface RosterRow {
   name: string;
   latitude: unknown;
   longitude: unknown;
+  status: unknown;
+  enabled: unknown;
 }
 
 function ringsEqual(
@@ -163,6 +252,40 @@ function centroidOf(ring: ZoneCoordinate[]): ZoneCoordinate {
   return { lat: sum.lat / ring.length, lng: sum.lng / ring.length };
 }
 
+/**
+ * Sidebar status tag, matching the colours the Instructor Management module
+ * already uses for the same three states.
+ *
+ * Renders NOTHING for `active`, and for an unknown status. That is deliberate:
+ * this chip sits on every one of ~130 sidebar rows, so badging the default state
+ * would fill the list with "Active" and bury the two tags that actually tell an
+ * admin something — on-break and inactive both mean the boundary is NOT a live
+ * service area, which is the whole reason the sidebar needs them.
+ *
+ * The title carries the consequence, not just the state, so an admin hovering a
+ * chip learns what Ops should do about it without leaving the screen.
+ */
+function ZoneStatusTag({ status }: { status?: InstructorStatus }) {
+  if (!status || status === "active") return null;
+  const meta = instructorStatusMeta(status);
+  return (
+    <span
+      data-zone-status={status}
+      title={
+        status === "inactive"
+          ? "Inactive — off the road. This service area is hidden on the map and never used for matching."
+          : "On break — temporarily off the road. This service area is shown as an outline only."
+      }
+      className={cn(
+        "shrink-0 rounded px-1 text-[10px] font-medium",
+        meta.badgeClass,
+      )}
+    >
+      {meta.label}
+    </span>
+  );
+}
+
 export default function InstructorZoneMap() {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -170,20 +293,61 @@ export default function InstructorZoneMap() {
 
   // ---------------------------------------------------------------- data ----
 
+  // Rough polygons are stored in the same table as real service areas but are
+  // NOT serviceability zones, so they stay off this screen by default and are
+  // only rendered when an admin explicitly asks for them. Refetching on toggle
+  // is free: zones-db caches the superset and applies the filter in memory.
+  const [showRoughPolygons, setShowRoughPolygons] = useState(false);
+
+  /**
+   * Which instructor statuses are SHOWN, as three independent toggles.
+   *
+   * All three start on, so the sidebar and map list every Instructor out of the
+   * box. Turning one off removes that status from the sidebar lists AND from the
+   * drawn overlays, so an admin can answer "show me only who is available right
+   * now" without the on-break outlines getting in the way.
+   *
+   * A view filter only — it never writes to the Instructor table. Declared here,
+   * next to the rough toggle, because the zone memos below read it and `useState`
+   * results are in the temporal dead zone until their line executes.
+   *
+   * Inactive instructors are now a normal view filter: their polygons ARE drawn
+   * (and their rows listed) unless "Inactive" is switched off. This is a
+   * display concern only — inactive instructors are still excluded from sales
+   * and customer booking by the availability engine, independent of anything
+   * toggled here.
+   */
+  const [statusFilter, setStatusFilter] = useState<
+    Record<InstructorStatus, boolean>
+  >({ active: true, on_break: true, inactive: true });
+
+  /** True when this instructor's status is currently visible to the admin. */
+  const statusVisible = useCallback(
+    (status: InstructorStatus | undefined) => statusFilter[status ?? "active"],
+    [statusFilter],
+  );
+
   const {
-    data: zones = [],
+    data: dbZones = [],
     isLoading: zonesLoading,
     error: zonesError,
   } = useQuery({
+    // One key for both toggle states: the query always fetches BOTH kinds and
+    // the toggle filters in memory. Refetching on toggle looked free (zones-db
+    // caches the superset) but it moved the rough/verified split into two
+    // different query states, which is what made the toggle read as a no-op —
+    // turning it on returned the same verified rows PLUS the rough ones. The
+    // split now lives in exactly one place, the `zones` memo below.
     queryKey: ["instructor-zones"],
     queryFn: async (): Promise<ZoneView[]> => {
-      const dbZones = await fetchDbZones();
-      return dbZones
+      const fetched = await fetchDbZones({ includeRough: true });
+      return fetched
         .map((z) => ({
           rowId: z.id,
           instructorId: z.instructorId,
           name: z.name,
           ring: openRing(z.coords),
+          isRough: z.isRough,
         }))
         .filter((z) => z.ring.length >= 3);
     },
@@ -196,6 +360,7 @@ export default function InstructorZoneMap() {
         id: string;
         name: string;
         company: boolean;
+        status: InstructorStatus;
         lat: number | null;
         lng: number | null;
       }[]
@@ -206,41 +371,160 @@ export default function InstructorZoneMap() {
       //
       // latitude/longitude are safe to select — they predate this feature and
       // are already read by the booking engine's haversine fallback. They are
-      // nullable, so an instructor without them still loads; toZoneCoordinate
-      // just drops those from the marker layer.
+      // the instructor's RESIDENCE, which is a real address and is frequently
+      // outside the service polygon it sits beside; they are never used to
+      // derive or centre that polygon. They are nullable, so an instructor
+      // without them still loads; toZoneCoordinate just drops those from the
+      // marker layer.
+      //
+      // status/enabled drive the active / on-break / inactive behaviour below.
       const { data, error } = await supabase
         .from("Instructor")
-        .select("id_instructor, name, latitude, longitude");
+        .select("id_instructor, name, latitude, longitude, status, enabled");
       if (error) throw error;
-      return (data ?? [])
-        .map((r) => r as unknown as RosterRow)
-        .filter((r) => typeof r.id_instructor === "string")
-        .map((r) => ({
-          id: r.id_instructor,
-          name: (r.name ?? "").trim() || "Unnamed",
-          company: isCompanyInstructor(r.name),
-          lat: toZoneCoordinate(r.latitude, r.longitude)?.lat ?? null,
-          lng: toZoneCoordinate(r.latitude, r.longitude)?.lng ?? null,
-        }))
-        .sort((a, b) => a.name.localeCompare(b.name));
+      return (
+        (data ?? [])
+          .map((r) => r as unknown as RosterRow)
+          .filter((r) => typeof r.id_instructor === "string")
+          .map((r) => ({
+            r,
+            status: resolveInstructorStatus({
+              status: typeof r.status === "string" ? r.status : null,
+              enabled: typeof r.enabled === "boolean" ? r.enabled : null,
+            }),
+            point: toZoneCoordinate(r.latitude, r.longitude),
+          }))
+          // Every instructor is listed, whatever their status: Ops needs to see
+          // that an inactive person still HAS a drawn area (so they can judge
+          // what reactivating them would restore), and that an on-break person's
+          // boundary is intact before it comes back into service. What their
+          // status changes is the DRAWING, further down — an inactive polygon is
+          // withheld from the map entirely and an on-break one is outline-only.
+          // Nothing is deleted either way, so flipping the status back restores
+          // the area exactly as it was. `enabled` is only consulted as a fallback
+          // for rows written before the status column existed.
+          .map(({ r, status, point }) => ({
+            id: r.id_instructor,
+            name: (r.name ?? "").trim() || "Unnamed",
+            company: isCompanyInstructor(r.name),
+            status,
+            lat: point?.lat ?? null,
+            lng: point?.lng ?? null,
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name))
+      );
     },
   });
 
-  const zoneByInstructor = useMemo(() => {
-    const m = new Map<string, ZoneView>();
-    for (const z of zones) m.set(z.instructorId, z);
+  /** Instructor id -> resolved status, for polygon/marker styling. */
+  const statusById = useMemo(() => {
+    const m = new Map<string, InstructorStatus>();
+    for (const i of instructors) m.set(i.id, i.status);
     return m;
-  }, [zones]);
+  }, [instructors]);
 
-  const withoutZone = useMemo(
-    () => instructors.filter((i) => !zoneByInstructor.has(i.id)),
-    [instructors, zoneByInstructor],
+  /**
+   * Every polygon belonging to a roster member, INCLUDING inactive instructors.
+   *
+   * This is the "do they already have a boundary?" set, and it must stay
+   * status-agnostic. Two things depend on it and both would break if an inactive
+   * instructor read as unmapped:
+   *
+   *  - The sidebar's "Not mapped" list. Someone who has a drawn area does not
+   *    belong there just because Ops marked them inactive.
+   *  - `startDrawing` / `commit` / `discardEdit`, which seed from, write to, and
+   *    rewind against the existing ring. Narrowing this by the rough toggle would
+   *    make a verified instructor look unmapped while Ops is reviewing rough
+   *    polygons, and clicking "Draw service area" would then hit
+   *    UNIQUE(instructor_id) and surface DUPLICATE_ZONE_MESSAGE on an instructor
+   *    who already has one.
+   */
+  const rosterZoneRows = useMemo(() => {
+    const rosterIds = new Set(instructors.map((i) => i.id));
+    if (rosterIds.size === 0) return [];
+    return dbZones.filter((z) => rosterIds.has(z.instructorId));
+  }, [dbZones, instructors]);
+
+  /**
+   * Every polygon belonging to a roster member, INCLUDING inactive instructors.
+   *
+   * This is now simply the full roster's zones — the status toggles below gate
+   * visibility on the map and in the sidebar. The old "allRosterZones" that
+   * dropped inactive is gone; the statusFilter now controls everything.
+   */
+  const allRosterZones = useMemo(() => rosterZoneRows, [rosterZoneRows]);
+
+  /**
+   * The polygons this view is allowed to draw, of one kind at a time.
+   *
+   * The rough toggle is a MODE, not an addition: ON shows the rough boundaries
+   * and only those, OFF shows the verified ones and only those. Previously ON
+   * returned everything, which is why the switch appeared to do nothing — every
+   * verified polygon stayed on screen alongside the rough ones. Filtering to
+   * exactly one kind is what makes it legible for the Ops review it exists for.
+   *
+   * The statusFilter (Active / On break / Inactive) now gates ALL visibility.
+   * All three default ON, so inactive polygons are drawn by default. Toggling
+   * "Inactive" off hides them — this is the explicit control the user requested.
+   */
+  const zones = useMemo(
+    () =>
+      (showRoughPolygons
+        ? allRosterZones.filter((z) => z.isRough)
+        : allRosterZones.filter((z) => !z.isRough)
+      ).filter((z) => statusVisible(statusById.get(z.instructorId))),
+    [allRosterZones, showRoughPolygons, statusById, statusVisible],
   );
 
   /**
-   * Instructor id -> registered coordinate, for instructors that have one.
-   * Used to place the marker dot at the real roster address instead of the
-   * polygon centroid. Missing entries simply fall back to the centroid.
+   * Instructor id -> their one polygon, whichever kind it is, active or not.
+   *
+   * Built from `rosterZoneRows`, not `zones`: existence and editing must both
+   * survive the rough toggle and the inactive filter, or a mapped instructor
+   * would be offered a "Draw service area" that collides with their own row.
+   */
+  const zoneByInstructor = useMemo(() => {
+    const m = new Map<string, ZoneView>();
+    for (const z of rosterZoneRows) m.set(z.instructorId, z);
+    return m;
+  }, [rosterZoneRows]);
+
+  /**
+   * What the sidebar's "Mapped" list renders.
+   *
+   * Gated by the SAME statusFilter that gates the map, so an inactive instructor
+   * with a polygon is listed when the Inactive toggle is ON and drops out of
+   * both columns when it is OFF.
+   *
+   * Deliberately NOT gated by the rough toggle. The rough switch is a display
+   * mode for the MAP (see `zones`), but the sidebar is an inventory of who is
+   * mapped, and "N of M instructors mapped" is already counted mode-agnostically
+   * from `zoneByInstructor`. Filtering this list by rough mode used to DROP any
+   * instructor whose polygon the mode was hiding: they left Mapped here, and
+   * also left Not mapped (which skips anyone already in `zoneByInstructor`), so
+   * they disappeared from the sidebar entirely. With one rough row that cost
+   * exactly one person - an on_break instructor, so the sidebar showed 10
+   * on_break badges against 11 on_break instructors - and switching rough mode
+   * ON emptied the sidebar of every verified owner it hid (~67 rows).
+   */
+  const listedZones = useMemo(
+    () =>
+      rosterZoneRows.filter((z) =>
+        statusVisible(statusById.get(z.instructorId)),
+      ),
+    [rosterZoneRows, statusById, statusVisible],
+  );
+
+  /**
+   * Instructor id -> RESIDENCE coordinate, for instructors that have one.
+   *
+   * This is the instructor's home address from `Instructor.latitude/longitude`,
+   * and it is only ever a marker position. It is deliberately NOT assumed to sit
+   * inside, at the centre of, or anywhere near the service polygon — an
+   * instructor living outside the area they cover is ordinary. Nothing in the
+   * matching path reads this map: serviceability is decided solely by
+   * ray-casting the polygon (see pinMatches). Missing entries fall back to the
+   * polygon's centroid so those instructors still get a visible dot.
    */
   const rosterPointById = useMemo(() => {
     const m = new Map<string, ZoneCoordinate>();
@@ -251,11 +535,38 @@ export default function InstructorZoneMap() {
     return m;
   }, [instructors]);
 
-  /** Instructors with no usable lat/lng — drives the marker-mode hint. */
-  const missingPointCount = useMemo(
-    () => instructors.filter((i) => i.lat == null || i.lng == null).length,
-    [instructors],
+  /**
+   * How many rough polygons exist, counted from the FULL set.
+   *
+   * Counted from `allRosterZones` rather than `zones`, because `zones` already
+   * excludes rough rows while the toggle is off — which would make the label
+   * read "0 rough polygons" and imply Ops has nothing to review. The count has
+   * to answer "is there anything to switch to?" independently of what is
+   * currently on screen.
+   */
+  const roughCount = useMemo(
+    () => allRosterZones.filter((z) => z.isRough).length,
+    [allRosterZones],
   );
+
+  /** Instructors with no usable lat/lng — drives the marker-mode hint. */
+  const missingPointCount = useMemo(() => {
+    // Counted over instructors who HAVE a polygon, not the whole roster. The
+    // sentence is about dots ("their dot stays on the polygon centre"), and an
+    // instructor with no polygon gets no dot at all - neither the residence nor
+    // the centroid - so counting them overstated the number. Live data showed 4
+    // against only 3 visible fallback dots, which reads as a missing-dot bug.
+    //
+    // Deliberately independent of the rough toggle and the status filters: the
+    // hint reports missing DATA, not what happens to be on screen right now, so
+    // it must not flap as Ops flips view switches.
+    let n = 0;
+    for (const i of instructors) {
+      if (!zoneByInstructor.has(i.id)) continue;
+      if (i.lat == null || i.lng == null) n += 1;
+    }
+    return n;
+  }, [instructors, zoneByInstructor]);
 
   const zonesQueryKey = ["instructor-zones"] as const;
 
@@ -265,6 +576,7 @@ export default function InstructorZoneMap() {
       instructorId: string;
       name: string;
       ring: ZoneCoordinate[];
+      isRough: boolean;
     }) => {
       if (payload.ring.length < 3) {
         throw new Error("A service area needs at least 3 points.");
@@ -279,17 +591,22 @@ export default function InstructorZoneMap() {
       // same row an upsert-on-instructor_id would have hit — but it cannot
       // silently overwrite a different row. `zoneId === null` means the admin
       // drew a first polygon for an instructor who had none.
+      //
+      // `isRough` is always sent on update, including `false`, so refining a
+      // rough boundary here promotes it to a real service area.
       if (payload.zoneId) {
         return updateZoneById({
           zoneId: payload.zoneId,
           coordinates: closeRing(payload.ring),
           rawName: payload.name,
+          isRough: payload.isRough,
         });
       }
       return insertZone({
         instructorId: payload.instructorId,
         coordinates: closeRing(payload.ring),
         rawName: payload.name,
+        isRough: payload.isRough,
       });
     },
     onSuccess: (saved) => {
@@ -303,15 +620,22 @@ export default function InstructorZoneMap() {
           instructorId: saved.instructorId,
           name: saved.name,
           ring: openRing(saved.coords),
+          isRough: saved.isRough,
         };
         const list = prev ?? [];
         const at = list.findIndex((z) => z.instructorId === view.instructorId);
+        // With rough polygons hidden, a just-saved rough row must not be
+        // injected into the real-zone list — that would show exactly the thing
+        // the toggle is meant to suppress. The refetch restores the truth.
+        if (view.isRough && !showRoughPolygons) {
+          return at === -1 ? list : list.filter((_, i) => i !== at);
+        }
         if (at === -1) return [...list, view];
         const next = [...list];
         next[at] = view;
         return next;
       });
-      void queryClient.invalidateQueries({ queryKey: zonesQueryKey });
+      void queryClient.invalidateQueries({ queryKey: ["instructor-zones"] });
     },
   });
 
@@ -322,6 +646,107 @@ export default function InstructorZoneMap() {
     onSuccess: () => {
       invalidateDbZoneCache();
       void queryClient.invalidateQueries({ queryKey: zonesQueryKey });
+    },
+  });
+
+  /**
+   * Promotes a rough boundary to a real service area: one UPDATE setting
+   * `is_rough = false` on the existing row.
+   *
+   * Deliberately a flag flip and NOT a re-draw. `UNIQUE(instructor_id)` means
+   * the instructor already owns this row, so "make it normal" is a promotion of
+   * the geometry Ops (or the onboarding wizard) already stored — it must not
+   * insert a second row, and it must not touch `coordinates`. Re-saving the ring
+   * would work but would silently overwrite whatever the polygon looks like now,
+   * which is not what "promote" means.
+   *
+   * `updateZoneById` sends `is_rough: false` explicitly rather than omitting
+   * the column, and that is load-bearing: a pre-migration database (no
+   * `is_rough` column) can degrade this write safely, whereas silently dropping
+   * `is_rough: true` on a rough save would store an unverified boundary as a
+   * real service area — the exact harm the flag exists to prevent. Going
+   * rough -> verified is the safe direction to degrade.
+   *
+   * The row only becomes visible in the normal view after the refetch below, so
+   * the "promoted" zone does not linger in the rough list.
+   */
+  const promoteZone = useMutation({
+    mutationFn: async (params: { zoneId: string; instructorId: string }) => {
+      const saved = await updateZoneById({
+        zoneId: params.zoneId,
+        isRough: false,
+      });
+      return saved;
+    },
+    onSuccess: (saved) => {
+      invalidateDbZoneCache();
+      queryClient.setQueryData<ZoneView[]>(zonesQueryKey, (prev) => {
+        const list = prev ?? [];
+        const at = list.findIndex((z) => z.instructorId === saved.instructorId);
+        if (at === -1) return list;
+        const next = [...list];
+        next[at] = { ...next[at], isRough: false };
+        // While the rough toggle is OFF this row was not on screen at all, so
+        // adding it here would make a polygon appear without the admin asking
+        // for the verified view. The refetch is what makes it show up.
+        return next[at].isRough || showRoughPolygons ? next : list;
+      });
+      void queryClient.invalidateQueries({ queryKey: zonesQueryKey });
+      toast({
+        title: "Polygon promoted",
+        description: `${saved.name} is now a verified service area.`,
+      });
+    },
+    onError: (error) => {
+      toast({
+        title: "Could not promote polygon",
+        description: error instanceof Error ? error.message : String(error),
+        variant: "destructive",
+      });
+    },
+  });
+
+  /**
+   * Demotes a verified service area back to a rough/provisional boundary:
+   * one UPDATE setting `is_rough = true` on the existing row.
+   *
+   * Symmetric with `promoteZone` — a flag flip only, no geometry change.
+   * Useful when Ops realises a boundary was marked verified prematurely
+   * and needs to send it back for review.
+   */
+  const demoteZone = useMutation({
+    mutationFn: async (params: { zoneId: string; instructorId: string }) => {
+      const saved = await updateZoneById({
+        zoneId: params.zoneId,
+        isRough: true,
+      });
+      return saved;
+    },
+    onSuccess: (saved) => {
+      invalidateDbZoneCache();
+      queryClient.setQueryData<ZoneView[]>(zonesQueryKey, (prev) => {
+        const list = prev ?? [];
+        const at = list.findIndex((z) => z.instructorId === saved.instructorId);
+        if (at === -1) return list;
+        const next = [...list];
+        next[at] = { ...next[at], isRough: true };
+        // While the rough toggle is ON this row was not on screen, so
+        // adding it here would make a rough polygon appear without the
+        // admin asking for the rough view. The refetch restores the truth.
+        return next[at].isRough && showRoughPolygons ? next : list;
+      });
+      void queryClient.invalidateQueries({ queryKey: zonesQueryKey });
+      toast({
+        title: "Polygon demoted",
+        description: `${saved.name} is now a rough boundary.`,
+      });
+    },
+    onError: (error) => {
+      toast({
+        title: "Could not demote polygon",
+        description: error instanceof Error ? error.message : String(error),
+        variant: "destructive",
+      });
     },
   });
 
@@ -339,14 +764,21 @@ export default function InstructorZoneMap() {
 
   /**
    * Whether "Instructor markers" draws the real `Instructor.latitude/longitude`
-   * pin or the polygon's centroid dot.
+   * pin (the instructor's RESIDENCE) or the polygon's centroid dot.
    *
    * Both are drawn as a `Circle`, so switching re-runs the overlay effect and
-   * swaps the position. The centroid is the default because it is always
-   * available — 3 of 131 instructors have no usable lat/lng — while the real
-   * pin is what a sales rep expects when cross-referencing a roster address.
+   * swaps the position. The residence is now the default: it is the point the
+   * marker is *meant* to show, it is a real address, and it is routinely
+   * outside the service polygon drawn beside it — which is correct, not a data
+   * error. The centroid remains available as a fallback for instructors with no
+   * residence on file, and is used automatically for them regardless of this
+   * setting.
+   *
+   * Neither position is ever used to decide serviceability. Matching is
+   * polygon-only (see pinMatches), so no residence or centroid coordinate can
+   * influence which instructor is considered to cover an address.
    */
-  const [useInstructorCoords, setUseInstructorCoords] = useState(false);
+  const [useInstructorCoords, setUseInstructorCoords] = useState(true);
 
   /** Set when the active basemap changes, so fitAll re-frames it. */
   const [mapTypeId, setMapTypeId] = useState<string>("roadmap");
@@ -356,8 +788,13 @@ export default function InstructorZoneMap() {
 
   /** True once the `places` sub-library is ready for the search autocomplete. */
   const [placesReady, setPlacesReady] = useState(false);
-  /** Set on first focus/typing of the search box, which then loads `places`. */
+  /**
+   * Set on first focus/typing of either search box, which then loads `places`.
+   * Tracked per box rather than as one flag so the library still loads when only
+   * the sidebar filter is used, without the header input eagerly requesting it.
+   */
   const [searchEngaged, setSearchEngaged] = useState(false);
+  const [locationFilterEngaged, setLocationFilterEngaged] = useState(false);
 
   /**
    * Per-instructor layer visibility, keyed by instructor id. My Maps hides a
@@ -392,6 +829,13 @@ export default function InstructorZoneMap() {
    */
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
+  /**
+   * Whether the boundary being edited is provisional. A rough polygon is
+   * excluded from every sales/customer match, so this switch is the only thing
+   * standing between a hand-click approximation and live auto-assignment — it
+   * is stated explicitly in the editor rather than inferred.
+   */
+  const [editingIsRough, setEditingIsRough] = useState(false);
   /** The persisted ring this edit started from; the target for Cancel. */
   const [savedDraft, setSavedDraft] = useState<ZoneCoordinate[] | null>(null);
   /** Mirrors the live ring for `dirty`, without waiting for a React commit. */
@@ -409,18 +853,98 @@ export default function InstructorZoneMap() {
   const [pin, setPin] = useState<{ at: ZoneCoordinate; label: string } | null>(
     null,
   );
+  /**
+   * Location filter, as a second axis alongside the text query.
+   *
+   * `active` is what the button below "Filter instructors" toggles. It only
+   * narrows the list once a pin exists to narrow it *by* — opening the panel is
+   * not the same as committing to a location, otherwise clicking the button
+   * would silently filter by whatever pin the header search left lying around.
+   * `locationQuery` is this panel's own text, kept separate from the header's
+   * `placeQuery` so the two searches cannot clobber each other's input.
+   */
+  const [locationFilter, setLocationFilter] = useState({
+    active: false,
+    query: "",
+  });
 
   const mapDivRef = useRef<HTMLDivElement | null>(null);
   const mapWrapRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const autocompleteRef = useRef<google.maps.places.Autocomplete | null>(null);
+  const locationInputRef = useRef<HTMLInputElement | null>(null);
   const overlaysRef = useRef<
     Map<
       string,
-      { polygon: google.maps.Polygon | null; marker: google.maps.Circle | null }
+      {
+        polygon: google.maps.Polygon | null;
+        marker: google.maps.Circle | null;
+        /** Dashed ring drawn in place of a rough polygon's solid edge. */
+        dash: google.maps.Polyline | null;
+      }
     >
   >(new Map());
   const pinMarkerRef = useRef<google.maps.Marker | null>(null);
+
+  /**
+   * Which instructors serve the dropped pin.
+   *
+   * This is the sales question the page exists to answer ("who covers this
+   * address?"), so it mirrors the dashboard's matching rule exactly: ray-cast
+   * `pointInPolygon` against each instructor's own ring. Company backups are
+   * excluded — Ops assigns those by hand and they must never be auto-matched.
+   *
+   * Declared up here rather than next to the render because the overlay effect
+   * needs it: a committed location narrows the MAP to the covering polygons,
+   * not just the sidebar, so the effect below has to read the match set. It used
+   * to sit below the filters, where only the panel could reach it.
+   */
+  const pinMatches = useMemo(() => {
+    if (!pin) return null;
+    return zones.filter(
+      (z) => !isCompanyInstructor(z.name) && pointInPolygon(pin.at, z.ring),
+    );
+  }, [pin, zones]);
+
+  /**
+   * The set of instructor ids the location filter admits, or null when the
+   * filter is not narrowing anything.
+   *
+   * null and an empty set are deliberately different: null means "no location
+   * constraint" (list and map are governed by the text query alone), while an
+   * empty set means "this point is covered by nobody" and must empty the list.
+   * Collapsing the two would show every instructor for a point no polygon
+   * reaches.
+   */
+  const locationMatchedIds = useMemo(() => {
+    if (!locationFilter.active || !pinMatches) return null;
+    return new Set(pinMatches.map((z) => z.instructorId));
+  }, [locationFilter.active, pinMatches]);
+
+  /**
+   * Auto-select the instructor whose polygon covers a freshly committed pin.
+   *
+   * "Search this address" is a question about ONE place, so the map should land
+   * on an answer rather than waiting for a click: the covering layer is
+   * selected and the camera frames it. Only the FIRST match is auto-selected
+   * even when several cover the point — `selectedId` is single-select, and an
+   * existing selection that is still one of the matches is deliberately kept so
+   * a manual pick is not overridden by an unrelated re-render.
+   *
+   * A point covered by nobody clears the selection instead: leaving a stale
+   * layer highlighted after the answer changed to "nobody" reads as a bug.
+   */
+  useEffect(() => {
+    if (!locationFilter.active) return;
+    if (!pinMatches || pinMatches.length === 0) {
+      setSelectedId(null);
+      return;
+    }
+    setSelectedId((prev) =>
+      prev && pinMatches.some((z) => z.instructorId === prev)
+        ? prev
+        : pinMatches[0].instructorId,
+    );
+  }, [locationFilter.active, pinMatches]);
 
   /**
    * Selection handler for map overlays. Held in a ref so the overlay effect
@@ -468,7 +992,7 @@ export default function InstructorZoneMap() {
   // `places` sub-library is ~486 KB on top of the 315 KB bootstrap, and most
   // visits to this page are "look at the map", not "type an address".
   useEffect(() => {
-    if (!searchEngaged) return;
+    if (!searchEngaged && !locationFilterEngaged) return;
     let active = true;
     googleMapsLoader
       .importLibrary("places")
@@ -481,47 +1005,16 @@ export default function InstructorZoneMap() {
     return () => {
       active = false;
     };
-  }, [searchEngaged]);
+  }, [searchEngaged, locationFilterEngaged]);
 
-  useEffect(() => {
-    if (!placesReady || !searchInputRef.current) return;
-    if (!window.google?.maps?.places) return;
-
-    const style = document.createElement("style");
-    style.dataset.mapPac = "1";
-    style.textContent =
-      ".pac-container{z-index:10000 !important;pointer-events:auto !important}" +
-      ".pac-item{cursor:pointer !important}";
-    document.head.appendChild(style);
-
-    const ac = new window.google.maps.places.Autocomplete(
-      searchInputRef.current,
-      {
-        // The service areas are all in Bengaluru; restricting the country keeps
-        // "Koramangala" from resolving to a same-named street elsewhere.
-        componentRestrictions: { country: "IN" },
-        fields: ["formatted_address", "geometry"],
-      },
-    );
-    autocompleteRef.current = ac;
-
-    const listener = ac.addListener("place_changed", () => {
-      const place = ac.getPlace();
-      const loc = place?.geometry?.location;
-      if (!loc) return;
-      setPlaceQuery(place?.formatted_address ?? "");
-      setPin({
-        at: { lat: loc.lat(), lng: loc.lng() },
-        label: place?.formatted_address ?? "Pinned location",
-      });
-    });
-
-    return () => {
-      document.head.removeChild(style);
-      if (listener) google.maps.event.removeListener(listener);
-      autocompleteRef.current = null;
-    };
-  }, [placesReady]);
+  usePlacesAutocomplete(
+    locationInputRef,
+    placesReady,
+    useCallback(({ at, label }) => {
+      setLocationFilter((f) => ({ ...f, query: label, active: true }));
+      setPin({ at, label });
+    }, []),
+  );
 
   useEffect(() => {
     const el = mapDivRef.current;
@@ -545,9 +1038,10 @@ export default function InstructorZoneMap() {
   // null member throws, which React surfaces as an unhandled render/effect
   // error and unmounts the whole page (blank screen, every test selector gone).
   const clearOverlays = useCallback(() => {
-    for (const { polygon, marker } of overlaysRef.current.values()) {
+    for (const { polygon, marker, dash } of overlaysRef.current.values()) {
       polygon?.setMap(null);
       marker?.setMap(null);
+      dash?.setMap(null);
     }
     overlaysRef.current.clear();
   }, []);
@@ -555,7 +1049,7 @@ export default function InstructorZoneMap() {
   useEffect(() => {
     const map = mapInstance;
     const ML = mapsLib;
-    if (!map || !ML?.Polygon || !ML?.Circle) return;
+    if (!map || !ML?.Polygon || !ML?.Circle || !ML?.Polyline) return;
 
     clearOverlays();
 
@@ -570,9 +1064,31 @@ export default function InstructorZoneMap() {
         // only affects rendering; it never touches stored geometry.
         if (hiddenIds.has(z.instructorId)) continue;
 
+        // A committed location narrows the MAP, not just the sidebar list.
+        // "Which instructors serve this address?" is answered by showing the
+        // covering shapes at full size; leaving 70 unrelated polygons on screen
+        // buries the answer and makes the fitBounds zoom meaningless. An EMPTY
+        // match set is still a constraint and must blank the map — falling
+        // through to "show everything" there would draw a blank result as if
+        // every polygon covered the point.
+        if (locationMatchedIds && !locationMatchedIds.has(z.instructorId)) {
+          continue;
+        }
+
         const selected = z.instructorId === selectedId;
         const color = colorFor(z.instructorId);
+        const onBreak = statusById.get(z.instructorId) === "on_break";
+        // Outline-only for both non-serviceable cases, and for different
+        // reasons: a rough polygon has not been verified, and an on-break
+        // instructor is temporarily off the road. Neither is a filled
+        // serviceability area, so neither gets a filled area.
+        const outlineOnly = onBreak || z.isRough;
+        // A rough boundary is dashed as well as transparent, so it stays
+        // distinguishable even for a colour-blind reader and in a screenshot.
+        // Google Maps has no dash on Polygon, so the rough ring is stroked with
+        // a Symbol; see the `if (z.isRough)` block below.
         let polygon: google.maps.Polygon | null = null;
+        let dash: google.maps.Polyline | null = null;
         if (showPolygons) {
           polygon = new ML.Polygon({
             paths: z.ring,
@@ -580,7 +1096,7 @@ export default function InstructorZoneMap() {
             strokeColor: selected ? SELECTED_STROKE : color,
             strokeWeight: selected ? 3 : 2,
             fillColor: selected ? SELECTED_FILL : color,
-            fillOpacity: selected ? 0.3 : 0.18,
+            fillOpacity: outlineOnly ? 0 : selected ? 0.3 : 0.18,
             // Clickable so clicking a polygon in the map selects its sidebar
             // row, matching My Maps' two-way layer/map selection. `setMap(null)`
             // on the next render pass drops the listener with the overlay.
@@ -590,13 +1106,48 @@ export default function InstructorZoneMap() {
           polygon.addListener("click", () =>
             onSelectRef.current(z.instructorId),
           );
+          if (z.isRough) {
+            // Suppress the solid edge, then redraw the ring dashed. Without this
+            // a rough polygon would have BOTH fillOpacity and strokeOpacity at 0
+            // and be completely invisible — showing the toggle would appear to do
+            // nothing. Google Maps has no dash style on Polygon, so the dashed
+            // edge is a separate Polyline stroked with a repeating tick icon.
+            polygon.setOptions({ strokeOpacity: 0 });
+            // Re-close the ring: `ring` is open, and a Polyline drawn from an
+            // open path leaves a gap on one edge.
+            dash = new ML.Polyline({
+              path: [...z.ring, z.ring[0]],
+              map,
+              strokeColor: selected ? SELECTED_STROKE : color,
+              strokeWeight: selected ? 3 : 2,
+              strokeOpacity: 0.95,
+              clickable: true,
+              zIndex: selected ? 3 : 1,
+              icons: [
+                {
+                  icon: {
+                    path: "M 0,-1 0,1",
+                    strokeOpacity: 1,
+                    strokeWeight: 2,
+                    scale: 3,
+                  },
+                  offset: "0",
+                  repeat: "10px",
+                },
+              ],
+            });
+
+            dash.addListener("click", () =>
+              onSelectRef.current(z.instructorId),
+            );
+          }
         }
         let marker: google.maps.Circle | null = null;
         if (showMarkers) {
-          // Prefer the instructor's own registered coordinates; fall back to the
-          // polygon centroid when they're missing or out of range. Rendering the
-          // centroid is not the same as *matching* by proximity — matching is
-          // polygon-only (see pinMatches), this is purely where the dot goes.
+          // The dot marks the instructor's RESIDENCE, which is a real address
+          // and is routinely outside the service polygon drawn beside it. It is
+          // never used as the polygon's centre, and no serviceability decision
+          // reads it — matching is polygon-only (see pinMatches).
           const rosterPoint = useInstructorCoords
             ? (rosterPointById.get(z.instructorId) ?? null)
             : null;
@@ -605,7 +1156,9 @@ export default function InstructorZoneMap() {
             center: rosterPoint ?? centroidOf(z.ring),
             radius: MARKER_RADIUS_METERS,
             fillColor: selected ? SELECTED_FILL : color,
-            fillOpacity: 0.95,
+            // Hollow for the same outline-vs-filled distinction the polygons
+            // use, so an on-break instructor reads as offline at a glance.
+            fillOpacity: outlineOnly ? 0.15 : 0.95,
             strokeColor: "#ffffff",
             strokeWeight: 2,
             clickable: true,
@@ -615,8 +1168,8 @@ export default function InstructorZoneMap() {
             onSelectRef.current(z.instructorId),
           );
         }
-        if (polygon || marker) {
-          overlaysRef.current.set(z.instructorId, { polygon, marker });
+        if (polygon || marker || dash) {
+          overlaysRef.current.set(z.instructorId, { polygon, marker, dash });
         }
       }
     }
@@ -631,6 +1184,8 @@ export default function InstructorZoneMap() {
     hiddenIds,
     rosterPointById,
     useInstructorCoords,
+    statusById,
+    locationMatchedIds,
     clearOverlays,
   ]);
 
@@ -846,6 +1401,10 @@ export default function InstructorZoneMap() {
       const initial = existing ? closeRing(existing.ring) : null;
       setEditingId(id);
       setEditingName(name);
+      // Seed from the stored flag so editing a rough boundary keeps it rough
+      // unless the admin deliberately promotes it. A brand-new draw defaults to
+      // a real service area — that is the common case on this screen.
+      setEditingIsRough(existing ? existing.isRough : false);
       setSavedDraft(initial);
       setDraft(initial);
       setSelectedId(id);
@@ -1061,6 +1620,169 @@ export default function InstructorZoneMap() {
 
   // ------------------------------------------------------------- pin/place ----
 
+  /**
+   * Test handles for the location filter.
+   *
+   * `__zoneSamplePin` returns a point that the app's own matcher confirms is
+   * inside a real, currently-loaded polygon, so a test never has to hard-code a
+   * coordinate. Coverage is live Ops data that gets redrawn, so a baked-in
+   * fixture point silently drifts outside every ring and the test either flakes
+   * or (worse) passes for the wrong reason. Sampling through the same
+   * `pointInPolygon` used for matching means the fixture cannot disagree with
+   * the feature it is testing.
+   *
+   * `__zoneSetPin` drops that pin. `apply` runs the same commit path the Search
+   * button uses, so a passing test exercises production code rather than a
+   * parallel test-only branch. Both are how the filter gets deterministic
+   * coverage without the Maps script, a network round trip, or a Geocoder.
+   *
+   * Not DEV-gated: the suite runs a production build, where DEV is false.
+   */
+  useEffect(() => {
+    const w = window as unknown as {
+      __zoneSamplePin?: () => { at: ZoneCoordinate; label: string } | null;
+      __zoneSetPin?: (
+        at: ZoneCoordinate,
+        label: string,
+        apply: boolean,
+      ) => void;
+    };
+    w.__zoneSamplePin = () => {
+      // A vertex sits exactly on the boundary, where even-odd parity is
+      // undefined, so step a fraction toward the ring's centroid. Re-checking
+      // with `pointInPolygon` means a concave ring that the nudge pushed out of
+      // is rejected rather than silently returned as an "interior" point.
+      for (const z of zones) {
+        if (isCompanyInstructor(z.name) || z.ring.length < 3) continue;
+        const probe = z.ring[0];
+        const centroid = z.ring.reduce(
+          (acc, p) => ({
+            lat: acc.lat + p.lat / z.ring.length,
+            lng: acc.lng + p.lng / z.ring.length,
+          }),
+          { lat: 0, lng: 0 },
+        );
+        const at = {
+          lat: probe.lat * 0.98 + centroid.lat * 0.02,
+          lng: probe.lng * 0.98 + centroid.lng * 0.02,
+        };
+        if (pointInPolygon(at, z.ring)) {
+          return { at, label: `${z.name} service area` };
+        }
+      }
+      return null;
+    };
+    w.__zoneSetPin = (at, label, apply) => {
+      setPin({ at, label });
+      if (apply) setLocationFilter((f) => ({ ...f, active: true }));
+    };
+  }, [zones]);
+
+  /**
+   * Read-only view of the status / rough / residence decisions the overlay
+   * effect makes, for tests.
+   *
+   * These three rules are the ones most likely to regress silently, and none of
+   * them is observable from app chrome alone: a transparent polygon looks
+   * identical to an unrendered one, and a residence dot in the wrong place needs
+   * real geometry to judge. This snapshot is computed from the same
+   * `statusById` / `rosterPointById` / `centroidOf` values the overlays use, and
+   * re-uses the production `pointInPolygon` for the outside-polygon check, so a
+   * test cannot pass for a reason the app would disagree with. It is a pure
+   * read: it never writes and never mutates app state.
+   *
+   * Not DEV-gated: the suite runs a production build, where DEV is false.
+   */
+  useEffect(() => {
+    const w = window as unknown as {
+      __zoneState?: () => {
+        zones: {
+          instructorId: string;
+          name: string;
+          isRough: boolean;
+          status: InstructorStatus;
+          marker: {
+            lat: number;
+            lng: number;
+            source: "residence" | "centroid";
+          };
+          fillOpacity: number;
+          residenceOutsideZone: boolean;
+        }[];
+        /**
+         * Zones that exist in the DB for an INACTIVE instructor, keyed by id.
+         * Ids, not names: three live instructors share the name "Divyansh Pal",
+         * so a name-keyed assertion can pass against the wrong person's row.
+         */
+        hiddenInactive: { instructorId: string; name: string }[];
+        /** Instructors the sidebar lists, whatever their status. */
+        roster: {
+          instructorId: string;
+          name: string;
+          status: InstructorStatus;
+          hasZone: boolean;
+        }[];
+        rosterSize: number;
+        showRoughPolygons: boolean;
+      };
+    };
+    w.__zoneState = () => {
+      const visible = new Set(zones.map((z) => z.instructorId));
+      // Zones read from the DB whose instructor is inactive: present, listed in
+      // the sidebar, and deliberately NOT drawn. Computed by status rather than
+      // as "everything not currently visible", because the rough toggle also
+      // removes rows from `zones` and conflating the two would let a rough row
+      // masquerade as an inactive one.
+      const hidden = rosterZoneRows
+        .filter((z) => !visible.has(z.instructorId))
+        .filter((z) => statusById.get(z.instructorId) === "inactive")
+        .map((z) => ({ instructorId: z.instructorId, name: z.name }));
+      return {
+        zones: zones.map((z) => {
+          const status = statusById.get(z.instructorId) ?? "active";
+          const onBreak = status === "on_break";
+          const residence = rosterPointById.get(z.instructorId) ?? null;
+          const at = residence ?? centroidOf(z.ring);
+          return {
+            instructorId: z.instructorId,
+            name: z.name,
+            isRough: z.isRough,
+            status,
+            marker: {
+              lat: at.lat,
+              lng: at.lng,
+              source: residence
+                ? ("residence" as const)
+                : ("centroid" as const),
+            },
+            // Mirrors the overlay: outline-only for on-break and rough.
+            fillOpacity: onBreak || z.isRough ? 0 : 0.18,
+            residenceOutsideZone: residence
+              ? !pointInPolygon(residence, z.ring)
+              : false,
+          };
+        }),
+        hiddenInactive: hidden,
+        roster: instructors.map((i) => ({
+          instructorId: i.id,
+          name: i.name,
+          status: i.status,
+          hasZone: zoneByInstructor.has(i.id),
+        })),
+        rosterSize: instructors.length,
+        showRoughPolygons,
+      };
+    };
+  }, [
+    zones,
+    rosterZoneRows,
+    zoneByInstructor,
+    instructors,
+    statusById,
+    rosterPointById,
+    showRoughPolygons,
+  ]);
+
   useEffect(() => {
     const map = mapInstance;
     if (!map || !mapsLib?.Marker) return;
@@ -1075,34 +1797,98 @@ export default function InstructorZoneMap() {
     });
   }, [mapInstance, mapsLib, pin]);
 
-  const searchPlace = useCallback(async () => {
-    const text = placeQuery.trim();
-    if (!text || !mapsLib) return;
-    try {
-      const result = await new mapsLib.Geocoder().geocode({ address: text });
-      const hit = result.results[0];
-      if (!hit) {
+  /**
+   * Resolve free text to a single point.
+   *
+   * Shared by the header address search and the sidebar location filter so
+   * both paths geocode identically and report the same two failures ("Not
+   * found" vs "Geocoding failed") instead of drifting apart. Returns null when
+   * there is nothing to search, Maps is not ready, or geocoding failed — the
+   * caller has already been toasted and must not commit a filter.
+   */
+  const geocodeToPin = useCallback(
+    async (
+      text: string,
+    ): Promise<{ at: ZoneCoordinate; label: string } | null> => {
+      const trimmed = text.trim();
+      if (!trimmed || !mapsLib) return null;
+      try {
+        const result = await new mapsLib.Geocoder().geocode({
+          address: trimmed,
+        });
+        const hit = result.results[0];
+        if (!hit) {
+          toast({
+            title: "Not found",
+            description: `Could not find "${trimmed}".`,
+            variant: "destructive",
+          });
+          return null;
+        }
+        return {
+          at: {
+            lat: hit.geometry.location.lat(),
+            lng: hit.geometry.location.lng(),
+          },
+          label: hit.formatted_address ?? trimmed,
+        };
+      } catch {
         toast({
-          title: "Not found",
-          description: `Could not find "${text}".`,
+          title: "Geocoding failed",
+          description: "Try a different address.",
           variant: "destructive",
         });
-        return;
+        return null;
       }
-      const at = {
-        lat: hit.geometry.location.lat(),
-        lng: hit.geometry.location.lng(),
-      };
-      setPin({ at, label: hit.formatted_address ?? text });
-      fitTo([at]);
-    } catch {
-      toast({
-        title: "Geocoding failed",
-        description: "Try a different address.",
-        variant: "destructive",
-      });
-    }
-  }, [mapsLib, placeQuery, fitTo, toast]);
+    },
+    [mapsLib, toast],
+  );
+
+  const searchPlace = useCallback(async () => {
+    const hit = await geocodeToPin(placeQuery);
+    if (!hit) return;
+    setPin(hit);
+    fitTo([hit.at]);
+  }, [geocodeToPin, placeQuery, fitTo]);
+
+  /**
+   * Commit a location to the list filter.
+   *
+   * `active` is set only on a successful geocode, so a typo leaves the previous
+   * filter untouched instead of emptying the list against a location that was
+   * never resolved.
+   *
+   * The camera frames the polygons that COVER the point, not the point itself.
+   * Once the map is narrowed to the matches, zooming to a bare coordinate can
+   * push the covering shapes off-screen, which would leave the narrowed map
+   * looking empty. Falls back to the pin when nothing covers it, so an uncovered
+   * address still shows where it is.
+   */
+  const applyLocationFilter = useCallback(async () => {
+    const hit = await geocodeToPin(locationFilter.query);
+    if (!hit) return;
+    const covering = zones.filter(
+      (z) => !isCompanyInstructor(z.name) && pointInPolygon(hit.at, z.ring),
+    );
+    setPin(hit);
+    setLocationFilter((f) => ({ ...f, active: true }));
+    fitTo(covering.length ? covering.flatMap((z) => z.ring) : [hit.at]);
+  }, [geocodeToPin, locationFilter.query, fitTo, zones]);
+
+  /**
+   * Stop filtering by location, and take the pin with it.
+   *
+   * The pin has to go. It drives the "N instructors serve this location" panel
+   * independently of `locationFilter.active` (see `pinMatches`), so clearing
+   * only the flag emptied the sidebar list while leaving the address and its
+   * match list on screen — which reads as a broken Clear button. Dropping the
+   * pin makes one action clear everything location-related: the query text, the
+   * committed point, the map pin, and the matches.
+   */
+  const clearLocationFilter = useCallback(() => {
+    setLocationFilter((f) => ({ ...f, active: false, query: "" }));
+    setPin(null);
+  }, []);
 
   // -------------------------------------------------------------- editor ----
 
@@ -1167,6 +1953,7 @@ export default function InstructorZoneMap() {
         instructorId: editingId,
         name: editingName,
         ring,
+        isRough: editingIsRough,
       },
       {
         onSuccess: () => {
@@ -1178,9 +1965,17 @@ export default function InstructorZoneMap() {
           setSelectedId(editingId);
           setEditingId(null);
           setEditingName("");
+          setEditingIsRough(false);
           setDraft(null);
           setSavedDraft(null);
-          toast({ title: "Service area saved" });
+          toast({
+            title: editingIsRough
+              ? "Rough polygon saved"
+              : "Service area saved",
+            description: editingIsRough
+              ? "Hidden by default and never used for customer matching. Turn on “Show Rough Polygons” to see it."
+              : undefined,
+          });
         },
         onError: (err) => {
           toast({
@@ -1192,7 +1987,15 @@ export default function InstructorZoneMap() {
         },
       },
     );
-  }, [zoneHistory, editingId, editingName, zoneByInstructor, saveZone, toast]);
+  }, [
+    zoneHistory,
+    editingId,
+    editingName,
+    editingIsRough,
+    zoneByInstructor,
+    saveZone,
+    toast,
+  ]);
 
   const remove = useCallback(() => {
     if (!editingId) return;
@@ -1204,6 +2007,7 @@ export default function InstructorZoneMap() {
       setSavedDraft(null);
       setSelectedId(null);
       setEditingId(null);
+      setEditingIsRough(false);
       return;
     }
     deleteZone.mutate(zoneId, {
@@ -1212,6 +2016,7 @@ export default function InstructorZoneMap() {
         setSavedDraft(null);
         setSelectedId(null);
         setEditingId(null);
+        setEditingIsRough(false);
         toast({ title: "Service area removed" });
       },
       onError: (err) => {
@@ -1228,32 +2033,47 @@ export default function InstructorZoneMap() {
   // --------------------------------------------------------------- render ----
 
   const q = query.trim().toLowerCase();
+  /**
+   * Text and location filters compose as AND, not OR: a row has to satisfy
+   * both to appear. An unmapped instructor has no ring, so they can never be
+   * in `locationMatchedIds` and correctly drop out while the filter is on.
+   */
   const matchedZones = useMemo(
-    () => zones.filter((z) => !q || z.name.toLowerCase().includes(q)),
-    [zones, q],
+    () =>
+      listedZones.filter(
+        (z) =>
+          (!q || z.name.toLowerCase().includes(q)) &&
+          (!locationMatchedIds || locationMatchedIds.has(z.instructorId)),
+      ),
+    [listedZones, q, locationMatchedIds],
   );
   const matchedRoster = useMemo(
-    () => instructors.filter((i) => !q || i.name.toLowerCase().includes(q)),
-    [instructors, q],
+    () =>
+      instructors.filter(
+        (i) =>
+          statusVisible(i.status) &&
+          (!q || i.name.toLowerCase().includes(q)) &&
+          (!locationMatchedIds || locationMatchedIds.has(i.id)),
+      ),
+    [instructors, q, locationMatchedIds, statusVisible],
+  );
+
+  /**
+   * Roster members with no polygon who survive the current filters.
+   *
+   * The list below used to render `matchedRoster` but count `withoutZone`, so
+   * typing in the filter box left the heading reading "Not mapped (87)" above a
+   * single row. Counted from the same filtered array the rows come from, and
+   * deliberately still status-agnostic: an instructor with no area is no area
+   * whether they are on break, inactive or active.
+   */
+  const visibleWithoutZone = useMemo(
+    () => matchedRoster.filter((i) => !zoneByInstructor.has(i.id)),
+    [matchedRoster, zoneByInstructor],
   );
 
   const editingIsCompany = isCompanyInstructor(editingName);
   const editingZone = editingId ? zoneByInstructor.get(editingId) : undefined;
-
-  /**
-   * Which instructors serve the dropped pin.
-   *
-   * This is the sales question the page exists to answer ("who covers this
-   * address?"), so it mirrors the dashboard's matching rule exactly: ray-cast
-   * `pointInPolygon` against each instructor's own ring. Company backups are
-   * excluded — Ops assigns those by hand and they must never be auto-matched.
-   */
-  const pinMatches = useMemo(() => {
-    if (!pin) return null;
-    return zones.filter(
-      (z) => !isCompanyInstructor(z.name) && pointInPolygon(pin.at, z.ring),
-    );
-  }, [pin, zones]);
 
   /**
    * Detail card for the currently selected layer, whether it was picked from
@@ -1272,14 +2092,18 @@ export default function InstructorZoneMap() {
       name: zone?.name ?? roster?.name ?? "Unknown instructor",
       hasZone: Boolean(zone),
       vertexCount: zone?.ring.length ?? 0,
+      isRough: zone?.isRough === true,
+      /** Primary key of the stored row, needed to promote it. */
+      zoneId: zone?.rowId ?? null,
       isCompany: isCompanyInstructor(zone?.name ?? roster?.name),
+      status: statusById.get(selectedId),
       description: (zone as { description?: string } | undefined)?.description,
       rosterLabel:
         roster?.lat != null && roster?.lng != null
           ? `${roster.lat.toFixed(4)}, ${roster.lng.toFixed(4)}`
           : null,
     };
-  }, [selectedId, zoneByInstructor, instructors]);
+  }, [selectedId, zoneByInstructor, instructors, statusById]);
 
   const selectZone = (id: string, fit = true) => {
     setSelectedId(id);
@@ -1425,278 +2249,472 @@ export default function InstructorZoneMap() {
               "max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:shadow-lg",
             )}
           >
-            <div className="flex items-center justify-between gap-2 border-b p-3">
-              <div className="min-w-0">
-                <h2 className="truncate text-sm font-semibold">
-                  Instructor Zone Map
-                </h2>
-                <p className="text-xs text-muted-foreground">
-                  {zones.length} of {instructors.length} instructors mapped
-                </p>
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="flex flex-shrink-0 items-center justify-between gap-2 border-b p-3">
+                <div className="min-w-0">
+                  <h2 className="truncate text-sm font-semibold">
+                    Instructor Zone Map
+                  </h2>
+                  <p className="text-xs text-muted-foreground">
+                    {/* Counted from `zoneByInstructor`, not `zones`. `zones` is
+                      the drawn set, so this number used to drop every time Ops
+                      toggled rough polygons on, and again for each instructor
+                      marked inactive — the same answer, two different numbers,
+                      for a field that means "how many instructors have an area".
+                      `zoneByInstructor` is status- and mode-agnostic, which is
+                      what "mapped" should mean here. */}
+                    {zoneByInstructor.size} of {instructors.length} instructors
+                    mapped
+                  </p>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setSidebarOpen(false)}
+                  title="Collapse sidebar"
+                  aria-label="Collapse sidebar"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </Button>
               </div>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => setSidebarOpen(false)}
-                title="Collapse sidebar"
-                aria-label="Collapse sidebar"
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-            </div>
 
-            <div className="space-y-2 border-b p-3">
-              <Input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Filter instructors"
-                aria-label="Filter instructors"
-              />
-              {/* Address search moved to the header bar. The pin-match panel
+              <ScrollArea className="min-h-0 flex-1">
+                <div className="min-h-0 space-y-4 p-3">
+                  <div className="space-y-2 border-b p-3">
+                    <Input
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                      placeholder="Filter instructors"
+                      aria-label="Filter instructors"
+                    />
+                    {/* Location filter, directly below the text filter so the two
+                narrowing controls read as one unit. The button only opens the
+                panel; the list is narrowed once a location is actually
+                geocoded and applied (see applyLocationFilter). */}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      data-testid="location-filter-toggle"
+                      aria-expanded={locationFilter.active}
+                      onClick={() => {
+                        if (locationFilter.active) {
+                          clearLocationFilter();
+                        } else {
+                          setLocationFilter((f) => ({ ...f, active: true }));
+                        }
+                      }}
+                    >
+                      <MapPin className="mr-1.5 h-3.5 w-3.5" />
+                      {locationFilter.active
+                        ? "Hide location filter"
+                        : "Filter by location"}
+                    </Button>
+                    {locationFilter.active ? (
+                      <div
+                        data-testid="location-filter"
+                        className="space-y-1.5 rounded-md border p-2"
+                      >
+                        <Input
+                          ref={locationInputRef}
+                          value={locationFilter.query}
+                          onFocus={() => setLocationFilterEngaged(true)}
+                          onChange={(e) => {
+                            setLocationFilterEngaged(true);
+                            setLocationFilter((f) => ({
+                              ...f,
+                              query: e.target.value,
+                            }));
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              void applyLocationFilter();
+                            }
+                          }}
+                          placeholder="Search a location"
+                          aria-label="Search a location"
+                        />
+                        <div className="flex gap-2">
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            className="flex-1"
+                            onClick={() => void applyLocationFilter()}
+                            disabled={!locationFilter.query.trim() || !mapsLib}
+                          >
+                            Search
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={clearLocationFilter}
+                            aria-label="Clear location filter"
+                          >
+                            Clear
+                          </Button>
+                        </div>
+                      </div>
+                    ) : null}
+                    {/* Address search moved to the header bar. The pin-match panel
                 stays here so it sits directly above the layer list it
                 highlights. */}
-              {pin ? (
-                <div
-                  className="space-y-1.5 rounded-md border p-2"
-                  data-testid="pin-matches"
-                >
-                  <p className="text-xs font-medium">{pin.label}</p>
-                  {pinMatches && pinMatches.length > 0 ? (
-                    <>
-                      <p className="text-xs text-muted-foreground">
-                        {pinMatches.length} instructor
-                        {pinMatches.length === 1 ? "" : "s"} serve this location
-                      </p>
-                      <ul className="space-y-0.5">
-                        {pinMatches.map((z) => (
-                          <li key={z.instructorId}>
-                            <button
-                              type="button"
-                              onClick={() => selectZone(z.instructorId)}
-                              className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-xs hover:bg-accent"
-                            >
-                              <span
-                                aria-hidden
-                                className="h-2.5 w-2.5 shrink-0 rounded-sm"
-                                style={{ background: colorFor(z.instructorId) }}
-                              />
-                              <span className="truncate">{z.name}</span>
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    </>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">
-                      No polygon covers this point. Drag the pin to re-check.
-                    </p>
-                  )}
-                </div>
-              ) : null}
-            </div>
+                    {pin ? (
+                      <div
+                        className="space-y-1.5 rounded-md border p-2"
+                        data-testid="pin-matches"
+                      >
+                        <p className="text-xs font-medium">{pin.label}</p>
+                        {pinMatches && pinMatches.length > 0 ? (
+                          <>
+                            <p className="text-xs text-muted-foreground">
+                              {pinMatches.length} instructor
+                              {pinMatches.length === 1 ? "" : "s"} serve this
+                              location
+                            </p>
+                            <ul className="space-y-0.5">
+                              {pinMatches.map((z) => (
+                                <li key={z.instructorId}>
+                                  <button
+                                    type="button"
+                                    onClick={() => selectZone(z.instructorId)}
+                                    className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-xs hover:bg-accent"
+                                  >
+                                    <span
+                                      aria-hidden
+                                      className="h-2.5 w-2.5 shrink-0 rounded-sm"
+                                      style={{
+                                        background: colorFor(z.instructorId),
+                                      }}
+                                    />
+                                    <span className="truncate">{z.name}</span>
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          </>
+                        ) : (
+                          <p className="text-xs text-muted-foreground">
+                            No polygon covers this point. Drag the pin to
+                            re-check.
+                          </p>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
 
-            <div className="space-y-2 border-b p-3">
-              <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                <Layers className="h-3.5 w-3.5" />
-                Layers
-              </p>
-              {/* `aria-label` rather than a <Label htmlFor>: the Switch renders a
+                  <div className="space-y-2 border-b p-3">
+                    <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                      <Layers className="h-3.5 w-3.5" />
+                      Layers
+                    </p>
+                    {/* `aria-label` rather than a <Label htmlFor>: the Switch renders a
               <button>, and a `<label for>` pointing at a button is not a
               reliable accessible-name association, so the control would be
               announced as an unlabelled switch. */}
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-normal">Service areas</span>
-                <Switch
-                  aria-label="Service areas"
-                  checked={showPolygons}
-                  onCheckedChange={setShowPolygons}
-                />
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-normal">Instructor markers</span>
-                <Switch
-                  aria-label="Instructor markers"
-                  checked={showMarkers}
-                  onCheckedChange={setShowMarkers}
-                />
-              </div>
-              {showMarkers ? (
-                <div className="flex items-center justify-between gap-2">
-                  <label
-                    htmlFor="marker-position"
-                    className="text-xs font-normal text-muted-foreground"
-                  >
-                    Marker position
-                  </label>
-                  <select
-                    id="marker-position"
-                    value={useInstructorCoords ? "roster" : "centroid"}
-                    onChange={(e) =>
-                      setUseInstructorCoords(e.target.value === "roster")
-                    }
-                    className="h-6 rounded border bg-background px-1 text-xs"
-                  >
-                    <option value="centroid">Polygon centre</option>
-                    <option value="roster">Registered address</option>
-                  </select>
-                </div>
-              ) : null}
-              {showMarkers && useInstructorCoords && missingPointCount > 0 ? (
-                <p className="text-[11px] text-muted-foreground">
-                  {missingPointCount} instructor
-                  {missingPointCount === 1 ? " has" : "s have"} no registered
-                  coordinates; their dot stays on the polygon centre.
-                </p>
-              ) : null}
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="flex-1"
-                  onClick={fitAll}
-                >
-                  <Maximize className="mr-1.5 h-3.5 w-3.5" />
-                  Fit all zones
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={hiddenIds.size ? showAllLayers : hideAllLayers}
-                >
-                  {hiddenIds.size ? "Show all" : "Hide all"}
-                </Button>
-              </div>
-            </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-normal">Service areas</span>
+                      <Switch
+                        aria-label="Service areas"
+                        checked={showPolygons}
+                        onCheckedChange={setShowPolygons}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-normal">
+                        Instructor markers
+                      </span>
+                      <Switch
+                        aria-label="Instructor markers"
+                        checked={showMarkers}
+                        onCheckedChange={setShowMarkers}
+                      />
+                    </div>
+                    {/* Rough polygons are provisional onboarding boundaries, not
+                serviceability zones, so they are opt-in. They are stored in the
+                same table as real areas and are only ever excluded from sales
+                matching, never deleted. */}
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-normal">
+                        Rough polygons
+                      </span>
+                      <Switch
+                        aria-label="Show Rough Polygons"
+                        checked={showRoughPolygons}
+                        onCheckedChange={setShowRoughPolygons}
+                      />
+                    </div>
+                    {showRoughPolygons ? (
+                      <p className="text-[11px] text-muted-foreground">
+                        Showing {roughCount} rough polygon
+                        {roughCount === 1 ? "" : "s"}. These are not
+                        serviceability areas and are never used for customer
+                        matching.
+                      </p>
+                    ) : null}
+                    {/* Status filters. Three independent toggles rather than a
+                single "hide inactive" switch, because Ops review questions are
+                per-status: "who is on break", "who has left". Each shows its
+                own live count, which also makes the control self-describing
+                instead of a blank switch that changes an unrelated list.
 
-            <ScrollArea className="flex-1">
-              <div className="space-y-4 p-3">
-                <section className="space-y-1.5">
-                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    Mapped ({matchedZones.length})
-                  </p>
-                  {matchedZones.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">
-                      No service area matches this filter.
-                    </p>
-                  ) : (
-                    matchedZones.map((z) => {
-                      const hidden = hiddenIds.has(z.instructorId);
-                      return (
-                        <div
-                          key={z.instructorId}
-                          className={cn(
-                            "flex w-full items-center gap-1 rounded-md border pr-1",
-                            selectedId === z.instructorId
-                              ? "border-primary bg-accent"
-                              : "hover:bg-accent",
-                            hidden && "opacity-50",
-                          )}
+                These only gate what is LISTED and DRAWN. They never write to
+                Instructor, and switching "Inactive" on can never put an
+                inactive polygon on the map — that exclusion is unconditional in
+                `allRosterZones`. */}
+                    <div className="mt-1 space-y-1 border-t pt-2">
+                      <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                        Show instructors
+                      </p>
+                      {INSTRUCTOR_STATUSES.map(({ value: status }) => {
+                        const count = instructors.filter(
+                          (i) => i.status === status,
+                        ).length;
+                        const label = instructorStatusMeta(status).label;
+                        return (
+                          <div
+                            key={status}
+                            className="flex items-center justify-between gap-2"
+                          >
+                            <span className="flex min-w-0 items-center gap-1.5 text-xs font-normal">
+                              <span
+                                data-status-count={status}
+                                className="shrink-0 tabular-nums text-muted-foreground"
+                              >
+                                {count}
+                              </span>
+                              <span className="truncate">{label}</span>
+                            </span>
+                            <Switch
+                              aria-label={`Show ${label} instructors`}
+                              checked={statusFilter[status]}
+                              onCheckedChange={(on) =>
+                                setStatusFilter((f) => ({ ...f, [status]: on }))
+                              }
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {showMarkers ? (
+                      <div className="flex items-center justify-between gap-2">
+                        <label
+                          htmlFor="marker-position"
+                          className="text-xs font-normal text-muted-foreground"
                         >
-                          {/* Layer color, matching the polygon fill on the map.
+                          Marker position
+                        </label>
+                        <select
+                          id="marker-position"
+                          value={useInstructorCoords ? "roster" : "centroid"}
+                          onChange={(e) =>
+                            setUseInstructorCoords(e.target.value === "roster")
+                          }
+                          className="h-6 rounded border bg-background px-1 text-xs"
+                        >
+                          {/* The dot marks the instructor's residence, which is a
+                        real address and is frequently outside the service
+                        polygon drawn beside it — so "Registered address" is the
+                        default, not a special mode. "Polygon centre" stays
+                        available for instructors with no residence on file, and
+                        is never used for matching. */}
+                          <option value="roster">Registered address</option>
+                          <option value="centroid">Polygon centre</option>
+                        </select>
+                      </div>
+                    ) : null}
+                    {showMarkers &&
+                    useInstructorCoords &&
+                    missingPointCount > 0 ? (
+                      <p className="text-[11px] text-muted-foreground">
+                        {missingPointCount} instructor
+                        {missingPointCount === 1 ? " has" : "s have"} no
+                        registered coordinates; their dot stays on the polygon
+                        centre.
+                      </p>
+                    ) : null}
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="flex-1"
+                        onClick={fitAll}
+                      >
+                        <Maximize className="mr-1.5 h-3.5 w-3.5" />
+                        Fit all zones
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={hiddenIds.size ? showAllLayers : hideAllLayers}
+                      >
+                        {hiddenIds.size ? "Show all" : "Hide all"}
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="min-h-0 space-y-4 p-3">
+                    <section className="space-y-1.5">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                        Mapped ({matchedZones.length})
+                      </p>
+                      {matchedZones.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">
+                          No service area matches this filter.
+                        </p>
+                      ) : (
+                        matchedZones.map((z) => {
+                          const hidden = hiddenIds.has(z.instructorId);
+                          const rowStatus = statusById.get(z.instructorId);
+                          return (
+                            <div
+                              key={z.instructorId}
+                              className={cn(
+                                "flex w-full items-center gap-1 rounded-md border pr-1",
+                                selectedId === z.instructorId
+                                  ? "border-primary bg-accent"
+                                  : "hover:bg-accent",
+                                hidden && "opacity-50",
+                              )}
+                            >
+                              {/* Layer color, matching the polygon fill on the map.
                             A <span> so it stays out of the row's button
                             sequence. Goes hollow (and the row dims) when the
                             layer is hidden. */}
-                          <span
-                            aria-hidden
-                            title={hidden ? "Layer hidden" : "Layer color"}
-                            className={cn(
-                              "ml-1.5 h-2.5 w-2.5 shrink-0 rounded-sm",
-                              hidden && "border border-muted-foreground",
-                            )}
-                            style={
-                              hidden
-                                ? undefined
-                                : { background: colorFor(z.instructorId) }
-                            }
-                          />
-                          {/* Per-layer visibility, My Maps style. A real
+                              <span
+                                aria-hidden
+                                title={hidden ? "Layer hidden" : "Layer color"}
+                                className={cn(
+                                  "ml-1.5 h-2.5 w-2.5 shrink-0 rounded-sm",
+                                  hidden && "border border-muted-foreground",
+                                )}
+                                style={
+                                  hidden
+                                    ? undefined
+                                    : { background: colorFor(z.instructorId) }
+                                }
+                              />
+                              {/* Rough badge and status tag both sit directly AFTER the name,
+                            inside the name button, so they read as
+                            qualifications of that instructor rather than as
+                            separate controls stacked to the left of them. Only
+                            non-active statuses are badged: an "Active" chip on
+                            ~120 rows would be pure noise and would drown out
+                            the two tags that actually change how the area
+                            behaves. Putting them after the name also keeps them
+                            inside the row's button sequence, which is what the
+                            sidebar's keyboard order already assumes. */}
+                              {/* Per-layer visibility, My Maps style. A real
                             checkbox rather than a <button>: it is a genuine
                             on/off control, and keeping it out of the row's
                             `button` sequence preserves the "name then edit"
                             ordering the sidebar's keyboard order relies on. */}
-                          <input
-                            type="checkbox"
-                            checked={!hidden}
-                            aria-label={`Toggle ${z.name} layer`}
-                            title={hidden ? `Show ${z.name}` : `Hide ${z.name}`}
-                            onChange={() => toggleLayer(z.instructorId)}
-                            className="h-3.5 w-3.5 shrink-0 accent-primary"
-                          />
-                          <button
-                            type="button"
-                            ref={(el) => registerRow(z.instructorId, el)}
-                            onClick={() => selectZone(z.instructorId)}
-                            title={`Zoom to ${z.name}`}
-                            className="flex min-w-0 flex-1 items-center justify-between gap-2 py-1.5 pl-1 text-left text-xs"
-                          >
-                            {/* Wraps to two lines rather than truncating: a
+                              <input
+                                type="checkbox"
+                                checked={!hidden}
+                                aria-label={`Toggle ${z.name} layer`}
+                                title={
+                                  hidden ? `Show ${z.name}` : `Hide ${z.name}`
+                                }
+                                onChange={() => toggleLayer(z.instructorId)}
+                                className="h-3.5 w-3.5 shrink-0 accent-primary"
+                              />
+                              <button
+                                type="button"
+                                ref={(el) => registerRow(z.instructorId, el)}
+                                onClick={() => selectZone(z.instructorId)}
+                                title={`Zoom to ${z.name}`}
+                                className="flex min-w-0 flex-1 flex-wrap items-center gap-1 py-1.5 pl-1 text-left text-xs"
+                              >
+                                {/* Wraps to two lines rather than truncating: a
                                 clipped name reads as missing data, and the
                                 row is the only place the full name appears. */}
-                            <span className="min-w-0 break-words">
-                              {z.name}
-                            </span>
-                            <span className="flex shrink-0 items-center gap-1 text-muted-foreground">
-                              <span>{z.ring.length}</span>
-                              {isCompanyInstructor(z.name) ? (
-                                <Badge
-                                  variant="outline"
-                                  className="h-4 px-1 text-[10px]"
-                                >
-                                  backup
-                                </Badge>
-                              ) : null}
-                            </span>
-                          </button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 shrink-0"
-                            title={`Edit ${z.name} service area`}
-                            aria-label={`Edit ${z.name} service area`}
-                            data-testid={`zone-edit-${z.instructorId}`}
-                            onClick={() => startDrawing(z.instructorId, z.name)}
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </Button>
-                        </div>
-                      );
-                    })
-                  )}
-                </section>
+                                <span className="min-w-0 break-words">
+                                  {z.name}
+                                </span>
+                                {/* Both badges trail the name inside the button. */}
+                                {z.isRough ? (
+                                  <span
+                                    title="Rough polygon — not a serviceability area, never used for customer matching"
+                                    className="shrink-0 rounded border border-dashed border-amber-500 px-1 text-[10px] font-medium text-amber-600"
+                                  >
+                                    Rough
+                                  </span>
+                                ) : null}
+                                <ZoneStatusTag status={rowStatus} />
+                                <span className="ml-auto flex shrink-0 items-center gap-1 text-muted-foreground">
+                                  <span>{z.ring.length}</span>
+                                  {isCompanyInstructor(z.name) ? (
+                                    <Badge
+                                      variant="outline"
+                                      className="h-4 px-1 text-[10px]"
+                                    >
+                                      backup
+                                    </Badge>
+                                  ) : null}
+                                </span>
+                              </button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7 shrink-0"
+                                title={`Edit ${z.name} service area`}
+                                aria-label={`Edit ${z.name} service area`}
+                                data-testid={`zone-edit-${z.instructorId}`}
+                                onClick={() =>
+                                  startDrawing(z.instructorId, z.name)
+                                }
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </section>
 
-                <Separator />
+                    <Separator />
 
-                <section className="space-y-1.5">
-                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    Not mapped ({withoutZone.length})
-                  </p>
-                  {matchedRoster.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">
-                      Nothing matches this filter.
-                    </p>
-                  ) : (
-                    matchedRoster.map((i) => {
-                      const mapped = zoneByInstructor.has(i.id);
-                      if (mapped) return null;
-                      return (
-                        <div key={i.id} className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            title={`Draw ${i.name} service area`}
-                            aria-label={`Draw ${i.name} service area`}
-                            onClick={() => startDrawing(i.id, i.name)}
-                            className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-left text-xs hover:bg-accent"
-                          >
-                            <span className="truncate">{i.name}</span>
-                            <Pentagon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                          </button>
-                        </div>
-                      );
-                    })
-                  )}
-                </section>
-              </div>
-            </ScrollArea>
+                    <section className="space-y-1.5">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                        Not mapped ({visibleWithoutZone.length})
+                      </p>
+                      {matchedRoster.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">
+                          Nothing matches this filter.
+                        </p>
+                      ) : (
+                        matchedRoster.map((i) => {
+                          if (zoneByInstructor.has(i.id)) return null;
+                          return (
+                            <div key={i.id} className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                title={`Draw ${i.name} service area`}
+                                aria-label={`Draw ${i.name} service area`}
+                                onClick={() => startDrawing(i.id, i.name)}
+                                className="flex min-w-0 flex-1 flex-wrap items-center gap-1 rounded-md border px-2 py-1.5 text-left text-xs hover:bg-accent"
+                              >
+                                {/* Same trailing-badge layout as the Mapped row, so
+                                an instructor reads identically in both columns
+                                whichever one they land in. */}
+                                <span className="min-w-0 break-words">
+                                  {i.name}
+                                </span>
+                                <ZoneStatusTag status={i.status} />
+                                <span className="ml-auto flex shrink-0 items-center gap-1">
+                                  <Pentagon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                </span>
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </section>
+                  </div>
+                </div>
+              </ScrollArea>
+            </div>
           </aside>
         ) : null}
 
@@ -1738,6 +2756,14 @@ export default function InstructorZoneMap() {
               <p className="text-xs font-medium" data-testid="zone-edit-title">
                 Editing service area — {editingName}
               </p>
+              {editingIsRough ? (
+                <p
+                  className="text-[11px] font-medium text-amber-600"
+                  data-testid="zone-edit-rough-note"
+                >
+                  Rough polygon
+                </p>
+              ) : null}
               <p className="text-xs text-muted-foreground">
                 {needsMorePoints > 0 ? (
                   <>
@@ -1767,6 +2793,37 @@ export default function InstructorZoneMap() {
                   </span>
                 </p>
               ) : null}
+              {/* The rough/verified decision is stated explicitly here rather
+                  than inferred, because it is the only thing preventing a
+                  hand-click approximation from going live as coverage. It sits
+                  above the action buttons so the flag is read before saving,
+                  not after. */}
+              <div
+                className="mt-2 flex items-start justify-between gap-2 rounded border border-dashed border-amber-500/60 bg-amber-500/5 px-2 py-1.5"
+                data-testid="zone-rough-toggle"
+              >
+                <div className="min-w-0">
+                  <label
+                    htmlFor="zone-rough-switch"
+                    className="text-xs font-medium"
+                  >
+                    Rough polygon
+                  </label>
+                  <p className="text-[11px] text-muted-foreground">
+                    {editingIsRough
+                      ? "Saved as provisional. Hidden by default and never used for customer or sales matching."
+                      : "Saved as a verified service area and used for customer matching."}
+                  </p>
+                </div>
+                <Switch
+                  id="zone-rough-switch"
+                  aria-label="Rough polygon"
+                  checked={editingIsRough}
+                  onCheckedChange={setEditingIsRough}
+                  disabled={saveZone.isPending}
+                  className="mt-0.5 shrink-0"
+                />
+              </div>
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <Button
                   size="sm"
@@ -1869,11 +2926,27 @@ export default function InstructorZoneMap() {
                     />
                     <span className="truncate">{selectedCard.name}</span>
                   </p>
-                  <p className="text-xs text-muted-foreground">
-                    {selectedCard.hasZone
-                      ? `${selectedCard.vertexCount} vertices`
-                      : "No service area yet"}
-                    {selectedCard.isCompany ? " · Ops backup" : ""}
+                  <p className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                    <span>
+                      {selectedCard.hasZone
+                        ? `${selectedCard.vertexCount} vertices`
+                        : "No service area yet"}
+                    </span>
+                    {selectedCard.isCompany ? <span>· Ops backup</span> : null}
+                    {/* Status is on the card, not just the sidebar row: the card
+                        is what an admin reads after selecting a layer, and an
+                        inactive instructor's area is deliberately not on the map
+                        to explain itself. */}
+                    {selectedCard.status && selectedCard.status !== "active" ? (
+                      <span
+                        className={cn(
+                          "rounded px-1 text-[10px] font-medium",
+                          instructorStatusMeta(selectedCard.status).badgeClass,
+                        )}
+                      >
+                        {instructorStatusMeta(selectedCard.status).label}
+                      </span>
+                    ) : null}
                   </p>
                 </div>
                 <Button
@@ -1922,6 +2995,66 @@ export default function InstructorZoneMap() {
                   {selectedCard.hasZone ? "Edit points" : "Draw area"}
                 </Button>
               </div>
+              {/* Promote, only for a rough boundary. The one irreversible-feeling
+                  action on the card, so it is not tucked into the edit flow: Ops
+                  review a rough polygon, decide it is right, and promote it here
+                  without re-entering the vertex editor. It writes `is_rough =
+                  false` and changes nothing else — the stored ring becomes the
+                  live service area.
+
+                  Deliberately not offered for a verified polygon (nothing to
+                  promote) nor for an instructor with no area at all, which has
+                  no row to update. */}
+              {selectedCard.isRough && selectedCard.zoneId ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="mt-2 w-full border-dashed"
+                  data-testid="info-card-promote"
+                  disabled={promoteZone.isPending}
+                  onClick={() =>
+                    promoteZone.mutate({
+                      zoneId: selectedCard.zoneId!,
+                      instructorId: selectedCard.instructorId,
+                    })
+                  }
+                >
+                  {promoteZone.isPending ? (
+                    "Promoting…"
+                  ) : (
+                    <>
+                      <Check className="mr-1.5 h-3.5 w-3.5" />
+                      Make normal polygon
+                    </>
+                  )}
+                </Button>
+              ) : null}
+              {selectedCard.hasZone &&
+              !selectedCard.isRough &&
+              selectedCard.zoneId ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="mt-2 w-full border-dashed"
+                  data-testid="info-card-demote"
+                  disabled={demoteZone.isPending}
+                  onClick={() =>
+                    demoteZone.mutate({
+                      zoneId: selectedCard.zoneId!,
+                      instructorId: selectedCard.instructorId,
+                    })
+                  }
+                >
+                  {demoteZone.isPending ? (
+                    "Demoting…"
+                  ) : (
+                    <>
+                      <AlertTriangle className="mr-1.5 h-3.5 w-3.5" />
+                      Make rough polygon
+                    </>
+                  )}
+                </Button>
+              ) : null}
             </div>
           ) : null}
 
