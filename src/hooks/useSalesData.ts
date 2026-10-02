@@ -8,6 +8,10 @@ import {
   type ScheduleBlock,
 } from "@/lib/sales-dashboard/availability";
 import {
+  isCompanyInstructor,
+  isCompanyInstructorId,
+} from "@/lib/sales-dashboard/company-instructors";
+import {
   type BookingFlowConfig,
   readBookingFlowConfig,
 } from "@/lib/sales-dashboard/config";
@@ -16,6 +20,7 @@ import {
   istTodayISO,
   timeToMinutes,
 } from "@/lib/sales-dashboard/validation";
+import { fetchCompanyInstructorIds } from "@/lib/sales-dashboard/zones-db";
 import { supabase } from "@/lib/supabaseClient";
 
 // database.types.ts is stale for several of the columns this dashboard reads
@@ -37,6 +42,13 @@ export interface InstructorRow {
   status: string | null;
   enabled: boolean | null;
   unavailability: unknown[] | null;
+  /**
+   * Ops-assigned backup instructor. Never auto-matched to a learner — the
+   * availability engine short-circuits on this before consulting `areas` or
+   * any polygon. Resolved from `Instructor.is_company_instructor` plus the
+   * name-list fallback; see parseInstructors().
+   */
+  isCompany: boolean;
 }
 
 export interface LightInstructor {
@@ -148,19 +160,32 @@ async function fetchScheduleWindow(
   return rows;
 }
 
-function parseInstructors(rows: Record<string, unknown>[]): InstructorRow[] {
-  return rows.map((r) => ({
-    id: String(r.id_instructor),
-    name: String(r.name ?? ""),
-    areas: Array.isArray(r.areas)
-      ? (r.areas as string[]).map((a) => String(a))
-      : [],
-    gender: r.gender == null ? null : String(r.gender),
-    status: r.status == null ? null : String(r.status),
-    enabled: r.enabled == null ? null : Boolean(r.enabled),
-    unavailability:
-      r.unavailability == null ? null : (r.unavailability as unknown[]),
-  }));
+function parseInstructors(
+  rows: Record<string, unknown>[],
+  companyIds?: ReadonlySet<string>,
+): InstructorRow[] {
+  return rows.map((r) => {
+    const id = String(r.id_instructor);
+    const name = String(r.name ?? "");
+    return {
+      id,
+      name,
+      areas: Array.isArray(r.areas)
+        ? (r.areas as string[]).map((a) => String(a))
+        : [],
+      gender: r.gender == null ? null : String(r.gender),
+      status: r.status == null ? null : String(r.status),
+      enabled: r.enabled == null ? null : Boolean(r.enabled),
+      unavailability:
+        r.unavailability == null ? null : (r.unavailability as unknown[]),
+      // Mirrors zones-db's tolerant rule: the flagged id is authoritative
+      // (survives a rename), the name list covers pre-migration rows, and a
+      // flagged id whose name differs still wins.
+      isCompany:
+        isCompanyInstructorId(id, companyIds ?? null) ||
+        isCompanyInstructor(name),
+    };
+  });
 }
 
 function parseLight(rows: Record<string, unknown>[]): LightInstructor[] {
@@ -180,9 +205,13 @@ function toInstructorLike(i: InstructorRow): InstructorLike {
     lat: null,
     lng: null,
     gender: i.gender,
+    name: i.name,
     status: i.status,
     enabled: i.enabled,
     unavailability: i.unavailability,
+    // Reaches availability.ts:instructorServesArea(), which returns false for
+    // a company instructor before it looks at areas/radius/polygon.
+    isCompany: i.isCompany,
   };
 }
 
@@ -265,7 +294,15 @@ export function useSalesData() {
         // chunk of instructor IDs is also fetched concurrently rather than
         // in a serial loop (only matters once more than IN_CHUNK ids are
         // requested at once, e.g. a location-search match).
-        const [instructorChunks, scheduleRows] = await Promise.all([
+        //
+        // fetchCompanyInstructorIds() joins the same batch: one small indexed
+        // query, already module-cached, resolving to an empty set (never a
+        // throw) when migration 20260929_100000 is not applied yet. The batch
+        // deliberately returns raw rows rather than parsed ones — calling
+        // parseInstructors() inside it would close over `companyIds`, the very
+        // variable this destructuring declares, and TypeScript rejects that as
+        // a self-referential initializer. Parsing happens just below instead.
+        const [rawChunks, scheduleRows, companyIds] = await Promise.all([
           Promise.all(
             chunk(wanted, IN_CHUNK).map(async (part) => {
               const { data: rows, error } = await sb
@@ -279,21 +316,27 @@ export function useSalesData() {
                   // exposes a female-preference control, so parseInstructors()
                   // just falls back to gender: null (isFemale() -> false), which
                   // matches this dashboard's actual behavior either way.
+                  //
+                  // "is_company_instructor" is likewise NOT selected here, for
+                  // the same reason: migration 20260929_100000 is manual-apply
+                  // only, so the column may not exist yet and adding it here
+                  // would 400 every instructor load. It arrives instead via
+                  // fetchCompanyInstructorIds(), which degrades to an empty set.
                   "id_instructor, name, areas, unavailability, status, enabled",
                 )
                 .in("id_instructor", part);
               if (error) throw error;
-              return parseInstructors(
-                (rows ?? []) as Record<string, unknown>[],
-              );
+              return (rows ?? []) as Record<string, unknown>[];
             }),
           ),
           fetchScheduleWindow(wanted, from, to, excluded),
+          fetchCompanyInstructorIds(),
         ]);
 
         const infos = new Map<string, InstructorRow>();
-        for (const part of instructorChunks) {
-          for (const r of part) infos.set(r.id, r);
+        for (const part of rawChunks) {
+          for (const r of parseInstructors(part, companyIds))
+            infos.set(r.id, r);
         }
 
         const learnerIds = [

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { GeoPoint, KmlZone } from "@/lib/sales-dashboard/kml";
-import { PROXIMITY_RADIUS_KM } from "@/lib/sales-dashboard/kml";
 import { geocodeText, loadMapsApi } from "@/lib/sales-dashboard/maps";
+import { googleMapsLoader } from "@/utils/googleMaps";
 
 export type LocateStatus = "idle" | "loading" | "found" | "none";
 
@@ -89,7 +89,6 @@ const EMPTY_OVERLAYS: OverlaySet = {
   points: [],
   labels: [],
 };
-const RING_COLOR = "#1a73e8";
 const DEFAULT_MAP_CENTER = { lat: 12.9716, lng: 77.5946 };
 const DEFAULT_MAP_ZOOM = 11;
 
@@ -123,15 +122,11 @@ export default function LocationSearch({
   const [maps, setMaps] = useState<typeof google.maps | null | undefined>(
     undefined,
   );
+  const [places, setPlaces] = useState<google.maps.PlacesLibrary | null>(null);
   const [geoError, setGeoError] = useState<string | null>(null);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualLat, setManualLat] = useState("");
   const [manualLng, setManualLng] = useState("");
-
-  const proximity =
-    point !== null &&
-    via === "point" &&
-    matchedNames.some((n) => Boolean(zoneInfo[n]));
 
   const applyResolvedLocation = useCallback(
     (selection: { lat: number; lng: number; label: string }) => {
@@ -151,11 +146,32 @@ export default function LocationSearch({
     };
   }, []);
 
+  // `places` is NOT part of the Maps bootstrap request any more (see LIBRARIES
+  // in utils/googleMaps.ts), so `maps.places` is undefined here. The
+  // constructor has to come from an explicit importLibrary("places") call --
+  // without it this effect threw "Cannot read properties of undefined
+  // (reading 'Autocomplete')", the catch below swallowed it, and the location
+  // box silently offered no suggestions at all.
   useEffect(() => {
-    if (!maps || collapsed) return;
+    let active = true;
+    void googleMapsLoader
+      .importLibrary<google.maps.PlacesLibrary>("places")
+      .then((lib) => {
+        if (active) setPlaces(lib);
+      })
+      .catch(() => {
+        // Degrade to the manual lat/lng entry path below.
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!places || collapsed) return;
     if (!inputRef.current || autoRef.current) return;
     try {
-      const ac = new maps.places.Autocomplete(inputRef.current, {
+      const ac = new places.Autocomplete(inputRef.current, {
         fields: ["name", "formatted_address", "geometry"],
       });
       ac.addListener("place_changed", () => {
@@ -183,7 +199,7 @@ export default function LocationSearch({
     } catch (err) {
       console.error("Failed to initialize Google Maps Autocomplete:", err);
     }
-  }, [maps, collapsed, applyResolvedLocation]);
+  }, [places, collapsed, applyResolvedLocation]);
 
   // Parent-driven clear paths (the summary Clear button and dashboard Reset)
   // must clear the same local state as this component's own Clear button.
@@ -370,30 +386,6 @@ export default function LocationSearch({
     });
     bounds.extend(point);
 
-    if (proximity) {
-      const km = PROXIMITY_RADIUS_KM * 1000;
-      const cosLat = Math.cos((point.lat * Math.PI) / 180);
-      const path: google.maps.LatLngLiteral[] = [];
-      for (let i = 0; i < 72; i++) {
-        const ang = (i / 72) * 2 * Math.PI;
-        path.push({
-          lat: point.lat + (km * Math.cos(ang)) / 111320,
-          lng: point.lng + (km * Math.sin(ang)) / (111320 * cosLat),
-        });
-      }
-      const ring = new maps.Polyline({
-        map,
-        path,
-        geodesic: true,
-        strokeColor: RING_COLOR,
-        strokeOpacity: 0.6,
-        strokeWeight: 1.5,
-        strokeDashArray: "6 6",
-      } as google.maps.PolylineOptions);
-      overlaysRef.current.ring = ring;
-      for (const c of path) bounds.extend(c);
-    }
-
     const hasZones =
       overlaysRef.current.polygons.length > 0 ||
       overlaysRef.current.points.length > 0;
@@ -411,7 +403,6 @@ export default function LocationSearch({
     resultLabel,
     via,
     zoneInfo,
-    proximity,
     collapsed,
     theme,
   ]);
@@ -555,12 +546,6 @@ export default function LocationSearch({
               ref={mapElRef}
               aria-label="Map of matched instructor areas"
             />
-          )}
-          {maps && proximity && (
-            <p className="loc-legend">
-              Dotted ring = {PROXIMITY_RADIUS_KM} km search radius. Instructors
-              whose zones are marked as points in this radius were matched.
-            </p>
           )}
         </>
       )}

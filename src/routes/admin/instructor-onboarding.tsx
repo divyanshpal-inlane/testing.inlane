@@ -1,13 +1,12 @@
-import { APIProvider } from "@vis.gl/react-google-maps";
-
 import { OnboardingWizard } from "@/components/admin/instructor-onboarding/OnboardingWizard";
 
+// No APIProvider here: ServiceAreaStep renders ZoneDrawingEditor, which loads
+// the Maps JS API through the shared googleMapsLoader. Wrapping this route in
+// vis.gl's APIProvider as well injects the script twice.
 export default function InstructorOnboardingPage() {
   return (
-    <APIProvider apiKey={import.meta.env.VITE_GOOGLE_MAPS_API_KEY}>
-      <div className="container mx-auto px-4 py-6">
-        <OnboardingWizard />
-      </div>
-    </APIProvider>
+    <div className="container mx-auto px-4 py-6">
+      <OnboardingWizard />
+    </div>
   );
 }

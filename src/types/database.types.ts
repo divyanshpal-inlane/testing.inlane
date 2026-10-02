@@ -606,6 +606,7 @@ export type Database = {
           enabled: boolean | null;
           experience: number | null;
           id_instructor: string;
+          is_company_instructor: boolean;
           latitude: number | null;
           longitude: number | null;
           name: string | null;
@@ -632,6 +633,7 @@ export type Database = {
           enabled?: boolean | null;
           experience?: number | null;
           id_instructor?: string;
+          is_company_instructor?: boolean;
           latitude?: number | null;
           longitude?: number | null;
           name?: string | null;
@@ -658,6 +660,7 @@ export type Database = {
           enabled?: boolean | null;
           experience?: number | null;
           id_instructor?: string;
+          is_company_instructor?: boolean;
           latitude?: number | null;
           longitude?: number | null;
           name?: string | null;
@@ -1255,6 +1258,42 @@ export type Database = {
           id?: string;
           name?: string;
           updated_at?: string | null;
+        };
+        Relationships: [];
+      };
+      instructor_service_zones: {
+        Row: {
+          coordinates: Json;
+          created_at: string;
+          description: string | null;
+          id: string;
+          instructor_id: string;
+          is_rough: boolean;
+          kind: string;
+          raw_name: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          coordinates: Json;
+          created_at?: string;
+          description?: string | null;
+          id?: string;
+          instructor_id: string;
+          is_rough?: boolean;
+          kind?: string;
+          raw_name?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          coordinates?: Json;
+          created_at?: string;
+          description?: string | null;
+          id?: string;
+          instructor_id?: string;
+          is_rough?: boolean;
+          kind?: string;
+          raw_name?: string | null;
+          updated_at?: string;
         };
         Relationships: [];
       };

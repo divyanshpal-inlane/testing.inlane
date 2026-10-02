@@ -40,16 +40,14 @@ import {
   validateOneHourBlock,
 } from "@/lib/sales-dashboard/availability";
 import {
+  isCompanyInstructor,
+  isCompanyInstructorId,
+} from "@/lib/sales-dashboard/company-instructors";
+import {
   bufferWaivedForCustomer,
   classifySlotConflict,
 } from "@/lib/sales-dashboard/conflict";
-import type { KmlZone } from "@/lib/sales-dashboard/kml";
-import {
-  fetchKmlData,
-  matchLocation,
-  normalizeName,
-  resolveInstructorName,
-} from "@/lib/sales-dashboard/kml";
+import { pointInPolygon } from "@/lib/sales-dashboard/kml";
 import {
   dateToWeekdayLower,
   minutesToTime,
@@ -58,6 +56,12 @@ import {
 } from "@/lib/sales-dashboard/validation";
 import type { InstructorWorkingHours } from "@/lib/sales-dashboard/workingHours";
 import { inferInstructorWorkingHours } from "@/lib/sales-dashboard/workingHours";
+import type { DbZone } from "@/lib/sales-dashboard/zones-db";
+import {
+  fetchCompanyInstructorIds,
+  fetchDbZones,
+  warnOnCompanyInstructorZones,
+} from "@/lib/sales-dashboard/zones-db";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentAdmin } from "@/queries/adminPermissions";
 import type { ReusableCustomer } from "@/queries/salesBookingCustomers";
@@ -140,18 +144,27 @@ function isBookable(
   instructor: Pick<InstructorRow, "status" | "enabled">,
 ): boolean {
   return (
-    instructor.enabled !== false && (instructor.status ?? "active") === "active"
+    !isDisabled(instructor) && (instructor.status ?? "active") === "active"
   );
 }
 
-// Distinct from isBookable: enabled === false means the instructor has been
-// deactivated/removed and should never be searchable. status !== "active"
-// (e.g. "on_break") is a *temporary* state — that instructor still exists
-// and a sales rep searching for them by name should be able to find them,
-// same as the existing behavior for location-matched on-break instructors
-// (see workingOnMap below).
-function isDisabled(instructor: Pick<InstructorRow, "enabled">): boolean {
-  return instructor.enabled === false;
+// Distinct from isBookable: a disabled instructor has been
+// deactivated/removed and must never appear anywhere — not in the roster, not
+// in the grid, not in a name search, and never as a location match. status !==
+// "active" with `enabled !== false` (e.g. "on_break") is a *temporary* state —
+// that instructor still exists and a sales rep searching for them by name
+// should be able to find them, same as the existing behavior for
+// location-matched on-break instructors (see workingOnMap below).
+//
+// Both columns are checked because they are only kept in sync by the admin UI
+// (`instructors.tsx` writes status and enabled together). A row carrying
+// status='inactive' with enabled=true — reachable via a direct write, an older
+// script, or a partially-applied migration — would otherwise be picked up by
+// workingOnMap and shown in the grid, which is exactly what must never happen.
+function isDisabled(
+  instructor: Pick<InstructorRow, "status" | "enabled">,
+): boolean {
+  return instructor.enabled === false || instructor.status === "inactive";
 }
 
 // Short label shown next to an instructor's name wherever they can appear
@@ -161,11 +174,14 @@ function isDisabled(instructor: Pick<InstructorRow, "enabled">): boolean {
 function statusNote(
   instructor: Pick<InstructorRow, "status" | "enabled">,
 ): string | null {
-  if (instructor.enabled === false) return null;
+  if (isDisabled(instructor)) return null;
   const status = instructor.status ?? "active";
   if (status === "active") return null;
   if (status === "on_break") return "On break";
-  if (status === "paused") return "Paused";
+  // No "paused" case: instructor_status_check only allows
+  // active | on_break | inactive, so any other value is unexpected and is
+  // surfaced as a generic warning rather than inventing a status that cannot
+  // be stored.
   return "Unavailable";
 }
 
@@ -971,6 +987,7 @@ export default function SalesDashboard() {
     rosterIdentityReady && rosterOwner
       ? `${ROSTER_STORAGE_PREFIX}:${rosterOwner}`
       : null;
+
   const [filter, setFilter] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [dateIndex, setDateIndex] = useState(0);
@@ -986,8 +1003,9 @@ export default function SalesDashboard() {
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
   const [theme, setTheme] = useState<"light" | "dark">(initialTheme);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [kmlZones, setKmlZones] = useState<KmlZone[] | null>(null);
-  const [kmlError, setKmlError] = useState<string | null>(null);
+  const [dbZones, setDbZones] = useState<DbZone[] | null>(null);
+  const [companyIds, setCompanyIds] = useState<Set<string> | null>(null);
+  const [zoneError, setZoneError] = useState<string | null>(null);
   const [locSearch, setLocSearch] = useState<{
     lat: number;
     lng: number;
@@ -1032,6 +1050,17 @@ export default function SalesDashboard() {
   // True while Sales has clicked "+ Add another class" and is picking
   // the next slot for the SAME in-progress batch.
   const [addingSlotMode, setAddingSlotMode] = useState(false);
+  // Set (together with addingSlotMode) when Sales clicks "Change slot" on a
+  // conflicting class: the next double-clicked free slot REPLACES that row of
+  // pendingSlots instead of being appended. Cleared whenever the picking mode
+  // ends, by any path (picked, cancelled, rejected, modal closed), so it can
+  // never leak into a later "Add another class".
+  const [replacingSlotIndex, setReplacingSlotIndex] = useState<number | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!addingSlotMode) setReplacingSlotIndex(null);
+  }, [addingSlotMode]);
   // Set while an override is in progress. Unlike the multi-class flow,
   // overriding never needs Sales to pick a slot on the grid — it always
   // replaces the SAME slot the unpaid tentative hold already occupies,
@@ -1042,6 +1071,18 @@ export default function SalesDashboard() {
     blockId: number;
     tentativeDetails: Record<string, unknown> | null;
   } | null>(null);
+  // A tentative booking belongs to ONE instructor: once Sales has picked a
+  // slot, every additional class in that same booking must be the same
+  // instructor's, so the learner isn't handed between instructors
+  // mid-enrollment. Derived from the batch rather than stored as its own
+  // state, so it cannot outlive the batch - every path that ends a booking
+  // (cancel, successful submit, override) clears pendingSlots, and the lock
+  // disappears with it. An override is excluded because it never offers
+  // "+ Add another class" and is by definition a single-slot replacement.
+  const lockedInstructorId =
+    overrideContext || pendingSlots.length === 0
+      ? null
+      : pendingSlots[0].instructorId;
   const [slotNotice, setSlotNotice] = useState<string | null>(null);
   const slotNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
@@ -1073,15 +1114,11 @@ export default function SalesDashboard() {
   // both live in this component, not the modal) and arms "pick another
   // slot" mode. handleSlotDoubleClick appends the next double-clicked
   // free slot to pendingSlots and reopens the modal.
-  const handleAddAnotherSlot = useCallback(() => {
-    setTentativeModalOpen(false);
-    setAddingSlotMode(true);
-  }, []);
-
-  const cancelAddingSlot = useCallback(() => {
-    setAddingSlotMode(false);
-    setTentativeModalOpen(true);
-  }, []);
+  //
+  // Declared below toggleExpand (rather than alongside the other
+  // tentative-booking handlers) because it reuses toggleExpand, and a
+  // useCallback dep array is evaluated during render — referencing it up
+  // here would throw a temporal-dead-zone ReferenceError.
 
   const handleRemoveSlot = useCallback((index: number) => {
     setPendingSlots((prev) => prev.filter((_, i) => i !== index));
@@ -1294,16 +1331,24 @@ export default function SalesDashboard() {
 
   useEffect(() => {
     let active = true;
-    void Promise.all([fetchKmlData(), loadInstructorIndex()])
-      .then(([zones]) => {
+    void Promise.all([
+      fetchDbZones(),
+      // Tolerant: resolves to an empty set until the is_company_instructor
+      // migration is applied, then becomes the rename-proof source of truth.
+      fetchCompanyInstructorIds(),
+      loadInstructorIndex(),
+    ])
+      .then(([zones, companyIds]) => {
         if (active) {
-          setKmlZones(zones);
-          setKmlError(null);
+          setDbZones(zones);
+          setCompanyIds(companyIds);
+          setZoneError(null);
+          warnOnCompanyInstructorZones(zones, companyIds);
         }
       })
       .catch((err: unknown) => {
         if (active)
-          setKmlError(err instanceof Error ? err.message : String(err));
+          setZoneError(err instanceof Error ? err.message : String(err));
       });
     return () => {
       active = false;
@@ -1376,9 +1421,58 @@ export default function SalesDashboard() {
 
   const pendingExpandRowId = isExpandTransitionPending ? pendingExpandId : null;
 
+  // Hides the modal (formData/pendingSlots stay exactly as they are — both
+  // live in this component, not the modal) and arms "pick another slot" mode.
+  // handleSlotDoubleClick appends the next double-clicked free slot to
+  // pendingSlots and reopens the modal.
+  const handleAddAnotherSlot = useCallback(() => {
+    setTentativeModalOpen(false);
+    setAddingSlotMode(true);
+    // Reuse the row's existing "Schedule" control so the next class is
+    // picked from the same view Sales would reach by hand, and from where
+    // other days and months are reachable via its month arrows. Guarded on
+    // `expanded` because toggleExpand toggles: calling it for an
+    // already-open row would collapse the timetable we just asked for.
+    if (lockedInstructorId && !expanded.has(lockedInstructorId)) {
+      toggleExpand(lockedInstructorId);
+    }
+  }, [lockedInstructorId, expanded, toggleExpand]);
+
+  // "Change slot" on a conflicting class: same hide-the-modal / pick-on-the-
+  // calendar flow as "+ Add another class", but remembers WHICH row is being
+  // replaced so handleSlotDoubleClick swaps it instead of appending.
+  const handleChangeSlot = useCallback(
+    (index: number) => {
+      setReplacingSlotIndex(index);
+      setTentativeModalOpen(false);
+      setAddingSlotMode(true);
+      if (lockedInstructorId && !expanded.has(lockedInstructorId)) {
+        toggleExpand(lockedInstructorId);
+      }
+    },
+    [expanded, lockedInstructorId, toggleExpand],
+  );
+
+  const cancelAddingSlot = useCallback(() => {
+    setAddingSlotMode(false);
+    setTentativeModalOpen(true);
+  }, []);
+
+  // Roster persistence is keyed by the account-scoped storage key, which only
+  // exists once useCurrentAdmin()/useCurrentUser() have resolved (that
+  // requires a network round trip to the get-current-user edge function).
+  // "Add instructor" used to call updateStoredRoster() directly, so clicking
+  // before that resolved was a SILENT no-op: the instructor appeared on the
+  // grid but was never written, and vanished on the next reload. Buffer the
+  // intent here and flush it as soon as the key becomes available.
+  const pendingRosterRef = useRef<{ id: string; shouldInclude: boolean }[]>([]);
+
   const updateStoredRoster = useCallback(
     (id: string, shouldInclude: boolean) => {
-      if (!rosterStorageKey) return;
+      if (!rosterStorageKey) {
+        pendingRosterRef.current.push({ id, shouldInclude });
+        return;
+      }
       try {
         const ids = new Set(
           parseStoredRoster(localStorage.getItem(rosterStorageKey)),
@@ -1397,6 +1491,16 @@ export default function SalesDashboard() {
     },
     [rosterStorageKey],
   );
+
+  useEffect(() => {
+    if (!rosterStorageKey) return;
+    const pending = pendingRosterRef.current;
+    if (pending.length === 0) return;
+    pendingRosterRef.current = [];
+    for (const { id, shouldInclude } of pending) {
+      updateStoredRoster(id, shouldInclude);
+    }
+  }, [rosterStorageKey, updateStoredRoster]);
 
   const addRosterInstructor = useCallback(
     (id: string) => {
@@ -1442,21 +1546,6 @@ export default function SalesDashboard() {
 
   const allInstructors = data?.allInstructors ?? EMPTY_LIGHT;
 
-  const dbNormNames = useMemo(() => {
-    const set = new Set<string>();
-    for (const i of allInstructors) set.add(normalizeName(i.name));
-    return set;
-  }, [allInstructors]);
-
-  const dbByName = useMemo(() => {
-    const map = new Map<string, LightInstructor>();
-    for (const i of allInstructors) {
-      const key = normalizeName(i.name);
-      if (!map.has(key)) map.set(key, i);
-    }
-    return map;
-  }, [allInstructors]);
-
   const instructorsById = useMemo(() => {
     const map = new Map<string, InstructorRow>();
     if (!data) return map;
@@ -1464,33 +1553,83 @@ export default function SalesDashboard() {
     return map;
   }, [data]);
 
-  const locMatch = useMemo(() => {
-    if (!locSearch || !kmlZones) return null;
-    const res = matchLocation(kmlZones, {
-      lat: locSearch.lat,
-      lng: locSearch.lng,
-    });
+  const lockedInstructorName = lockedInstructorId
+    ? (instructorsById.get(lockedInstructorId)?.name ?? "")
+    : "";
+
+  // Zones come from `instructor_service_zones`, which is already keyed by
+  // Instructor id, so a name match is exact by construction — the KML
+  // spelling-alias table is no longer needed on this read path.
+  const zoneIdByName = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const z of dbZones ?? [])
+      if (!map.has(z.name)) map.set(z.name, z.instructorId);
+    return map;
+  }, [dbZones]);
+
+  const locMatch = useMemo<{
+    ids: string[];
+    zones: string[];
+    via: "polygon" | "none";
+    zoneIds: Map<string, string>;
+  } | null>(() => {
+    if (!locSearch || !dbZones) return null;
+    // Polygon-only by design: an instructor matches when the searched point
+    // falls inside their `instructor_service_zones` polygon. There is no
+    // centroid/radius fallback — no zone row is a point, so it could never
+    // contribute a match.
+    //
+    // `dbZones` comes from `fetchDbZones()` with no options, which excludes
+    // rough polygons (see zones-db.ts). That is deliberate and is the only
+    // reason this loop needs no `isRough` test of its own: a provisional
+    // onboarding boundary must never be able to auto-match a customer, and
+    // filtering at the single read point makes that impossible to forget here
+    // or in any future caller. Do not pass `includeRough` on this path.
+    //
+    // Status: an instructor's polygon is matched regardless of status, so a
+    // location-matched on-break instructor is returned here and then rendered
+    // with a break badge via workingOnMap. They are not bookable
+    // (isBookable requires status === "active", and availability.ts
+    // isInstructorActive() does the same), so their slots are never proposed.
+    // Inactive instructors never reach this point — isDisabled() removes them
+    // from workingOnMap/visibleInstructors and from name search.
+    //
+    // Company instructors are Ops-assigned backups and are skipped even if a
+    // zone is ever drawn for them. The `is_company_instructor` flag is
+    // authoritative; the name list covers the window before that migration is
+    // applied, and any zone whose Instructor.name changed. `z.name` is the
+    // authoritative `Instructor.name` (see zones-db.ts), not the KML spelling.
+    const names = dbZones
+      .filter(
+        (z) =>
+          !isCompanyInstructorId(z.instructorId, companyIds) &&
+          !isCompanyInstructor(z.name) &&
+          pointInPolygon({ lat: locSearch.lat, lng: locSearch.lng }, z.coords),
+      )
+      .map((z) => z.name);
     const ids: string[] = [];
-    const resolvedNames = new Map<string, string>();
-    for (const name of res.names) {
-      const resolved = resolveInstructorName(name, dbNormNames);
-      if (!resolved) continue;
-      const light = dbByName.get(resolved);
-      if (light && !ids.includes(light.id)) {
-        ids.push(light.id);
-        resolvedNames.set(name, light.id);
-      }
+    const zoneIds = new Map<string, string>();
+    for (const name of names) {
+      const id = zoneIdByName.get(name);
+      if (!id) continue;
+      zoneIds.set(name, id);
+      if (!ids.includes(id)) ids.push(id);
     }
-    return { ids, zones: res.names, via: res.via, resolvedNames };
-  }, [locSearch, kmlZones, dbNormNames, dbByName]);
+    return {
+      ids,
+      zones: names,
+      via: names.length ? "polygon" : "none",
+      zoneIds,
+    };
+  }, [locSearch, dbZones, companyIds, zoneIdByName]);
 
   useEffect(() => {
     if (locMatch && locMatch.ids.length > 0) loadInstructors(locMatch.ids);
   }, [locMatch, loadInstructors]);
 
   const locResult = useMemo(() => {
-    if (!locMatch || !kmlZones) return null;
-    const zoneByName = new Map(kmlZones.map((z) => [z.name, z]));
+    if (!locMatch || !dbZones) return null;
+    const zoneByName = new Map(dbZones.map((z) => [z.name, z]));
     const instrs: InstructorRow[] = [];
     const instrColors: Record<string, string> = {};
     const zoneInfo: Record<
@@ -1498,8 +1637,10 @@ export default function SalesDashboard() {
       { color: string; instructorName: string; rawName: string }
     > = {};
     for (const name of locMatch.zones) {
-      const lightId = locMatch.resolvedNames.get(name);
-      const instr = lightId ? instructorsById.get(lightId) : undefined;
+      const instructorId = locMatch.zoneIds.get(name);
+      const instr = instructorId
+        ? instructorsById.get(instructorId)
+        : undefined;
       if (!instr) continue;
       let color = instrColors[instr.id];
       if (!color) {
@@ -1520,7 +1661,7 @@ export default function SalesDashboard() {
       instrColors,
       zoneInfo,
     };
-  }, [locMatch, kmlZones, instructorsById]);
+  }, [locMatch, dbZones, instructorsById]);
 
   const rowColors = useMemo(
     () => new Map(Object.entries(locResult?.instrColors ?? {})),
@@ -1529,10 +1670,10 @@ export default function SalesDashboard() {
 
   const locStatus: LocateStatus = useMemo(() => {
     if (!locSearch) return "idle";
-    if (kmlZones === null) return "loading";
+    if (dbZones === null) return "loading";
     if (locResult && locResult.instrs.length > 0) return "found";
     return "none";
-  }, [locSearch, kmlZones, locResult]);
+  }, [locSearch, dbZones, locResult]);
 
   const toggleSelectRow = useCallback((id: string) => {
     setSelectedRows((prev) => {
@@ -1792,6 +1933,18 @@ export default function SalesDashboard() {
   // not just a lint nit.
   const handleSlotDoubleClick = useCallback(
     (instrId: string, date: string, minute: number) => {
+      // Defence in depth for the one-instructor-per-booking lock. Other
+      // instructors' rows aren't rendered while locked, so this should be
+      // unreachable - but gridRows is a render-time filter, and a stale
+      // render or a programmatic call must never be able to put a second
+      // instructor into a booking.
+      if (lockedInstructorId && instrId !== lockedInstructorId) {
+        showSlotNotice(
+          `This booking is for ${lockedInstructorName}. Cancel or submit it before booking a class with a different instructor.`,
+        );
+        return;
+      }
+
       // Re-verify instructor is still available
       const instr = instructorsById.get(instrId);
       if (
@@ -1909,7 +2062,10 @@ export default function SalesDashboard() {
         // neither the freeGrid (unaware of anything not yet saved to the
         // DB) nor the old check caught the overlap.
         const newEnd = minute + 60;
-        const overlapsExisting = pendingSlots.some((s) => {
+        const overlapsExisting = pendingSlots.some((s, i) => {
+          // The class being replaced is about to disappear, so it cannot
+          // clash with its own replacement.
+          if (i === replacingSlotIndex) return false;
           if (s.instructorId !== instrId || s.date !== date) return false;
           const sStart = timeToMinutes(s.startTime);
           const sEnd = timeToMinutes(s.endTime);
@@ -1918,6 +2074,19 @@ export default function SalesDashboard() {
         if (overlapsExisting) {
           showSlotNotice(
             "That slot overlaps with a class already in this booking.",
+          );
+          setAddingSlotMode(false);
+          setTentativeModalOpen(true);
+          return;
+        }
+        if (
+          replacingSlotIndex !== null &&
+          replacingSlotIndex < pendingSlots.length
+        ) {
+          // "Change slot": swap the conflicting row in place, so its position
+          // (Class N) and the rest of the batch are untouched.
+          setPendingSlots((prev) =>
+            prev.map((s, i) => (i === replacingSlotIndex ? newSlot : s)),
           );
           setAddingSlotMode(false);
           setTentativeModalOpen(true);
@@ -1961,6 +2130,7 @@ export default function SalesDashboard() {
       instructorsById,
       blocksIndex,
       addingSlotMode,
+      replacingSlotIndex,
       pendingSlots,
       currentUserName,
       customerFormData.customerPhone,
@@ -1968,6 +2138,8 @@ export default function SalesDashboard() {
       locSearch,
       activeCustomer,
       nextCustomerMode,
+      lockedInstructorId,
+      lockedInstructorName,
     ],
   );
 
@@ -2039,6 +2211,39 @@ export default function SalesDashboard() {
       customerFormData.customerPhone,
       data?.freeGrid,
     ],
+  );
+
+  // Bulk Add (copied from Instructor Management's "Bulk Add Schedules").
+  //
+  // Like Instructor Management, this appends EVERY generated slot (only a
+  // slot for a different instructor than the locked one is ignored). It does
+  // not filter busy slots out: the modal checks each row against the DB and
+  // shows Free / Conflict, and a conflicting row blocks submit until it is
+  // removed. Filtering here is what used to turn 10 copies into 7.
+  const handleAddBulkSlots = useCallback(
+    async (
+      newSlots: SlotPick[],
+    ): Promise<{ added: number; skipped: string[] }> => {
+      if (!lockedInstructorId) {
+        return { added: 0, skipped: ["No booking is in progress."] };
+      }
+
+      const accepted: SlotPick[] = [];
+      for (const slot of newSlots) {
+        if (slot.instructorId !== lockedInstructorId) {
+          // skip silently like instructor management
+          continue;
+        }
+        accepted.push(slot);
+      }
+
+      if (accepted.length > 0) {
+        setPendingSlots((prev) => [...prev, ...accepted]);
+      }
+
+      return { added: accepted.length, skipped: [] };
+    },
+    [lockedInstructorId],
   );
 
   // Override always replaces the SAME slot the unpaid tentative hold
@@ -2129,9 +2334,7 @@ export default function SalesDashboard() {
       const timeLabel = `${minutesToTime(minute)}–${minutesToTime(minute + (config?.gridMinutes ?? 30))}`;
 
       const unavail = (instr?.unavailability ?? null) as
-        | unknown[]
-        | null
-        | undefined;
+        unknown[] | null | undefined;
       const weekday = dateToWeekdayLower(date);
       const blockedByUnavail =
         unavail != null && isTimeUnavailable(unavail, date, weekday, minute);
@@ -2151,8 +2354,13 @@ export default function SalesDashboard() {
       // booking but not yet submitted. Checked ahead of everything else
       // below so it takes priority over whatever the DB-derived
       // free/busy state says.
+      // While "Change slot" is replacing a class, that class is about to
+      // disappear: it must not render as Selected or block its own replacement.
       const sameInstrDate = pendingSlots.filter(
-        (s) => s.instructorId === instrId && s.date === date,
+        (s, i) =>
+          i !== replacingSlotIndex &&
+          s.instructorId === instrId &&
+          s.date === date,
       );
       // Matches BOTH 30-minute grid cells inside the pending slot's full
       // 1-hour span [startMinute, endMinute) — not just the cell exactly
@@ -2161,7 +2369,8 @@ export default function SalesDashboard() {
       // required minute === startTime instead of "falls within the
       // range".
       const pendingIndex = pendingSlots.findIndex(
-        (s) =>
+        (s, i) =>
+          i !== replacingSlotIndex &&
           s.instructorId === instrId &&
           s.date === date &&
           minute >= timeToMinutes(s.startTime) &&
@@ -2498,14 +2707,22 @@ export default function SalesDashboard() {
     blocksIndex,
     pendingSlots,
     addingSlotMode,
+    replacingSlotIndex,
     currentUserName,
     timeStarts,
   ]);
 
+  // A locked booking shows only its own instructor's row, so there is no
+  // other instructor left to double-click while picking the next class. This
+  // is a render-time filter ONLY - `rows`/`visibleInstructors` (and the
+  // persisted roster behind them) are untouched, so the full grid comes back
+  // untouched the moment the booking ends.
   const gridRows = useMemo(() => {
-    if (compareIds.length === 0) return rows;
-    return sortRoster(compareInstructors);
-  }, [compareIds, compareInstructors, rows, sortRoster]);
+    const base =
+      compareIds.length === 0 ? rows : sortRoster(compareInstructors);
+    if (!lockedInstructorId) return base;
+    return base.filter((i) => i.id === lockedInstructorId);
+  }, [compareIds, compareInstructors, rows, sortRoster, lockedInstructorId]);
 
   // Guarantees the timeline (06:00 column onward) always starts exactly
   // where the Instructor column ends, for any name length. The table's own
@@ -2743,8 +2960,8 @@ export default function SalesDashboard() {
 
         <Suspense fallback={null}>
           <LocationSearch
-            zones={kmlZones}
-            zonesError={kmlError}
+            zones={dbZones}
+            zonesError={zoneError}
             status={locStatus}
             resultLabel={locSearch?.label ?? null}
             point={
@@ -2892,7 +3109,9 @@ export default function SalesDashboard() {
             pendingExpandId={pendingExpandRowId}
             selectedRows={selectedRows}
             rowColors={rowColors}
-            loadingRows={data?.loading ?? []}
+            loadingRows={(data?.loading ?? []).filter(
+              (li) => !lockedInstructorId || li.id === lockedInstructorId,
+            )}
             onToggleExpand={toggleExpand}
             onPreviousMonth={goPrev}
             onNextMonth={goNext}
@@ -2905,13 +3124,19 @@ export default function SalesDashboard() {
             onDeleteTentative={handleDeleteTentative}
             resolveInfo={resolveInfo}
           />
-          {gridRows.length === 0 && !locSearch && (
+          {gridRows.length === 0 && lockedInstructorId && (
+            <p className="empty">
+              {lockedInstructorName} is no longer on the grid. Cancel or
+              complete the booking, then search for the instructor again.
+            </p>
+          )}
+          {gridRows.length === 0 && !lockedInstructorId && !locSearch && (
             <p className="empty">
               No instructors loaded yet. Search by name above or use Search by
               location.
             </p>
           )}
-          {gridRows.length === 0 && locSearch && (
+          {gridRows.length === 0 && !lockedInstructorId && locSearch && (
             <p className="empty">
               No instructors match this location. Try another area.
             </p>
@@ -3290,6 +3515,8 @@ export default function SalesDashboard() {
         slots={pendingSlots}
         onRemoveSlot={handleRemoveSlot}
         onAddAnotherSlot={handleAddAnotherSlot}
+        onChangeSlot={handleChangeSlot}
+        onAddBulkSlots={handleAddBulkSlots}
         validateSlot={validateSlotFresh}
         formData={customerFormData}
         onFormDataChange={setCustomerFormData}
@@ -3309,15 +3536,37 @@ export default function SalesDashboard() {
             ➕
           </span>
           <span className="slot-toast-msg">
-            <strong>👉 Pick the next class now:</strong> double-click any green
-            (free) cell on the highlighted grid below to add it to this booking.
-            The form isn&apos;t closed — it will reopen with your selection
-            added.
+            {replacingSlotIndex !== null ? (
+              <>
+                <strong>
+                  👉 Pick a new slot for Class {replacingSlotIndex + 1} now:
+                </strong>{" "}
+                double-click any green (free) cell on {lockedInstructorName}
+                &apos;s schedule below to replace the conflicting class. The
+                form isn&apos;t closed — it will reopen with your new slot in
+                place of Class {replacingSlotIndex + 1}.
+              </>
+            ) : (
+              <>
+                <strong>
+                  👉 Pick {lockedInstructorName}&apos;s next class now:
+                </strong>{" "}
+                double-click any green (free) cell on {lockedInstructorName}
+                &apos;s schedule below to add it to this booking. Other
+                instructors are hidden — this booking must stay with the same
+                instructor. The form isn&apos;t closed — it will reopen with
+                your selection added.
+              </>
+            )}
           </span>
           <button
             type="button"
             className="slot-toast-close"
-            aria-label="Cancel adding another class"
+            aria-label={
+              replacingSlotIndex !== null
+                ? "Cancel changing slot"
+                : "Cancel adding another class"
+            }
             onClick={cancelAddingSlot}
           >
             ×
