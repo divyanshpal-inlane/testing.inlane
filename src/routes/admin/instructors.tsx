@@ -43,6 +43,7 @@ import {
   ExternalLink,
   Info,
   Loader2,
+  Map,
   MapPin,
   Phone,
   Plus,
@@ -73,6 +74,8 @@ import {
 
 import { SearchInstructorScheduleInfo } from "@/components/admin/InstructorScheduleInfo";
 import { CalendarImport } from "@/components/instructor/CalendarImport";
+import type { ZoneCoordinate } from "@/components/instructor-zones/types";
+import ZoneDrawingEditor from "@/components/instructor-zones/ZoneDrawingEditor";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -87,17 +90,13 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
-import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import {
   Tooltip,
   TooltipContent,
@@ -114,12 +113,19 @@ import {
 } from "@/constants/instructorStatus";
 import { usePhoneVisibility } from "@/context/phone-visibility-context";
 import { useAdminImportedCalendar } from "@/hooks/useAdminImportedCalendar";
+import {
+  deleteZoneById,
+  insertZone,
+  invalidateDbZoneCache,
+  updateZoneById,
+} from "@/lib/sales-dashboard/zones-db";
 import { supabase } from "@/lib/supabaseClient";
 import { cn } from "@/lib/utils";
 import { useCurrentAdmin } from "@/queries/adminPermissions";
 import { checkInstructorAvailability } from "@/queries/instructor";
 import { useCurrentUser } from "@/queries/userManagement";
 import { SlotConfig } from "@/types/schedule";
+import { googleMapsLoader } from "@/utils/googleMaps";
 import { maskCarNumber, maskPhoneNumber } from "@/utils/phoneMasking";
 
 import { Schedule } from "./schedules";
@@ -171,19 +177,27 @@ interface InstructorData {
   car_mode: string;
   experience: number;
   car_number: string;
-  areas: string[];
   address: string;
   latitude: number | null; // Added for storing coordinates
   longitude: number | null; // Added for storing coordinates
-  radius: number;
   car_fuel_type: "petrol" | "diesel" | "ev" | "cng" | "lpg" | null;
   unavailability: Unavailability[];
-}
-
-interface ServiceableArea {
-  id: string;
-  name: string;
-  postal_code?: string;
+  // Drawn service-area polygon (instructor_service_zones, kind='polygon').
+  // null means none is stored yet. The Instructor Service Zone Map is the
+  // authoring surface for it.
+  //
+  // An instructor has AT MOST ONE polygon — UNIQUE(instructor_id) in
+  // 20260928_create_instructor_service_zones.sql enforces it. This dialog edits
+  // that one polygon, so it carries the row id to write against precisely.
+  serviceZone: ZoneCoordinate[] | null;
+  serviceZoneId: string | null;
+  /**
+   * Whether the edited polygon is provisional. Seeded from the stored row when
+   * the dialog opens (so editing preserves the flag) and defaulting to `false`
+   * here, because an Ops-shaped edit on this screen is normally a verified area
+   * being corrected rather than a new approximation.
+   */
+  serviceZoneIsRough: boolean;
 }
 
 const INSTRUCTOR_PAGE_SIZE = 6;
@@ -400,13 +414,16 @@ const initialInstructorData: InstructorData = {
   car_mode: "",
   experience: 0,
   car_number: "",
-  areas: [],
   address: "",
   latitude: null,
   longitude: null,
-  radius: 0,
   car_fuel_type: null,
   unavailability: [],
+  serviceZone: null,
+  serviceZoneId: null,
+  // Overwritten from the stored row by handleEditInstructor. A blank form has no
+  // polygon yet, so a new draw defaults to a verified area.
+  serviceZoneIsRough: false,
 };
 
 // Google Maps Autocomplete Component
@@ -562,6 +579,8 @@ const AddressAutocomplete = memo(
     );
     const onChangeRef = useRef(onChange);
     const [isScriptLoaded, setIsScriptLoaded] = useState(false);
+    // Flip on first focus/typing; the `places` download waits for this.
+    const [engaged, setEngaged] = useState(false);
     const [internalValue, setInternalValue] = useState(value);
 
     // Keep onChange ref updated to avoid stale closure
@@ -574,49 +593,30 @@ const AddressAutocomplete = memo(
       setInternalValue(value);
     }, [value]);
 
-    // Script loading logic - properly load Google Maps Places API
+    // Script loading logic — delegate to the app-wide single loader.
+    // Injecting the Maps script from here as well made Google warn
+    // "You have included the Google Maps JavaScript API multiple times" and
+    // reject its internal module graph ("Loader.provide not called by
+    // module 'poly'"/"onion"), because the two <script> tags raced.
+    //
+    // Deferred until the field is focused: `places` costs ~486 KB on top of
+    // the 315 KB Maps bootstrap, and this component mounts on several pages
+    // where the user may never open the address field at all.
     useEffect(() => {
-      // Check if already loaded
-      if (window.google?.maps?.places) {
-        setIsScriptLoaded(true);
-        return;
-      }
-
-      // Check if script is already being loaded
-      const existingScript = document.querySelector(
-        'script[src*="maps.googleapis.com/maps/api/js"]',
-      );
-
-      if (existingScript) {
-        // Wait for existing script to load
-        const checkLoaded = setInterval(() => {
-          if (window.google?.maps?.places) {
-            setIsScriptLoaded(true);
-            clearInterval(checkLoaded);
-          }
-        }, 100);
-
-        // Cleanup interval after 10 seconds
-        setTimeout(() => clearInterval(checkLoaded), 10000);
-        return;
-      }
-
-      // Load the script
-      const googleMapScript = document.createElement("script");
-      googleMapScript.src = `https://maps.googleapis.com/maps/api/js?key=${import.meta.env.VITE_GOOGLE_MAPS_API_KEY}&libraries=places`;
-      googleMapScript.async = true;
-      googleMapScript.defer = true;
-
-      googleMapScript.onload = () => {
-        setIsScriptLoaded(true);
+      if (!engaged) return;
+      let active = true;
+      googleMapsLoader
+        .importLibrary("places")
+        .then(() => {
+          if (active) setIsScriptLoaded(true);
+        })
+        .catch(() => {
+          if (active) setIsScriptLoaded(false);
+        });
+      return () => {
+        active = false;
       };
-
-      googleMapScript.onerror = () => {
-        console.error("Failed to load Google Maps script");
-      };
-
-      document.head.appendChild(googleMapScript);
-    }, []);
+    }, [engaged]);
 
     // Add CSS to ensure the dropdown is visible
     useEffect(() => {
@@ -689,7 +689,11 @@ const AddressAutocomplete = memo(
         <Input
           ref={inputRef}
           value={internalValue}
-          onChange={handleManualTyping}
+          onChange={(e) => {
+            setEngaged(true);
+            handleManualTyping(e);
+          }}
+          onFocus={() => setEngaged(true)}
           placeholder="Search address..."
           className="w-full"
           autoComplete="off"
@@ -697,7 +701,7 @@ const AddressAutocomplete = memo(
             if (e.key === "Enter") e.preventDefault();
           }}
         />
-        {!isScriptLoaded && (
+        {engaged && !isScriptLoaded && (
           <div className="mt-1 text-xs text-gray-500">
             Loading address autocomplete...
           </div>
@@ -748,9 +752,6 @@ export default function InstructorsManagement() {
     initialInstructorData,
   );
 
-  const [newArea, setNewArea] = useState<string>("");
-  const [areaSearchQuery, setAreaSearchQuery] = useState<string>("");
-  const [isAddingCustomArea, setIsAddingCustomArea] = useState<boolean>(false);
   const [openScheduleDialogId, setOpenScheduleDialogId] = useState<
     string | null
   >(null); // Track which instructor's schedule dialog is open
@@ -873,68 +874,6 @@ export default function InstructorsManagement() {
     );
     return () => window.clearTimeout(timeout);
   }, [searchTerm]);
-
-  // Add tentative schedule info
-  // Fetch all servicable areas for suggestions
-  const { data: serviceableAreas, isLoading: areasLoading } = useQuery({
-    queryKey: ["serviceable-areas"],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("Serviceable_Areas")
-        .select("id, name")
-        .order("name");
-
-      if (error) throw error;
-      return data as ServiceableArea[];
-    },
-  });
-
-  // Filtered areas based on search query
-  const filteredAreas =
-    serviceableAreas?.filter((area) =>
-      area.name.toLowerCase().includes(areaSearchQuery.toLowerCase()),
-    ) || [];
-
-  // Handle selecting an area from the dropdown
-  const handleSelectArea = (area: ServiceableArea) => {
-    if (!instructorData.areas.includes(area.name)) {
-      setInstructorData({
-        ...instructorData,
-        areas: [...instructorData.areas, area.name],
-      });
-    } else {
-      toast({
-        title: "Area already exists",
-        description: "This area is already added",
-        variant: "destructive",
-      });
-    }
-    setAreaSearchQuery("");
-  };
-
-  // Handle adding a custom area that's not in the suggestions
-  const handleAddCustomArea = () => {
-    if (!areaSearchQuery.trim()) return;
-
-    // Check if area already exists in instructor's areas
-    if (instructorData.areas.includes(areaSearchQuery.trim())) {
-      toast({
-        title: "Area already exists",
-        description: "This area is already added to the instructor",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    // Add to instructor's areas in local state only
-    setInstructorData({
-      ...instructorData,
-      areas: [...instructorData.areas, areaSearchQuery.trim()],
-    });
-
-    setAreaSearchQuery("");
-    setIsAddingCustomArea(false);
-  };
 
   const handleCarFuelChange = (
     value: "petrol" | "diesel" | "ev" | "cng" | "lpg" | null,
@@ -1139,26 +1078,10 @@ export default function InstructorsManagement() {
   // Add or update an instructor
   const mutation = useMutation({
     mutationFn: async (data: InstructorData) => {
-      // First, check for any new areas that need to be added to Serviceable_Areas table
-      const newAreas = [];
-      for (const area of data.areas) {
-        const { data: existingArea } = await supabase
-          .from("Serviceable_Areas")
-          .select("id, name")
-          .ilike("name", area)
-          .maybeSingle();
-
-        if (!existingArea) {
-          newAreas.push(area);
-        }
-      }
-
-      // Add any new areas to the Serviceable_Areas table
-      if (newAreas.length > 0) {
-        const areasToInsert = newAreas.map((area) => ({ name: area }));
-        await supabase.from("Serviceable_Areas").insert(areasToInsert);
-      }
-
+      // Note: `areas` and `radius` are intentionally not written here. Coverage
+      // is now expressed by the service-area polygon in instructor_service_zones,
+      // so editing an instructor leaves the legacy columns untouched rather than
+      // clobbering them with an empty value.
       // Now proceed with instructor update/insert
       if (formMode === "add") {
         const { data: newInstructor, error } = await supabase
@@ -1173,11 +1096,9 @@ export default function InstructorsManagement() {
               car_mode: data.car_mode,
               experience: data.experience,
               car_number: data.car_number,
-              areas: data.areas,
               address: data.address,
               latitude: data.latitude,
               longitude: data.longitude,
-              radius: data.radius,
               car_fuel_type: data.car_fuel_type,
               unavailability: data.unavailability,
             },
@@ -1202,11 +1123,9 @@ export default function InstructorsManagement() {
             car_mode: data.car_mode,
             experience: data.experience,
             car_number: data.car_number,
-            areas: data.areas,
             address: data.address,
             latitude: data.latitude,
             longitude: data.longitude,
-            radius: data.radius,
             car_fuel_type: data.car_fuel_type,
             unavailability: data.unavailability,
           })
@@ -1214,12 +1133,49 @@ export default function InstructorsManagement() {
           .select();
 
         if (error) throw error;
+
+        // Service-area polygon: one row per instructor, keyed by instructor_id.
+        // A null serviceZone means the admin cleared it, so delete the row.
+        const zone =
+          data.serviceZone && data.serviceZone.length >= 3
+            ? data.serviceZone
+            : null;
+
+        // Written against the zone row id so exactly one row is touched. A null
+        // serviceZoneId means the admin drew a polygon for an instructor who
+        // had none.
+        if (zone) {
+          // `isRough` is always sent, including `false`: refining a rough
+          // boundary through this dialog is how an area gets promoted to a
+          // verified serviceability zone, and omitting the key would leave
+          // is_rough = true behind.
+          if (data.serviceZoneId) {
+            await updateZoneById({
+              zoneId: data.serviceZoneId,
+              coordinates: zone,
+              isRough: data.serviceZoneIsRough,
+            });
+          } else {
+            await insertZone({
+              instructorId: data.id_instructor,
+              coordinates: zone,
+              isRough: data.serviceZoneIsRough,
+            });
+          }
+        } else if (data.serviceZoneId) {
+          await deleteZoneById(data.serviceZoneId);
+        }
+
         return updatedInstructor;
       }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["instructors"] });
       queryClient.invalidateQueries({ queryKey: ["serviceable-areas"] });
+      // The sales dashboard caches instructor_service_zones at module scope, so
+      // a polygon just written (or deleted) would otherwise be served stale for
+      // the rest of the SPA session.
+      invalidateDbZoneCache();
       setIsDialogOpen(false);
       resetForm();
       toast({
@@ -1285,15 +1241,6 @@ export default function InstructorsManagement() {
       return;
     }
 
-    if (instructorData.areas.length === 0) {
-      toast({
-        title: "Error",
-        description: "At least one area is required",
-        variant: "destructive",
-      });
-      return;
-    }
-
     if (!instructorData.latitude || !instructorData.longitude) {
       toast({
         title: "Error",
@@ -1318,21 +1265,77 @@ export default function InstructorsManagement() {
       car_mode: instructor.car_mode || "",
       experience: instructor.experience || 0,
       car_number: instructor.car_number || "",
-      areas: instructor.areas || [],
       address: instructor.address || "",
       latitude: instructor.latitude || null,
       longitude: instructor.longitude || null,
-      radius: instructor.radius || 0,
       car_fuel_type: instructor.car_fuel_type as
-        | "petrol"
-        | "diesel"
-        | "ev"
-        | "cng"
-        | "lpg"
-        | null,
+        "petrol" | "diesel" | "ev" | "cng" | "lpg" | null,
       unavailability: instructor.unavailability || [],
+      serviceZone: null,
+      serviceZoneId: null,
+      // Replaced from the stored row below; this is only the pre-load value.
+      serviceZoneIsRough: false,
     });
     setIsDialogOpen(true);
+
+    // Load the stored polygon so the drawing editor opens on the existing area.
+    // `.limit(1)` + array rather than `maybeSingle()`: maybeSingle() raises an
+    // error when it finds more than one row, and a row could appear here if an
+    // instructor is re-created with a reused id. Taking the first row keeps the
+    // dialog opening instead of failing.
+    void (async () => {
+      type ZoneRow = {
+        id: string;
+        coordinates: unknown;
+        is_rough?: boolean | null;
+      };
+      let zoneRow: ZoneRow | undefined;
+      {
+        const base = () =>
+          supabase
+            .from("instructor_service_zones")
+            .select("id,coordinates,is_rough")
+            .eq("instructor_id", instructor.id_instructor)
+            .eq("kind", "polygon")
+            .limit(1);
+        const first = await base();
+        if (first.error) {
+          // `is_rough` arrives with migration 20261001_100000, which is DDL and
+          // manually applied. A not-yet-migrated database rejects the whole
+          // select instead of omitting the column, so retry without it and treat
+          // the row as NOT rough: on a database that has never stored the flag
+          // there are no rough polygons, and every existing row is a verified
+          // service area.
+          const retry = await supabase
+            .from("instructor_service_zones")
+            .select("id,coordinates")
+            .eq("instructor_id", instructor.id_instructor)
+            .eq("kind", "polygon")
+            .limit(1);
+          if (retry.error) return;
+          zoneRow = (retry.data?.[0] ?? undefined) as ZoneRow | undefined;
+          if (zoneRow) zoneRow.is_rough = false;
+        } else {
+          zoneRow = (first.data?.[0] ?? undefined) as ZoneRow | undefined;
+        }
+      }
+      if (!zoneRow || !Array.isArray(zoneRow.coordinates)) return;
+      const coords = zoneRow.coordinates as ZoneCoordinate[];
+      if (coords.length < 3) return;
+
+      // Guard against a slow response landing after the dialog was reopened
+      // for a different instructor.
+      setInstructorData((prev) =>
+        prev.id_instructor === instructor.id_instructor
+          ? {
+              ...prev,
+              serviceZone: coords,
+              serviceZoneId: zoneRow.id as string,
+              serviceZoneIsRough: zoneRow.is_rough === true,
+            }
+          : prev,
+      );
+    })();
   };
 
   const handleAddNewInstructor = () => {
@@ -1348,23 +1351,6 @@ export default function InstructorsManagement() {
 
   const resetForm = () => {
     setInstructorData(initialInstructorData);
-    setNewArea("");
-    setAreaSearchQuery("");
-    setIsAddingCustomArea(false);
-  };
-
-  const handleRemoveArea = (areaToRemove: string) => {
-    setInstructorData({
-      ...instructorData,
-      areas: instructorData.areas.filter((area) => area !== areaToRemove),
-    });
-  };
-
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      handleAddCustomArea();
-    }
   };
 
   const handleOpenScheduleDialog = (id: string) => {
@@ -1417,6 +1403,13 @@ export default function InstructorsManagement() {
         </Button>
         <h1 className="text-2xl font-bold">Instructor Management</h1>
         <div className="flex gap-2">
+          <Button
+            variant="outline"
+            onClick={() => navigate("/admin/instructor-zone-map")}
+          >
+            <Map className="mr-2 h-4 w-4" />
+            Instructor Polygon Map
+          </Button>
           <Button onClick={handleAddNewInstructor}>
             <PlusCircle className="mr-2 h-4 w-4" />
             Onboard Instructor
@@ -1891,24 +1884,59 @@ export default function InstructorsManagement() {
                   />
                 </div>
               </div>
-              <div className="grid grid-cols-4 items-center gap-4">
-                <Label htmlFor="radius" className="text-right">
-                  Radius (km)
-                </Label>
-                <Input
-                  id="radius"
-                  type="number"
-                  value={instructorData.radius}
-                  onChange={(e) =>
-                    setInstructorData({
-                      ...instructorData,
-                      radius: parseFloat(e.target.value) || 0,
-                    })
-                  }
-                  min={0}
-                  className="col-span-3"
-                  onWheel={(e) => e.currentTarget.blur()}
-                />
+              <div className="grid grid-cols-4 gap-4">
+                <Label className="pt-2 text-right">Service Area</Label>
+                <div className="col-span-3">
+                  <ZoneDrawingEditor
+                    coordinates={instructorData.serviceZone}
+                    onChange={(serviceZone) =>
+                      setInstructorData((prev) => ({
+                        ...prev,
+                        serviceZone,
+                      }))
+                    }
+                    center={
+                      instructorData.latitude != null &&
+                      instructorData.longitude != null
+                        ? {
+                            lat: instructorData.latitude,
+                            lng: instructorData.longitude,
+                          }
+                        : null
+                    }
+                    emptyHint="No service area drawn yet. Draw the area this instructor covers, then save the instructor."
+                  />
+                  {/* Inside the instructor <form>, so this is a Switch (a
+                      <button type="button">) rather than a submit control —
+                      Enter in a field here must not save the instructor. */}
+                  <div className="mt-2 flex items-start justify-between gap-3 rounded-md border border-dashed p-2">
+                    <div className="min-w-0 space-y-0.5">
+                      <Label
+                        htmlFor="instructor-rough-polygon"
+                        className="text-xs font-medium"
+                      >
+                        Rough polygon
+                      </Label>
+                      <p className="text-[11px] text-muted-foreground">
+                        {instructorData.serviceZoneIsRough
+                          ? "Provisional area, hidden by default and never used to match customers. Operations can refine and clear this later."
+                          : "Verified service area, used to match customers to this instructor."}
+                      </p>
+                    </div>
+                    <Switch
+                      id="instructor-rough-polygon"
+                      aria-label="Rough polygon"
+                      checked={instructorData.serviceZoneIsRough}
+                      onCheckedChange={(serviceZoneIsRough) =>
+                        setInstructorData((prev) => ({
+                          ...prev,
+                          serviceZoneIsRough,
+                        }))
+                      }
+                      className="mt-0.5 shrink-0"
+                    />
+                  </div>
+                </div>
               </div>
               <div className="grid grid-cols-4 items-center gap-4">
                 <Label htmlFor="email" className="text-right">
@@ -1951,12 +1979,7 @@ export default function InstructorsManagement() {
                   onValueChange={(value) =>
                     handleCarFuelChange(
                       value as
-                        | "petrol"
-                        | "diesel"
-                        | "ev"
-                        | "cng"
-                        | "lpg"
-                        | null,
+                        "petrol" | "diesel" | "ev" | "cng" | "lpg" | null,
                     )
                   }
                 >
@@ -2042,102 +2065,6 @@ export default function InstructorsManagement() {
                   }
                   className="col-span-3"
                 />
-              </div>
-              <div className="grid grid-cols-4 gap-4">
-                <Label className="pt-2 text-right">Servicable Areas</Label>
-                <div className="col-span-3">
-                  {/* Area search dropdown */}
-                  <Popover>
-                    <PopoverTrigger asChild>
-                      <Button
-                        variant="outline"
-                        role="combobox"
-                        className="w-full justify-between"
-                      >
-                        {areaSearchQuery || "Search areas..."}
-                        <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent className="w-full p-0">
-                      <div className="p-2">
-                        <Input
-                          placeholder="Search areas..."
-                          value={areaSearchQuery}
-                          onChange={(e) => setAreaSearchQuery(e.target.value)}
-                          onKeyPress={handleKeyPress}
-                          className="mb-2"
-                        />
-                      </div>
-
-                      {areasLoading ? (
-                        <div className="flex justify-center p-4">
-                          <div className="h-6 w-6 animate-spin rounded-full border-4 border-primary border-t-transparent"></div>
-                        </div>
-                      ) : filteredAreas.length > 0 ? (
-                        <div
-                          className="max-h-60 overflow-y-auto"
-                          onWheel={(e) => e.stopPropagation()}
-                        >
-                          {filteredAreas.map((area) => (
-                            <div
-                              key={area.id}
-                              className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm hover:bg-primary/10"
-                              onClick={() => handleSelectArea(area)}
-                            >
-                              <span>{area.name}</span>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="py-6 text-center">
-                          {areaSearchQuery ? (
-                            <div className="px-4 py-2">
-                              <p className="mb-2 text-sm">
-                                No matching areas found.
-                              </p>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => handleAddCustomArea()}
-                                className="w-full"
-                              >
-                                Add '{areaSearchQuery}' as new area
-                              </Button>
-                            </div>
-                          ) : (
-                            <p className="text-sm text-muted-foreground">
-                              Type to search areas
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </PopoverContent>
-                  </Popover>
-
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {instructorData.areas.map((area) => (
-                      <div
-                        key={area}
-                        className="flex items-center gap-1 rounded-full bg-muted px-3 py-1 text-sm"
-                      >
-                        {area}
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveArea(area)}
-                          className="text-gray-500 hover:text-gray-700"
-                        >
-                          <X size={14} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-
-                  {instructorData.areas.length === 0 && (
-                    <p className="mt-2 text-sm text-muted-foreground">
-                      No areas added. Please add at least one area.
-                    </p>
-                  )}
-                </div>
               </div>
               {/* Add this inside the form's grid of inputs */}
               <div className="grid grid-cols-4 gap-4">

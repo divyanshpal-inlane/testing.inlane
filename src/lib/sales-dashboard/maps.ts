@@ -1,34 +1,14 @@
+import { googleMapsLoader } from "@/utils/googleMaps";
+
 export const mapsApiKey: string = (
   import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? ""
 ).trim();
 
-let mapsPromise: Promise<typeof google.maps | null> | null = null;
-
+// Delegate to the app-wide single loader to avoid multiple script injections.
+// Must resolve `google.maps`, not `google` — see googleMapsLoader.loadMaps().
 export function loadMapsApi(): Promise<typeof google.maps | null> {
-  if (mapsPromise) return mapsPromise;
-  if (!mapsApiKey) {
-    mapsPromise = Promise.resolve(null);
-    return mapsPromise;
-  }
-  if (window.google?.maps) {
-    mapsPromise = Promise.resolve(window.google.maps);
-    return mapsPromise;
-  }
-  mapsPromise = new Promise((resolve) => {
-    const script = document.createElement("script");
-    let settled = false;
-    const finish = (gm: typeof google.maps | null) => {
-      if (settled) return;
-      settled = true;
-      resolve(gm);
-    };
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(mapsApiKey)}&libraries=places&v=weekly`;
-    script.async = true;
-    script.onload = () => finish(window.google?.maps ?? null);
-    script.onerror = () => finish(null);
-    document.head.appendChild(script);
-  });
-  return mapsPromise;
+  if (!mapsApiKey) return Promise.resolve(null);
+  return googleMapsLoader.loadMaps();
 }
 
 // Types that indicate a specific named place (a landmark/building/complex)

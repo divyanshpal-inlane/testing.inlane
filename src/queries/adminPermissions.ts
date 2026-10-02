@@ -215,6 +215,12 @@ export const ADMIN_PERMISSIONS = {
       "Search instructors by name or location and see live 30-min free-slot availability",
     route: "/admin/sales-dashboard",
   },
+  instructor_zone_map: {
+    key: "instructor_zone_map",
+    label: "Instructor Zone Map",
+    description: "View and edit instructor service-area polygons on a map",
+    route: "/admin/instructor-zone-map",
+  },
 } as const;
 
 export type PermissionKey = keyof typeof ADMIN_PERMISSIONS;

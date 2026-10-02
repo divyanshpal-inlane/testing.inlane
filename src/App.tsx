@@ -33,6 +33,7 @@ import PaymentCallback from "@/components/payment/PaymentCallback";
 import PaymentPage from "@/components/payment/PaymentPage";
 import PaymentStatus from "@/components/payment/PaymentStatus";
 import ReschedulePaymentCallback from "@/components/payment/ReschedulePaymentCallback";
+import { ErrorBoundary } from "@/components/ui/error-boundary";
 import {
   AuthProvider,
   ProtectedAdminRoute,
@@ -53,6 +54,7 @@ import InstructorsManagement, {
   InstructorSchedulePage,
 } from "@/routes/admin/instructors";
 import { AddTentativeSchedule } from "@/routes/admin/instructors";
+import InstructorZoneMap from "@/routes/admin/InstructorZoneMap";
 import KAMManagement from "@/routes/admin/KAMManagement";
 import LearnerDetails from "@/routes/admin/LearnerDetails";
 import LearnerIssueFixer from "@/routes/admin/LearnerIssueFixer";
@@ -118,333 +120,357 @@ export default function App() {
     // sub-path the app is actually served from — see vite.config.ts.
     <BrowserRouter basename={import.meta.env.BASE_URL}>
       <QueryClientProvider client={queryClient}>
-        <AuthProvider>
-          <PhoneVisibilityProvider>
-            <Routes>
-              <Route path="/start" element={<Start />} />
-              <Route path="/login" element={<Login />} />
-              <Route path="/report-issue" element={<ReportIssue />} />
-              <Route path="/admin-byser-secu7" element={<AdminLogin />} />
-              <Route path="/instructor-login" element={<InstructorAuth />} />
-              <Route
-                path="/onboard"
-                element={
-                  <ProtectedLearnerRoute>
-                    <Outlet />
-                  </ProtectedLearnerRoute>
-                }
-              >
-                <Route path="birthday" element={<Birthday />} />
-                <Route path="aadhar" element={<Aadhar />} />
-                <Route path="signature" element={<OnboardingSignature />} />
-                <Route path="dl" element={<DLQuestion />} />
-              </Route>
-              <Route
-                path="/"
-                element={
-                  <ProtectedLearnerRoute>
-                    <MainLayout />
-                  </ProtectedLearnerRoute>
-                }
-              >
-                <Route index element={<Navigate to="/home" replace />} />
-                <Route path="home" element={<Home />} />
+        <ErrorBoundary>
+          <AuthProvider>
+            <PhoneVisibilityProvider>
+              <Routes>
+                <Route path="/start" element={<Start />} />
+                <Route path="/login" element={<Login />} />
+                <Route path="/report-issue" element={<ReportIssue />} />
+                <Route path="/admin-byser-secu7" element={<AdminLogin />} />
+                <Route path="/instructor-login" element={<InstructorAuth />} />
                 <Route
-                  path="prep"
+                  path="/onboard"
                   element={
-                    <Suspense fallback={<div>Loading prep...</div>}>
-                      <Prep />
-                    </Suspense>
+                    <ProtectedLearnerRoute>
+                      <Outlet />
+                    </ProtectedLearnerRoute>
+                  }
+                >
+                  <Route path="birthday" element={<Birthday />} />
+                  <Route path="aadhar" element={<Aadhar />} />
+                  <Route path="signature" element={<OnboardingSignature />} />
+                  <Route path="dl" element={<DLQuestion />} />
+                </Route>
+                <Route
+                  path="/"
+                  element={
+                    <ProtectedLearnerRoute>
+                      <MainLayout />
+                    </ProtectedLearnerRoute>
+                  }
+                >
+                  <Route index element={<Navigate to="/home" replace />} />
+                  <Route path="home" element={<Home />} />
+                  <Route
+                    path="prep"
+                    element={
+                      <Suspense fallback={<div>Loading prep...</div>}>
+                        <Prep />
+                      </Suspense>
+                    }
+                  />
+                  <Route
+                    path="schedule"
+                    element={
+                      <Suspense fallback={<div>Loading schedule...</div>}>
+                        <Schedule />
+                      </Suspense>
+                    }
+                  />
+                  <Route path="help" element={<HelpSupport />} />
+                  <Route path="fees" element={<Fees />} />
+                  <Route path="profile" element={<Profile2 />} />
+                </Route>
+                <Route path="/signature" element={<Lesson10 />} />
+                <Route
+                  path="createSchedule"
+                  element={
+                    <ProtectedLearnerRoute>
+                      <Outlet />
+                    </ProtectedLearnerRoute>
+                  }
+                >
+                  <Route
+                    path="details"
+                    element={
+                      <APIProvider
+                        apiKey={import.meta.env.VITE_GOOGLE_MAPS_API_KEY}
+                      >
+                        <ScheduleDetails />
+                      </APIProvider>
+                    }
+                  />
+                  <Route path="preferences" element={<Preferences />} />
+                  <Route path="uploadLL" element={<UploadLL />} />
+                  <Route
+                    path="onboardingQuestions"
+                    element={<OnboardingQuestions />}
+                  />
+                </Route>
+                <Route
+                  path="/"
+                  element={
+                    <ProtectedLearnerRoute>
+                      <Outlet />
+                    </ProtectedLearnerRoute>
+                  }
+                >
+                  <Route path="birthday" element={<Birthday />} />
+                  <Route path="aadhar" element={<Aadhar />} />
+                  <Route path="bookLL-1" element={<LL_test_booking_1 />} />
+                  <Route
+                    path="bookLL-2/:navId"
+                    element={<LL_test_booking_2 />}
+                  />
+                  <Route path="bookLL-3" element={<LL_test_booking_3 />} />
+                  <Route
+                    path="/startLesson/:lessonNumber"
+                    element={<StartLesson />}
+                  />
+                  <Route path="/lesson-review" element={<LessonReview />} />
+                </Route>
+                <Route
+                  path="/lesson/:lessonId"
+                  element={
+                    <ProtectedLearnerRoute>
+                      <Plan />
+                    </ProtectedLearnerRoute>
                   }
                 />
                 <Route
-                  path="schedule"
+                  path="/instructor"
                   element={
-                    <Suspense fallback={<div>Loading schedule...</div>}>
-                      <Schedule />
-                    </Suspense>
-                  }
-                />
-                <Route path="help" element={<HelpSupport />} />
-                <Route path="fees" element={<Fees />} />
-                <Route path="profile" element={<Profile2 />} />
-              </Route>
-              <Route path="/signature" element={<Lesson10 />} />
-              <Route
-                path="createSchedule"
-                element={
-                  <ProtectedLearnerRoute>
-                    <Outlet />
-                  </ProtectedLearnerRoute>
-                }
-              >
-                <Route
-                  path="details"
-                  element={
-                    <APIProvider
-                      apiKey={import.meta.env.VITE_GOOGLE_MAPS_API_KEY}
+                    <GoogleOAuthProvider
+                      clientId={import.meta.env.VITE_GOOGLE_CLIENT_ID}
                     >
-                      <ScheduleDetails />
-                    </APIProvider>
+                      <ProtectedInstructorRoute>
+                        <Instructor />
+                      </ProtectedInstructorRoute>
+                    </GoogleOAuthProvider>
                   }
                 />
-                <Route path="preferences" element={<Preferences />} />
-                <Route path="uploadLL" element={<UploadLL />} />
                 <Route
-                  path="onboardingQuestions"
-                  element={<OnboardingQuestions />}
-                />
-              </Route>
-              <Route
-                path="/"
-                element={
-                  <ProtectedLearnerRoute>
-                    <Outlet />
-                  </ProtectedLearnerRoute>
-                }
-              >
-                <Route path="birthday" element={<Birthday />} />
-                <Route path="aadhar" element={<Aadhar />} />
-                <Route path="bookLL-1" element={<LL_test_booking_1 />} />
-                <Route path="bookLL-2/:navId" element={<LL_test_booking_2 />} />
-                <Route path="bookLL-3" element={<LL_test_booking_3 />} />
-                <Route
-                  path="/startLesson/:lessonNumber"
-                  element={<StartLesson />}
-                />
-                <Route path="/lesson-review" element={<LessonReview />} />
-              </Route>
-              <Route
-                path="/lesson/:lessonId"
-                element={
-                  <ProtectedLearnerRoute>
-                    <Plan />
-                  </ProtectedLearnerRoute>
-                }
-              />
-              <Route
-                path="/instructor"
-                element={
-                  <GoogleOAuthProvider
-                    clientId={import.meta.env.VITE_GOOGLE_CLIENT_ID}
-                  >
+                  path="/instructor-profile"
+                  element={
                     <ProtectedInstructorRoute>
-                      <Instructor />
+                      <InstructorProfile />
                     </ProtectedInstructorRoute>
-                  </GoogleOAuthProvider>
-                }
-              />
-              <Route
-                path="/instructor-profile"
-                element={
-                  <ProtectedInstructorRoute>
-                    <InstructorProfile />
-                  </ProtectedInstructorRoute>
-                }
-              />
-              <Route
-                path="/instructor/earnings"
-                element={
-                  <ProtectedInstructorRoute>
-                    <EarningsHome />
-                  </ProtectedInstructorRoute>
-                }
-              />
-              <Route
-                path="/instructor/earnings/more"
-                element={
-                  <ProtectedInstructorRoute>
-                    <MoreWaysToEarn />
-                  </ProtectedInstructorRoute>
-                }
-              />
-              <Route
-                path="/instructor/earnings/compare"
-                element={
-                  <ProtectedInstructorRoute>
-                    <EarningsComparison />
-                  </ProtectedInstructorRoute>
-                }
-              />
-              <Route
-                path="/instructor/leave"
-                element={
-                  <ProtectedInstructorRoute>
-                    <LeaveHome />
-                  </ProtectedInstructorRoute>
-                }
-              />
-              <Route
-                path="/instructor/report-no-show"
-                element={
-                  <ProtectedInstructorRoute>
-                    <ReportNoShow />
-                  </ProtectedInstructorRoute>
-                }
-              />
-              <Route
-                path="/instructor/support"
-                element={
-                  <ProtectedInstructorRoute>
-                    <SupportHome />
-                  </ProtectedInstructorRoute>
-                }
-              />
-              <Route
-                path="/instructor/safety"
-                element={
-                  <ProtectedInstructorRoute>
-                    <SafetyHome />
-                  </ProtectedInstructorRoute>
-                }
-              />
-              <Route
-                path="/otp/start/:learnerId/:scheduleId"
-                element={
-                  <ProtectedInstructorRoute>
-                    <OTP isVerifyStartLesson={true} />
-                  </ProtectedInstructorRoute>
-                }
-              />
-              <Route
-                path="/otp/end/:learnerId/:scheduleId"
-                element={
-                  <ProtectedInstructorRoute>
-                    <OTP isVerifyStartLesson={false} />
-                  </ProtectedInstructorRoute>
-                }
-              />
-              <Route
-                path="/reschedule/:lessonId"
-                element={
-                  <ProtectedLearnerRoute>
-                    <RescheduleView />
-                  </ProtectedLearnerRoute>
-                }
-              />
-              <Route path="/loading" element={<LoadingAndRedirect />} />
-              <Route
-                path="/admin"
-                element={
-                  <ProtectedAdminRoute>
-                    <Outlet />
-                  </ProtectedAdminRoute>
-                }
-              >
-                <Route index element={<AdminHome />} />
-                <Route path="game-analytics" element={<GameAnalytics />} />
-                <Route path="compliance-forms" element={<ComplianceForms />} />
-                <Route path="schedules" element={<AdminSchedules />} />
-                <Route
-                  path="instructor-matrix"
-                  element={<InstructorMatrix />}
+                  }
                 />
-                <Route path="sales-dashboard" element={<SalesDashboard />} />
                 <Route
-                  path="instructor-earnings"
-                  element={<InstructorEarnings />}
+                  path="/instructor/earnings"
+                  element={
+                    <ProtectedInstructorRoute>
+                      <EarningsHome />
+                    </ProtectedInstructorRoute>
+                  }
                 />
-                <Route path="kam-management" element={<KAMManagement />} />
                 <Route
-                  path="lessons-dashboard"
-                  element={<LessonsDashboard />}
+                  path="/instructor/earnings/more"
+                  element={
+                    <ProtectedInstructorRoute>
+                      <MoreWaysToEarn />
+                    </ProtectedInstructorRoute>
+                  }
                 />
-                <Route path="instructors" element={<InstructorsManagement />} />
                 <Route
-                  path="instructors/:id"
-                  element={<InstructorSchedulePage />}
+                  path="/instructor/earnings/compare"
+                  element={
+                    <ProtectedInstructorRoute>
+                      <EarningsComparison />
+                    </ProtectedInstructorRoute>
+                  }
                 />
+                <Route
+                  path="/instructor/leave"
+                  element={
+                    <ProtectedInstructorRoute>
+                      <LeaveHome />
+                    </ProtectedInstructorRoute>
+                  }
+                />
+                <Route
+                  path="/instructor/report-no-show"
+                  element={
+                    <ProtectedInstructorRoute>
+                      <ReportNoShow />
+                    </ProtectedInstructorRoute>
+                  }
+                />
+                <Route
+                  path="/instructor/support"
+                  element={
+                    <ProtectedInstructorRoute>
+                      <SupportHome />
+                    </ProtectedInstructorRoute>
+                  }
+                />
+                <Route
+                  path="/instructor/safety"
+                  element={
+                    <ProtectedInstructorRoute>
+                      <SafetyHome />
+                    </ProtectedInstructorRoute>
+                  }
+                />
+                <Route
+                  path="/otp/start/:learnerId/:scheduleId"
+                  element={
+                    <ProtectedInstructorRoute>
+                      <OTP isVerifyStartLesson={true} />
+                    </ProtectedInstructorRoute>
+                  }
+                />
+                <Route
+                  path="/otp/end/:learnerId/:scheduleId"
+                  element={
+                    <ProtectedInstructorRoute>
+                      <OTP isVerifyStartLesson={false} />
+                    </ProtectedInstructorRoute>
+                  }
+                />
+                <Route
+                  path="/reschedule/:lessonId"
+                  element={
+                    <ProtectedLearnerRoute>
+                      <RescheduleView />
+                    </ProtectedLearnerRoute>
+                  }
+                />
+                <Route path="/loading" element={<LoadingAndRedirect />} />
+                <Route
+                  path="/admin"
+                  element={
+                    <ProtectedAdminRoute>
+                      <Outlet />
+                    </ProtectedAdminRoute>
+                  }
+                >
+                  <Route index element={<AdminHome />} />
+                  <Route path="game-analytics" element={<GameAnalytics />} />
+                  <Route
+                    path="compliance-forms"
+                    element={<ComplianceForms />}
+                  />
+                  <Route path="schedules" element={<AdminSchedules />} />
+                  <Route
+                    path="instructor-matrix"
+                    element={<InstructorMatrix />}
+                  />
+                  <Route path="sales-dashboard" element={<SalesDashboard />} />
+                  <Route
+                    path="instructor-zone-map"
+                    element={<InstructorZoneMap />}
+                  />
+                  <Route
+                    path="instructor-earnings"
+                    element={<InstructorEarnings />}
+                  />
+                  <Route path="kam-management" element={<KAMManagement />} />
+                  <Route
+                    path="lessons-dashboard"
+                    element={<LessonsDashboard />}
+                  />
+                  <Route
+                    path="instructors"
+                    element={<InstructorsManagement />}
+                  />
+                  <Route
+                    path="instructors/:id"
+                    element={<InstructorSchedulePage />}
+                  />
 
+                  <Route
+                    path="learner-ll-details"
+                    element={<LearnerLLDetails />}
+                  />
+                  <Route path="ll-pipeline" element={<LLPipeline />} />
+                  <Route path="dl-test-slots" element={<DLTestSlots />} />
+                  <Route path="dl-test-dates" element={<DLTestDates />} />
+                  <Route path="learner-details" element={<LearnerDetails />} />
+                  <Route
+                    path="learner-management"
+                    element={<LearnerManagement />}
+                  />
+                  <Route
+                    path="notification-management"
+                    element={<NotificationManagement />}
+                  />
+                  <Route
+                    path="tentative-schedules-info"
+                    element={<TentativeSchedules2 />}
+                  />
+                  <Route
+                    path="tentative-add/:instructorId/:date/:startTime"
+                    element={<AddTentativeSchedule />}
+                  />
+                  <Route
+                    path="learner-issue-fixer"
+                    element={<LearnerIssueFixer />}
+                  />
+                  <Route
+                    path="learner-migration"
+                    element={<LearnerMigration />}
+                  />
+                  <Route
+                    path="ll-customer-migration"
+                    element={<LLCustomerMigration />}
+                  />
+                  <Route
+                    path="instructor-onboarding"
+                    element={<InstructorOnboardingPage />}
+                  />
+                  <Route path="settings" element={<AdminSettings />} />
+                  <Route
+                    path="admin-management"
+                    element={<AdminManagement />}
+                  />
+                  <Route path="user-management" element={<UserManagement />} />
+                  <Route
+                    path="bug-reports"
+                    element={<BugReportsManagement />}
+                  />
+                  <Route
+                    path="instructor-lesson-log"
+                    element={<InstructorLessonLog />}
+                  />
+                  <Route path="payment-tracker" element={<PaymentTracker />} />
+                  <Route path="feedback" element={<FeedbackManagement />} />
+                  <Route
+                    path="car-commerce-leads"
+                    element={<CarCommerceLeads />}
+                  />
+                  <Route
+                    path="leave-management"
+                    element={<LeaveManagement />}
+                  />
+                  <Route path="no-shows" element={<NoShowManagement />} />
+                  <Route path="support-tickets" element={<SupportTickets />} />
+                  <Route
+                    path="safety-monitoring"
+                    element={<SafetyMonitoring />}
+                  />
+                  <Route
+                    path="instructor-performance"
+                    element={<InstructorPerformance />}
+                  />
+                  <Route path="control-tower" element={<ControlTower />} />
+                </Route>
+                <Route path="/payment" element={<PaymentPage />} />
+                <Route path="/payment/callback" element={<PaymentCallback />} />
+                <Route path="/payment/success" element={<PaymentStatus />} />
+                <Route path="/payment/failure" element={<PaymentStatus />} />
                 <Route
-                  path="learner-ll-details"
-                  element={<LearnerLLDetails />}
-                />
-                <Route path="ll-pipeline" element={<LLPipeline />} />
-                <Route path="dl-test-slots" element={<DLTestSlots />} />
-                <Route path="dl-test-dates" element={<DLTestDates />} />
-                <Route path="learner-details" element={<LearnerDetails />} />
-                <Route
-                  path="learner-management"
-                  element={<LearnerManagement />}
+                  path="/reschedule/callback"
+                  element={<ReschedulePaymentCallback />}
                 />
                 <Route
-                  path="notification-management"
-                  element={<NotificationManagement />}
+                  path="*"
+                  element={
+                    <main className="flex min-h-screen flex-col items-center justify-center gap-4 p-6 text-center">
+                      <h1 className="text-2xl font-bold">Page not found</h1>
+                      <p>The page you requested does not exist.</p>
+                      <Link className="text-blue-600 underline" to="/">
+                        Return home
+                      </Link>
+                    </main>
+                  }
                 />
-                <Route
-                  path="tentative-schedules-info"
-                  element={<TentativeSchedules2 />}
-                />
-                <Route
-                  path="tentative-add/:instructorId/:date/:startTime"
-                  element={<AddTentativeSchedule />}
-                />
-                <Route
-                  path="learner-issue-fixer"
-                  element={<LearnerIssueFixer />}
-                />
-                <Route
-                  path="learner-migration"
-                  element={<LearnerMigration />}
-                />
-                <Route
-                  path="ll-customer-migration"
-                  element={<LLCustomerMigration />}
-                />
-                <Route
-                  path="instructor-onboarding"
-                  element={<InstructorOnboardingPage />}
-                />
-                <Route path="settings" element={<AdminSettings />} />
-                <Route path="admin-management" element={<AdminManagement />} />
-                <Route path="user-management" element={<UserManagement />} />
-                <Route path="bug-reports" element={<BugReportsManagement />} />
-                <Route
-                  path="instructor-lesson-log"
-                  element={<InstructorLessonLog />}
-                />
-                <Route path="payment-tracker" element={<PaymentTracker />} />
-                <Route path="feedback" element={<FeedbackManagement />} />
-                <Route
-                  path="car-commerce-leads"
-                  element={<CarCommerceLeads />}
-                />
-                <Route path="leave-management" element={<LeaveManagement />} />
-                <Route path="no-shows" element={<NoShowManagement />} />
-                <Route path="support-tickets" element={<SupportTickets />} />
-                <Route
-                  path="safety-monitoring"
-                  element={<SafetyMonitoring />}
-                />
-                <Route
-                  path="instructor-performance"
-                  element={<InstructorPerformance />}
-                />
-                <Route path="control-tower" element={<ControlTower />} />
-              </Route>
-              <Route path="/payment" element={<PaymentPage />} />
-              <Route path="/payment/callback" element={<PaymentCallback />} />
-              <Route path="/payment/success" element={<PaymentStatus />} />
-              <Route path="/payment/failure" element={<PaymentStatus />} />
-              <Route
-                path="/reschedule/callback"
-                element={<ReschedulePaymentCallback />}
-              />
-              <Route
-                path="*"
-                element={
-                  <main className="flex min-h-screen flex-col items-center justify-center gap-4 p-6 text-center">
-                    <h1 className="text-2xl font-bold">Page not found</h1>
-                    <p>The page you requested does not exist.</p>
-                    <Link className="text-blue-600 underline" to="/">
-                      Return home
-                    </Link>
-                  </main>
-                }
-              />
-            </Routes>
-          </PhoneVisibilityProvider>
-        </AuthProvider>
+              </Routes>
+            </PhoneVisibilityProvider>
+          </AuthProvider>
+        </ErrorBoundary>
       </QueryClientProvider>
     </BrowserRouter>
   );
