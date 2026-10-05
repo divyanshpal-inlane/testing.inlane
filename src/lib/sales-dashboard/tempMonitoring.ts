@@ -379,21 +379,31 @@ export function reportMonitoringError(
  * Times an existing call and logs it, without changing what the call does.
  * PostgREST resolves `{ data, error }` instead of throwing, so a resolver maps
  * that shape to an error; otherwise `error` is read straight off the result.
+ *
+ * Deliberately `any` in and `any` out rather than a generic. As a generic it
+ * inferred `unknown` at every call site (the callbacks wrap `sb`, which is
+ * `any`, so there is no candidate to infer from), and `await`ing it then broke
+ * destructuring -- `const { data, error } = ...` failed with "Property 'error'
+ * does not exist on type 'unknown'". Monitoring must not degrade the types of
+ * the code it wraps, so this restores exactly the pre-monitoring shape.
  */
-export async function measureApi<T>(
+export async function measureApi(
   apiName: string,
   // PromiseLike, not Promise: Supabase query builders are thenables, not real
-  // Promises, so a Promise<T> parameter collapsed T to `unknown` at call sites.
-  fn: () => PromiseLike<T>,
+  // Promises, so a Promise<T> parameter would not accept them.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  fn: () => PromiseLike<any>,
   options: {
     method?: string;
     details?: Json;
-    resolveError?: (result: T) => unknown;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    resolveError?: (result: any) => unknown;
   } = {},
-): Promise<T> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<any> {
   const started =
     typeof performance === "undefined" ? Date.now() : performance.now();
-  const done = (result: T | undefined, thrown: unknown) => {
+  const done = (result: unknown, thrown: unknown) => {
     const durationMs =
       (typeof performance === "undefined" ? Date.now() : performance.now()) -
       started;

@@ -1,5 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
 import React, { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 import type { BulkType } from "@/lib/sales-dashboard/bulkSlots";
 import { generateBulkSlots } from "@/lib/sales-dashboard/bulkSlots";
@@ -9,10 +10,8 @@ import { minutesToTime, timeToMinutes } from "@/lib/sales-dashboard/validation";
 import { isValidPhone, normalizePhone } from "@/lib/sales-dashboard/validation";
 import { supabase } from "@/lib/supabaseClient";
 import { checkInstructorAvailability } from "@/queries/instructor";
-import type { ReusableCustomer } from "@/queries/salesBookingCustomers";
 
 import { AddressAutocomplete } from "./AddressAutocomplete";
-import { ReusableCustomerPicker } from "./ReusableCustomerPicker";
 
 export interface TentativeBookingData {
   instructorId: string;
@@ -47,8 +46,6 @@ export interface CustomerFormValues {
   course: string;
 }
 
-export type CustomerMode = "new" | "reuse";
-
 export const DEFAULT_CUSTOMER_FORM = (
   currentUserName = "",
   address = "",
@@ -63,6 +60,11 @@ export const DEFAULT_CUSTOMER_FORM = (
 
 interface TentativeBookingModalProps {
   isOpen: boolean;
+  // "modal" (default) = the centred dialog over a dimmed backdrop.
+  // "panel" = no backdrop; the same form renders inline inside the
+  // dashboard's right-hand slot panel so the calendar stays visible and
+  // the grid is never covered while Sales fills the form in.
+  variant?: "modal" | "panel";
   onClose: () => void;
   onSuccess: () => void;
   // 1..N slots. The modal renders nothing if this is empty while open —
@@ -90,9 +92,6 @@ interface TentativeBookingModalProps {
   validateSlot: (slot: SlotPick) => { ok: boolean; reason?: string };
   formData: CustomerFormValues;
   onFormDataChange: (data: CustomerFormValues) => void;
-  customerMode: CustomerMode;
-  onCustomerModeChange: (mode: CustomerMode) => void;
-  onReuseCustomer: (customer: ReusableCustomer) => void;
   // Present only when this submission should replace an existing unpaid
   // tentative slot rather than create fresh ones. blockId identifies the
   // old Schedule row to release. Override is always exactly one slot —
@@ -143,6 +142,7 @@ function friendlyBookingError(error: unknown): string {
 
 export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
   isOpen,
+  variant = "modal",
   onClose,
   onSuccess,
   slots,
@@ -153,9 +153,6 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
   validateSlot,
   formData,
   onFormDataChange,
-  customerMode,
-  onCustomerModeChange,
-  onReuseCustomer,
   overrideContext = null,
 }) => {
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -386,7 +383,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
           {
             method: "POST",
             details: { is_override: true },
-            resolveError: (res: unknown) =>
+            resolveError: (res) =>
               (res as { error?: unknown } | null)?.error ?? null,
           },
         );
@@ -435,7 +432,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
         {
           method: "POST",
           details: { rows: rows.length, is_override: false },
-          resolveError: (res: unknown) =>
+          resolveError: (res) =>
             (res as { error?: unknown } | null)?.error ?? null,
         },
       );
@@ -492,6 +489,30 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
     },
   });
 
+  // Escape closes the booking form too. In `modal` variant this was free - it
+  // is a Radix <Dialog> - but the panel variant is plain markup, so moving the
+  // form into the side panel silently dropped keyboard dismissal. Bound on
+  // document for the same reason as the Bulk Add handler above, and skipped
+  // while that dialog is up: it owns Escape, and both listeners sit on the
+  // same node, where stopPropagation cannot separate them (that needs
+  // stopImmediatePropagation, which would break unrelated handlers).
+  //
+  // This MUST stay below `createTentativeMutation`. A dep array is evaluated
+  // during render, so naming that const from a hook above its declaration is a
+  // temporal-dead-zone read - it throws "Cannot access 'x' before
+  // initialization" the moment the form first renders, and the route's error
+  // boundary replaces the whole dashboard with "Something went wrong".
+  useEffect(() => {
+    if (!isOpen || isBulkDialogOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || createTentativeMutation.isPending) return;
+      e.stopPropagation();
+      onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [isOpen, isBulkDialogOpen, onClose, createTentativeMutation.isPending]);
+
   const validateForm = (): boolean => {
     const newErrors: Record<string, string> = {};
 
@@ -535,7 +556,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
         errorMessage: Object.keys(newErrors).sort().join(","),
         details: {
           fields: Object.keys(newErrors),
-          customer_mode: customerMode,
+          customer_mode: "new",
           batch_size: slots.length,
         },
       });
@@ -573,11 +594,24 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
     value: CustomerFormValues[K],
   ) => onFormDataChange({ ...formData, [key]: value });
 
+  // In "panel" variant the host div stops being a fixed, dimmed backdrop:
+  // CSS drops position/inset/z-index/background/padding and the form
+  // stretches to fill the dashboard's right-hand column. onClick stays bound
+  // -- the inner .modal stops propagation, and in panel mode it covers the
+  // host completely, so there is no backdrop left to click-dismiss.
+  const asPanel = variant === "panel";
+
   return (
     // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
-    <div className="modal-backdrop" onClick={onClose}>
+    <div
+      className={asPanel ? "modal-backdrop modal-panel-host" : "modal-backdrop"}
+      onClick={onClose}
+    >
       {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions */}
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div
+        className={asPanel ? "modal modal-panel" : "modal"}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-header">
           <h2>
             {overrideContext
@@ -624,14 +658,21 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                 or Full Paid.
               </p>
             )}
-            <div className="mb-2 flex items-center justify-between">
+            {/* Title + status pills share one wrappable row; the two actions
+                get their OWN full-width row below. They used to sit in the
+                same justify-between row as the title and the pills, which in
+                a ~400px side panel squeezed all four onto one line: the button
+                labels wrapped to two lines each, the pills shrank, and
+                nothing lined up. Two equal columns keep them one line tall and
+                identically sized. */}
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
               <span className="text-sm font-medium text-foreground">
                 {overrideContext
                   ? "Slot Being Taken Over"
                   : `Selected Slots (${slots.length})`}
               </span>
               {!overrideContext && (
-                <>
+                <div className="flex flex-wrap items-center gap-1.5">
                   {(() => {
                     const statuses = slots.map((_, i) => getSlotStatus(i));
                     const conflictCount = statuses.filter(
@@ -643,12 +684,12 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                     return (
                       <>
                         {freeCount > 0 && (
-                          <span className="ml-2 inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200">
+                          <span className="inline-flex items-center whitespace-nowrap rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200">
                             {freeCount} Free
                           </span>
                         )}
                         {conflictCount > 0 && (
-                          <span className="ml-2 inline-flex items-center rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
+                          <span className="inline-flex items-center whitespace-nowrap rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
                             {conflictCount} Conflict
                             {conflictCount > 1 ? "s" : ""}
                           </span>
@@ -656,52 +697,59 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                       </>
                     );
                   })()}
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      className="rounded-full bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-200 dark:bg-blue-900 dark:text-blue-200 dark:hover:bg-blue-800"
-                      onClick={() => {
-                        // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
-                        trackEvent("booking_add_another_class_clicked", {
-                          instructorId: slots[0]?.instructorId,
-                          customerName: formData.customerName,
-                          success: true,
-                          details: { batch_size: slots.length },
-                        });
-                        onAddAnotherSlot();
-                      }}
-                    >
-                      + Add another class
-                    </button>
-                    <button
-                      type="button"
-                      className="rounded-full bg-purple-100 px-3 py-1 text-xs font-semibold text-purple-700 hover:bg-purple-200 dark:bg-purple-900 dark:text-purple-200 dark:hover:bg-purple-800"
-                      onClick={openBulkDialog}
-                    >
-                      ⚡ Bulk Add
-                    </button>
-                  </div>
-                </>
+                </div>
               )}
             </div>
+            {!overrideContext && (
+              <div className="mb-2 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  className="whitespace-nowrap rounded-full bg-blue-100 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-200 dark:bg-blue-900 dark:text-blue-200 dark:hover:bg-blue-800"
+                  onClick={() => {
+                    // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+                    trackEvent("booking_add_another_class_clicked", {
+                      instructorId: slots[0]?.instructorId,
+                      customerName: formData.customerName,
+                      success: true,
+                      details: { batch_size: slots.length },
+                    });
+                    onAddAnotherSlot();
+                  }}
+                >
+                  + Add another class
+                </button>
+                <button
+                  type="button"
+                  className="whitespace-nowrap rounded-full bg-purple-100 px-3 py-1.5 text-xs font-semibold text-purple-700 hover:bg-purple-200 dark:bg-purple-900 dark:text-purple-200 dark:hover:bg-purple-800"
+                  onClick={openBulkDialog}
+                >
+                  ⚡ Bulk Add
+                </button>
+              </div>
+            )}
             <div className="space-y-1.5">
               {slots.map((s, i) => {
                 const status = getSlotStatus(i);
                 return (
                   <div
                     key={`${s.instructorId}-${s.date}-${s.startTime}-${i}`}
-                    className="flex items-center justify-between gap-2 rounded-md bg-background px-2 py-1.5 text-sm text-foreground"
+                    className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 rounded-md bg-background px-2 py-1.5 text-sm text-foreground"
                   >
-                    <span className="flex items-center gap-2">
+                    {/* The label is allowed to wrap and take the full first
+                        line; the pills and buttons are one nowrap group that
+                        sits beside it (or drops below it when it is long). */}
+                    <span className="min-w-0 flex-1">
                       Class {i + 1}: {s.date} •{" "}
                       {formatSlotTime(s.startTime, s.endTime)} •{" "}
                       {s.instructorName}
+                    </span>
+                    <span className="flex flex-none items-center gap-1.5">
                       {status.conflict ? (
                         <>
                           {/* Just "Conflict": the reason is not spelled out
                               in the row (kept as a hover tooltip only). */}
                           <span
-                            className="inline-flex items-center rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive"
+                            className="inline-flex items-center whitespace-nowrap rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive"
                             title={status.reason || undefined}
                           >
                             Conflict
@@ -709,7 +757,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                           {!overrideContext && onChangeSlot && (
                             <button
                               type="button"
-                              className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 hover:bg-amber-200 dark:bg-amber-900 dark:text-amber-200 dark:hover:bg-amber-800"
+                              className="whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 hover:bg-amber-200 dark:bg-amber-900 dark:text-amber-200 dark:hover:bg-amber-800"
                               aria-label={`Change slot for class ${i + 1}`}
                               onClick={() => onChangeSlot(i)}
                             >
@@ -719,79 +767,37 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                         </>
                       ) : (
                         status.checked && (
-                          <span className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200">
+                          <span className="inline-flex items-center whitespace-nowrap rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200">
                             Free
                           </span>
                         )
                       )}
+                      {!overrideContext && slots.length > 1 && (
+                        <button
+                          type="button"
+                          className="flex-none rounded-full px-1.5 text-red-600 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900"
+                          aria-label={`Remove class ${i + 1}`}
+                          onClick={() => {
+                            // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+                            trackEvent("booking_slot_removed_clicked", {
+                              instructorId: slots[i]?.instructorId,
+                              slotDate: slots[i]?.date,
+                              customerName: formData.customerName,
+                              success: true,
+                              details: { batch_size: slots.length },
+                            });
+                            onRemoveSlot(i);
+                          }}
+                        >
+                          &times;
+                        </button>
+                      )}
                     </span>
-                    {!overrideContext && slots.length > 1 && (
-                      <button
-                        type="button"
-                        className="flex-none rounded-full px-1.5 text-red-600 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900"
-                        aria-label={`Remove class ${i + 1}`}
-                        onClick={() => {
-                          // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
-                          trackEvent("booking_slot_removed_clicked", {
-                            instructorId: slots[i]?.instructorId,
-                            slotDate: slots[i]?.date,
-                            customerName: formData.customerName,
-                            success: true,
-                            details: { batch_size: slots.length },
-                          });
-                          onRemoveSlot(i);
-                        }}
-                      >
-                        ×
-                      </button>
-                    )}
                   </div>
                 );
               })}
             </div>
           </div>
-
-          {/* Customer source. A saved course is reused when available, while
-              every prefilled customer field remains editable in this form. */}
-          <div>
-            <span className="block text-sm font-medium text-foreground">
-              Customer
-            </span>
-            <div
-              className="mt-1 grid grid-cols-2 rounded-lg border border-input bg-muted p-1"
-              role="group"
-              aria-label="Customer entry mode"
-            >
-              <button
-                type="button"
-                aria-pressed={customerMode === "new"}
-                onClick={() => onCustomerModeChange("new")}
-                className={`rounded-md px-3 py-2 text-sm font-medium ${
-                  customerMode === "new"
-                    ? "bg-background text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                New Customer
-              </button>
-              <button
-                type="button"
-                aria-pressed={customerMode === "reuse"}
-                onClick={() => onCustomerModeChange("reuse")}
-                className={`rounded-md px-3 py-2 text-sm font-medium ${
-                  customerMode === "reuse"
-                    ? "bg-background text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                Reuse Customer
-              </button>
-            </div>
-          </div>
-
-          {customerMode === "reuse" && (
-            <ReusableCustomerPicker onSelect={onReuseCustomer} />
-          )}
 
           {/* Customer Name */}
           <div>
@@ -1000,196 +1006,210 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
           bubble clicks (React events cross portals) up to the backdrop's
           onClick={onClose}, closing the whole booking and wiping the batch.
           A plain overlay above the backdrop, with propagation stopped, avoids
-          both. */}
-      {isBulkDialogOpen && (
-        // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
-        <div
-          className="fixed inset-0 z-[110] flex items-center justify-center bg-black/50 p-6"
-          // Only ever stops propagation. It used to close the dialog, which
-          // made the feature look broken: the panel is 448px wide inside a
-          // full-viewport overlay, and the "Bulk Add" button that opens it sits
-          // ABOVE the panel's top edge -- i.e. over this overlay. The second
-          // click of a double-click (or any click landing beside the panel)
-          // therefore hit the backdrop and dismissed the dialog the instant it
-          // appeared, throwing away the seeded date/time. The screen darkened
-          // and no dialog was left, which is exactly "Bulk Add does not work".
-          // Dismissal is explicit instead: the x, Cancel/Close, or Escape.
-          onClick={(e) => e.stopPropagation()}
-        >
-          {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions, jsx-a11y/no-noninteractive-element-interactions */}
+          both.
+
+          It is portalled to document.body, which is load-bearing rather than
+          cosmetic. In panel mode this tree sits inside `ASIDE.slot-panel`,
+          which is `position: sticky` - and sticky creates a stacking context
+          regardless of z-index. So `z-[110]` only ranked the overlay inside
+          the panel's own context (which itself sits at z-index auto => 0),
+          while the availability grid's sticky `th.col-time-h` (z-index 2)
+          ranks in the shared parent context and therefore paints OVER the
+          dialog. The overlay was fully visible but its lower half was dead to
+          clicks: "Add to Preview" timed out, and the feature read as a dead
+          button. A body's children compete at the root, so z-[110] finally
+          means what it says. */}
+      {isBulkDialogOpen &&
+        createPortal(
+          // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
           <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="bulk-add-title"
-            className="max-h-[90vh] w-full max-w-md space-y-4 overflow-y-auto rounded-lg border border-border bg-background p-6 text-foreground shadow-lg"
+            className="fixed inset-0 z-[110] flex items-center justify-center bg-black/50 p-6"
+            // Only ever stops propagation. It used to close the dialog, which
+            // made the feature look broken: the panel is 448px wide inside a
+            // full-viewport overlay, and the "Bulk Add" button that opens it sits
+            // ABOVE the panel's top edge -- i.e. over this overlay. The second
+            // click of a double-click (or any click landing beside the panel)
+            // therefore hit the backdrop and dismissed the dialog the instant it
+            // appeared, throwing away the seeded date/time. The screen darkened
+            // and no dialog was left, which is exactly "Bulk Add does not work".
+            // Dismissal is explicit instead: the x, Cancel/Close, or Escape.
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between">
-              <h3 id="bulk-add-title" className="text-lg font-semibold">
-                Bulk Add Schedules
-              </h3>
-              <button
-                type="button"
-                aria-label="Close bulk add"
-                disabled={isApplyingBulk}
-                onClick={() => setIsBulkDialogOpen(false)}
-                className="rounded-full px-2 text-xl leading-none text-muted-foreground hover:text-foreground disabled:opacity-50"
-              >
-                ×
-              </button>
-            </div>
+            {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions, jsx-a11y/no-noninteractive-element-interactions */}
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="bulk-add-title"
+              className="max-h-[90vh] w-full max-w-md space-y-4 overflow-y-auto rounded-lg border border-border bg-background p-6 text-foreground shadow-lg"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between">
+                <h3 id="bulk-add-title" className="text-lg font-semibold">
+                  Bulk Add Schedules
+                </h3>
+                <button
+                  type="button"
+                  aria-label="Close bulk add"
+                  disabled={isApplyingBulk}
+                  onClick={() => setIsBulkDialogOpen(false)}
+                  className="rounded-full px-2 text-xl leading-none text-muted-foreground hover:text-foreground disabled:opacity-50"
+                >
+                  ×
+                </button>
+              </div>
 
-            <p className="text-xs text-muted-foreground">
-              Adds classes for {slots[0]?.instructorName}. Daily and hourly
-              copies start from the day / hour <em>after</em> the date and time
-              below.
-            </p>
+              <p className="text-xs text-muted-foreground">
+                Adds classes for {slots[0]?.instructorName}. Daily and hourly
+                copies start from the day / hour <em>after</em> the date and
+                time below.
+              </p>
 
-            <div>
-              <label
-                htmlFor="bulkType"
-                className="block text-sm font-medium text-foreground"
-              >
-                Bulk Action
-              </label>
-              <select
-                id="bulkType"
-                value={bulkType}
-                onChange={(e) => setBulkType(e.target.value as BulkType)}
-                className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                <option value="single">Single Schedule</option>
-                <option value="daily">Bulk Daily</option>
-                <option value="hourly">Bulk Hourly</option>
-              </select>
-            </div>
-
-            <div>
-              <label
-                htmlFor="bulkDate"
-                className="block text-sm font-medium text-foreground"
-              >
-                Date
-              </label>
-              <input
-                id="bulkDate"
-                type="date"
-                value={bulkDate}
-                onChange={(e) => setBulkDate(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
               <div>
                 <label
-                  htmlFor="bulkStart"
+                  htmlFor="bulkType"
                   className="block text-sm font-medium text-foreground"
                 >
-                  Start Time
+                  Bulk Action
+                </label>
+                <select
+                  id="bulkType"
+                  value={bulkType}
+                  onChange={(e) => setBulkType(e.target.value as BulkType)}
+                  className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  <option value="single">Single Schedule</option>
+                  <option value="daily">Bulk Daily</option>
+                  <option value="hourly">Bulk Hourly</option>
+                </select>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="bulkDate"
+                  className="block text-sm font-medium text-foreground"
+                >
+                  Date
                 </label>
                 <input
-                  id="bulkStart"
-                  type="time"
-                  step={1800}
-                  value={bulkTimes.start}
-                  onChange={(e) => {
-                    // Same as Instructor Management: moving the start moves
-                    // the end to start + 1h (Sales classes are 60 minutes).
-                    const start = e.target.value;
-                    setBulkTimes({
-                      start,
-                      end: start
-                        ? minutesToTime(
-                            Math.min(timeToMinutes(start) + 60, 24 * 60 - 1),
-                          )
-                        : bulkTimes.end,
-                    });
-                  }}
+                  id="bulkDate"
+                  type="date"
+                  value={bulkDate}
+                  onChange={(e) => setBulkDate(e.target.value)}
                   className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 />
               </div>
-              <div>
-                <label
-                  htmlFor="bulkEnd"
-                  className="block text-sm font-medium text-foreground"
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label
+                    htmlFor="bulkStart"
+                    className="block text-sm font-medium text-foreground"
+                  >
+                    Start Time
+                  </label>
+                  <input
+                    id="bulkStart"
+                    type="time"
+                    step={1800}
+                    value={bulkTimes.start}
+                    onChange={(e) => {
+                      // Same as Instructor Management: moving the start moves
+                      // the end to start + 1h (Sales classes are 60 minutes).
+                      const start = e.target.value;
+                      setBulkTimes({
+                        start,
+                        end: start
+                          ? minutesToTime(
+                              Math.min(timeToMinutes(start) + 60, 24 * 60 - 1),
+                            )
+                          : bulkTimes.end,
+                      });
+                    }}
+                    className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="bulkEnd"
+                    className="block text-sm font-medium text-foreground"
+                  >
+                    End Time
+                  </label>
+                  <input
+                    id="bulkEnd"
+                    type="time"
+                    step={1800}
+                    value={bulkTimes.end}
+                    onChange={(e) =>
+                      setBulkTimes({ ...bulkTimes, end: e.target.value })
+                    }
+                    className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  />
+                </div>
+              </div>
+
+              {bulkType !== "single" && (
+                <div>
+                  <label
+                    htmlFor="bulkRepeat"
+                    className="block text-sm font-medium text-foreground"
+                  >
+                    Number of copies
+                  </label>
+                  <input
+                    id="bulkRepeat"
+                    type="number"
+                    min={1}
+                    max={15}
+                    value={repeatCount}
+                    onChange={(e) =>
+                      setRepeatCount(parseInt(e.target.value) || 1)
+                    }
+                    className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  />
+                </div>
+              )}
+
+              {bulkResult && (
+                <div
+                  role="status"
+                  className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
                 >
-                  End Time
-                </label>
-                <input
-                  id="bulkEnd"
-                  type="time"
-                  step={1800}
-                  value={bulkTimes.end}
-                  onChange={(e) =>
-                    setBulkTimes({ ...bulkTimes, end: e.target.value })
-                  }
-                  className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                />
+                  <p className="mb-1 font-semibold">
+                    {bulkResult.added > 0
+                      ? `${bulkResult.added} added, ${bulkResult.skipped.length} skipped:`
+                      : "Nothing was added:"}
+                  </p>
+                  <ul className="list-inside list-disc space-y-0.5">
+                    {bulkResult.skipped.map((reason) => (
+                      <li key={reason}>{reason}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  disabled={isApplyingBulk}
+                  onClick={() => setIsBulkDialogOpen(false)}
+                  className="flex-1 rounded-lg border border-input bg-background px-4 py-2 text-sm font-medium text-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+                >
+                  {bulkResult ? "Close" : "Cancel"}
+                </button>
+                <button
+                  type="button"
+                  disabled={isApplyingBulk}
+                  onClick={() => void handleApplyBulkSchedules()}
+                  className="flex-1 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                >
+                  {isApplyingBulk ? "Checking..." : "Add to Preview"}
+                </button>
               </div>
             </div>
-
-            {bulkType !== "single" && (
-              <div>
-                <label
-                  htmlFor="bulkRepeat"
-                  className="block text-sm font-medium text-foreground"
-                >
-                  Number of copies
-                </label>
-                <input
-                  id="bulkRepeat"
-                  type="number"
-                  min={1}
-                  max={15}
-                  value={repeatCount}
-                  onChange={(e) =>
-                    setRepeatCount(parseInt(e.target.value) || 1)
-                  }
-                  className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                />
-              </div>
-            )}
-
-            {bulkResult && (
-              <div
-                role="status"
-                className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
-              >
-                <p className="mb-1 font-semibold">
-                  {bulkResult.added > 0
-                    ? `${bulkResult.added} added, ${bulkResult.skipped.length} skipped:`
-                    : "Nothing was added:"}
-                </p>
-                <ul className="list-inside list-disc space-y-0.5">
-                  {bulkResult.skipped.map((reason) => (
-                    <li key={reason}>{reason}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            <div className="flex gap-3 pt-2">
-              <button
-                type="button"
-                disabled={isApplyingBulk}
-                onClick={() => setIsBulkDialogOpen(false)}
-                className="flex-1 rounded-lg border border-input bg-background px-4 py-2 text-sm font-medium text-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
-              >
-                {bulkResult ? "Close" : "Cancel"}
-              </button>
-              <button
-                type="button"
-                disabled={isApplyingBulk}
-                onClick={() => void handleApplyBulkSchedules()}
-                className="flex-1 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-              >
-                {isApplyingBulk ? "Checking..." : "Add to Preview"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 };

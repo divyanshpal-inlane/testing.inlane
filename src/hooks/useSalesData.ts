@@ -161,7 +161,7 @@ async function fetchScheduleWindow(
         {
           method: "GET",
           details: { page_offset: offset, instructor_groups: groups.length },
-          resolveError: (res: unknown) =>
+          resolveError: (res) =>
             (res as { error?: unknown } | null)?.error ?? null,
         },
       );
@@ -345,7 +345,7 @@ export function useSalesData() {
                 {
                   method: "GET",
                   details: { requested: part.length },
-                  resolveError: (res: unknown) =>
+                  resolveError: (res) =>
                     (res as { error?: unknown } | null)?.error ?? null,
                 },
               );
@@ -585,7 +585,7 @@ export function useSalesData() {
         sb.from("Instructor").select("id_instructor, name, status, enabled"),
       {
         method: "GET",
-        resolveError: (res: unknown) =>
+        resolveError: (res) =>
           (res as { error?: unknown } | null)?.error ?? null,
       },
     );
@@ -614,7 +614,7 @@ export function useSalesData() {
           .maybeSingle(),
       {
         method: "GET",
-        resolveError: (res: unknown) =>
+        resolveError: (res) =>
           (res as { error?: unknown } | null)?.error ?? null,
       },
     );

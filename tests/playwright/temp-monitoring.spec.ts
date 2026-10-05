@@ -238,11 +238,11 @@ test.describe("temp monitoring", () => {
     test.skip(!hasFreeHour, "no free hour available to open the booking modal");
 
     const heading = page.getByText("Create Tentative Slot Booking");
-    // A re-render can eat the double-click, so retry on a fresh node.
+    // A re-render can eat the click, so retry on a fresh node.
     for (let attempt = 0; attempt < 3; attempt++) {
       const cell = row.locator(BOOKABLE_CELL).first();
       if ((await cell.count()) === 0) break;
-      await cell.dblclick();
+      await cell.click();
       if (await heading.isVisible().catch(() => false)) break;
     }
     await expect(heading).toBeVisible({ timeout: 5_000 });

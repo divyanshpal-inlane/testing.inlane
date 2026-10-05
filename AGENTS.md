@@ -113,7 +113,7 @@ Key functions: `create-razorpay-order`, `verify-razorpay-payment`, `process-paym
 ## Sales Dashboard (Admin Route: `/admin/sales-dashboard`)
 
 - Live instructor availability grid (30-min slots, color-coded free/booked)
-- **Double-click free slot** → `TentativeBookingModal` → creates `Schedule` row with `isTentative=true`, `status='hold'`, customer details in `tentative_details` JSON
+- **Click a free slot** → `TentativeBookingModal` in the left side panel → creates `Schedule` row with `isTentative=true`, `status='hold'`, customer details in `tentative_details` JSON
 - Validates 1-hour block via `validateOneHourBlock()` in `src/lib/sales-dashboard/availability.ts`
 - Startup fetches only `app_settings` (key=`booking_flow`) + light instructor index — **no Schedule queries on load**
 - Geospatial filtering via **Postgres polygons** (`instructor_service_zones`) — ray-casting against each instructor's ring, resolved by `instructor_id`. This is the live read path; `public/instructors.kml` is backfill input only
@@ -122,9 +122,9 @@ Key functions: `create-razorpay-order`, `verify-razorpay-payment`, `process-paym
 
 ### Tentative Slot Booking Feature (Production)
 
-**Workflow**: Single-click → slot info popup; **Double-click FREE slot** → `TentativeBookingModal` with form (customer name, phone, sales agent, payment status, address, course). On submit: creates `Schedule{isTentative:true, status:'hold', tentative_details:{...}}` → toast 1.5s → grid reloads.
+**Workflow**: Hover → slot info popup; **single click on ANY slot** → the **left** `.slot-panel` (FREE → `TentativeBookingModal` with form; BOOKED/TENTATIVE/PAUSED → `.slot-panel-detail` with that slot's badge, detail lines and Override/Delete). No double-click anywhere. Form fields: customer name, phone, sales agent, payment status, address, course. On submit: creates `Schedule{isTentative:true, status:'hold', tentative_details:{...}}` → toast 1.5s → grid reloads.
 
-**Component prop chain**: `SalesDashboard.handleSlotDoubleClick` (useCallback) → `AvailabilityGrid.onDoubleClick` → `InstructorRowGroup.onDoubleClick` → `SlotCell.onDoubleClick` / `MiniRow.onDoubleClick` → `SlotCell.onDoubleClick`. Handler validates via `validateOneHourBlock()` (O(1) Map lookup) before opening modal.
+**Component prop chain**: `SalesDashboard.handleSlotSelect` (useCallback) → `AvailabilityGrid.onSelect` → `InstructorRowGroup.onSelect` → `SlotCell.onSelect` / `MiniTimeRow.onSelect` → `SlotCell.onSelect` (the `<td>`'s `onClick`). Handler validates via `validateOneHourBlock()` (O(1) Map lookup) before opening the form.
 
 **Modal**: `src/components/admin/sales-dashboard/TentativeBookingModal.tsx` — renders only when open; uses existing `normalizePhone()`, phone masking respects `view_unmasked_phone_numbers` permission. No new API/edge function — direct Supabase insert.
 
@@ -152,8 +152,16 @@ Key functions: `create-razorpay-order`, `verify-razorpay-payment`, `process-paym
 
 **Slot Interaction**:
 
-- Single-click: hover → `SlotCell` shows `slot-pop` with `resolveInfo()` details (free/booked/unavailable/buffer)
-- Double-click: `handleSlotDoubleClick` → validates 1-hour block → opens `TentativeBookingModal`
+- Hover: `SlotCell` shows `slot-pop` with `resolveInfo()` details (free/booked/unavailable/buffer)
+- **Single click** (replaced double-click on 2026-10-05): `handleSlotSelect` always stores the slot in `selectedSlot`, and only when `free` validates the 1-hour block and opens `TentativeBookingModal` in the **left** `.slot-panel`. A taken slot renders `.slot-panel-detail` (badge + the same `info.detail` lines + Override/Delete) instead. `onSelect` replaces the old `onDoubleClick` prop all the way down (`AvailabilityGrid` → `InstructorRowGroup` / `MiniTimeRow` → `SlotCell`).
+- `TentativeBookingModal` gained `variant?: "modal" | "panel"`. Panel mode strips the centred-dialog shell with **compound** selectors `.modal-backdrop.modal-panel-host` / `.modal.modal-panel` — a plain `.modal-panel` loses to `.modal-backdrop`/`.modal`, which are defined _later_ in the same stylesheet, and the form silently reverts to a 680px centred card over the calendar.
+- Cells are click targets but still hover-driven for the popover: `.cell` already carries `cursor: pointer`.
+- **The hover popover hides the customer's address; the side panel keeps it.** `resolveInfo` pushes it as `Area: <address>` into the shared `info.detail` array, and the popover filters that one line out by prefix (`ADDRESS_DETAIL_PREFIX` in `SalesDashboard.tsx`, which both push sites also template from so the two cannot drift). The panel renders the unfiltered `detail`. Rationale: a full Google-Places address is the longest string in a detail line, so in a popover sized to the grid it became a tall ragged block covering neighbouring instructors; the panel is a reading surface, the popover is a glance. **Do not** "simplify" this by dropping the address from `detail` — that deletes it from the panel too.
+
+### Two traps in the left panel (both hit 2026-10-05)
+
+1. **The Bulk Add overlay must be portalled to `document.body`.** `ASIDE.slot-panel` is `position: sticky`, and **sticky creates a stacking context regardless of `z-index`**. So the overlay's `z-[110]` only ranked it _inside_ the panel's own context (itself at `z-index: auto` ⇒ 0), while the availability grid's sticky `th.col-time-h` (`z-index: 2`) ranks in the shared parent context and therefore paints **over** the dialog. The dialog looked fine but its lower half was dead: Playwright's `click()` on "Add to Preview" timed out because `document.elementFromPoint` at that point returned the `<th>`, not the button. Symptom to remember: **a visible overlay whose buttons do not respond.** `createPortal(..., document.body)` makes its children compete at the root, where `z-[110]` finally means something.
+2. **Never name a `const` in a hook's dep array from above its declaration.** Adding the panel-variant Escape handler as a `useEffect` above `createTentativeMutation` and referencing `createTentativeMutation.isPending` in its deps threw `Cannot access 'xe' before initialization` (minified) on the first render of the form. Dep arrays are evaluated **during render**, so that is a temporal-dead-zone read — and the route's error boundary replaced the entire dashboard with "Something went wrong" / "Reload the page", with no console error. The handler now sits **below** the mutation. If the dashboard ever blanks out the instant the booking form mounts, look for a TDZ read in a deps array, not for a data problem.
 
 **Tentative Booking Modal** (`src/components/admin/sales-dashboard/TentativeBookingModal.tsx`):
 
@@ -232,7 +240,7 @@ Replaces legacy `Instructor.areas` (name list) + `radius` + lat/lng centroid cov
 
 - `Instructor.status` (`active` / `on_break` / `inactive`) is the canonical signal; `enabled === false` is the legacy fallback. Use `resolveInstructorStatus()` from `src/constants/instructorStatus.ts` — never re-derive this per screen
 - **Inactive**: **listed in the Zone Map sidebar AND drawn by default**, gated by the `Show Inactive instructors` toggle. They are still excluded from sales/customer booking. Their rows and polygons are **kept** in the DB, so reactivating restores the area. The roster query is deliberately unfiltered — the sidebar needs everyone. `allRosterZones` is now just `rosterZoneRows` (it no longer drops inactive); the toggle filters both the drawn set and the sidebar lists
-- **Sidebar "Mapped" must not be gated by the rough toggle.** `listedZones` is built from `rosterZoneRows` filtered only by `statusVisible` — mode-agnostic — while the map's `zones` is rough-exclusive. Gating both by rough mode was a real bug: an instructor whose polygon the mode hid left "Mapped" *and* left "Not mapped" (which skips anyone in `zoneByInstructor`), so they vanished from the sidebar entirely. With one rough row it dropped exactly one on_break instructor (sidebar showed 10 badges for 11), and switching rough mode ON emptied the sidebar of all ~67 verified owners. "N of M instructors mapped" reads `zoneByInstructor.size`, so the sidebar and the header agree
+- **Sidebar "Mapped" must not be gated by the rough toggle.** `listedZones` is built from `rosterZoneRows` filtered only by `statusVisible` — mode-agnostic — while the map's `zones` is rough-exclusive. Gating both by rough mode was a real bug: an instructor whose polygon the mode hid left "Mapped" _and_ left "Not mapped" (which skips anyone in `zoneByInstructor`), so they vanished from the sidebar entirely. With one rough row it dropped exactly one on_break instructor (sidebar showed 10 badges for 11), and switching rough mode ON emptied the sidebar of all ~67 verified owners. "N of M instructors mapped" reads `zoneByInstructor.size`, so the sidebar and the header agree
 - **Status tags in the Zone Map sidebar** (`ZoneStatusTag` in `InstructorZoneMap.tsx`): `On Break` / `Inactive` only, never `Active` — a chip on ~120 rows would bury the two states that change behaviour. Tagged on **both** columns, since an inactive instructor lands in "Mapped" when they have a polygon and "Not mapped" when they don't. The tag renders **after the name**, inside the name button, so it reads as a qualification of that instructor rather than a separate control stacked beside them. Inactive rows keep the per-layer visibility checkbox, since their polygon IS a layer now
 - **Sidebar status toggles** (`statusFilter`): three independent switches — `Show Active / On Break / Inactive instructors` — below the rough toggle, each with its own live count. All three default **on**. They gate the sidebar lists _and_ the drawn set, and are a **view filter only**: they never write to `Instructor`. Turning one off IS reversible — restoring the switch brings the rows and polygons straight back
 - **Promoting/demoting a rough polygon** (`promoteZone` / `demoteZone` in `InstructorZoneMap.tsx`): the info card shows **Make normal polygon** for a rough zone and **Make rough polygon** for a verified one, each a single `UPDATE ... SET is_rough = …` on the existing row. Deliberately a flag flip, not a re-save: `UNIQUE(instructor_id)` means the row already exists, and restating `coordinates` would risk altering an Ops-drawn ring during what is only a verification. `updateZoneById` therefore takes `coordinates` as **optional** and omits the key entirely when it is not supplied — the one place that must not be "helpfully" filled back in
@@ -370,7 +378,7 @@ warning about the failure MODE rather than an open item. Do not "re-fix" it by
 adding retries — the cause is understood and it was never test pollution.
 
 **Symptom (historical).** `tests/playwright/sales-dashboard.spec.ts`, test
-`"double-clicking a free slot, filling the form, and submitting creates a
+`"clicking a free slot, filling the form, and submitting creates a
 tentative booking"`, failed roughly 1 in 5 repetitions. The modal showed the
 app's optimistic-lock text `"This slot was just booked by another sales agent.
 Please close this and pick a different time."`, i.e. `TentativeBookingModal` saw
@@ -420,12 +428,12 @@ matches all three (success / `23P01` / client-side re-validation).
 
 ## Performance Baselines
 
-| Metric                  | Target                                                                        |
-| ----------------------- | ----------------------------------------------------------------------------- |
-| Dashboard startup       | ~450–900 ms (config + light instructor index only; **zero Schedule queries**) |
-| First instructor load   | ~1–2 s (depends on Schedule volume)                                           |
-| Double-click validation | O(1) via `freeGrid` Map lookup                                                |
-| Modal render            | Zero cost when closed (conditional render)                                    |
+| Metric                | Target                                                                        |
+| --------------------- | ----------------------------------------------------------------------------- |
+| Dashboard startup     | ~450–900 ms (config + light instructor index only; **zero Schedule queries**) |
+| First instructor load | ~1–2 s (depends on Schedule volume)                                           |
+| Slot-click validation | O(1) via `freeGrid` Map lookup                                                |
+| Modal render          | Zero cost when closed (conditional render)                                    |
 
 Verification: `pnpm run lint` → `pnpm run type-check` → `pnpm run build`. No test framework configured.
 
@@ -438,12 +446,12 @@ Verification: `pnpm run lint` → `pnpm run type-check` → `pnpm run build`. No
 
 ## Two environments: production vs testing (monitoring lives ONLY in testing)
 
-| | **Production** | **Testing** |
-| --- | --- | --- |
-| Repo / remote | `inlane/inlane-web-app` (`origin`) | `divyanshpal-inlane/testing.inlane` (`testing`) |
-| Hosting | Vercel, auto-deploy from `main` | GitHub Pages via GitHub Actions (`.github/workflows/deploy-testing.yml`, runs on push to `main`/`master` or manual dispatch) |
-| Build | `vite build` | `vite build` with `VITE_BASE_PATH=/testing.inlane/`, SPA fallback `404.html`, placeholder service-role key |
-| Sales-dashboard monitoring | **Never** | **Yes** |
+|                            | **Production**                     | **Testing**                                                                                                                  |
+| -------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Repo / remote              | `inlane/inlane-web-app` (`origin`) | `divyanshpal-inlane/testing.inlane` (`testing`)                                                                              |
+| Hosting                    | Vercel, auto-deploy from `main`    | GitHub Pages via GitHub Actions (`.github/workflows/deploy-testing.yml`, runs on push to `main`/`master` or manual dispatch) |
+| Build                      | `vite build`                       | `vite build` with `VITE_BASE_PATH=/testing.inlane/`, SPA fallback `404.html`, placeholder service-role key                   |
+| Sales-dashboard monitoring | **Never**                          | **Yes**                                                                                                                      |
 
 **Rule: everything is the same in both environments except the temporary sales-dashboard monitoring.** Monitoring is kept in the local working copy and pushed to the `testing` remote only. It must never reach `origin`.
 
@@ -462,6 +470,25 @@ Verification: `pnpm run lint` → `pnpm run type-check` → `pnpm run build`. No
 4. Do **not** PR `.github/workflows/deploy-testing.yml`: on `testing/main` it replaced `deploy.yml` (the production workflow is deleted there), and it embeds a placeholder service-role key. Production keeps `deploy.yml`.
 
 **Pushing to testing**: `git -c credential.useHttpPath=true push testing <branch>:main` (the Pages workflow triggers on `main`). The local branch `instructor-area-polygon-fix-DP` already tracks that history (`testing/main` = `bfef3fb`).
+
+**Testing-only: admin auth edge function (no service-role key in any browser bundle)**
+
+Why: `OnboardingWizard.tsx` used to call `supabaseAdmin.auth.admin.*` from the browser with `VITE_SUPABASE_SERVICE_ROLE_KEY`. `VITE_*` values are baked into public JS, and the testing site is a public GitHub Pages bundle talking to the **live** Supabase project, so the testing build ships a placeholder key (`deploy-testing.yml`) and "Create Instructor" failed with `Invalid API key`. **Never put the real key in the testing build or a GitHub variable/secret that feeds `VITE_*`**: anyone can read it from the JS and get full admin access to the live DB.
+
+- `supabase/functions/admin-instructor-auth/index.ts`: holds the key server-side (`SUPABASE_SERVICE_ROLE_KEY`, injected by Supabase, never read from the request, logged or returned). Caller must present a real session passing `is_admin_or_team_member()`; the anon key alone gets 403. Not a generic proxy, four actions only: `find_user` (match server-side; the auth user list never reaches the browser), `create_user` (role fixed to `instructor`, unknown fields dropped), `delete_user` and `update_user` (phone fields only), both restricted to an `instructor` identity created in the last 30 minutes (the wizard's rollback). Keep JWT verification ON.
+- `src/lib/testing/adminAuthProxy.ts`: same `{ data, error }` shapes as `supabaseAdmin.auth.admin`, calling the function via `supabase.functions.invoke`. Must never import or read a service-role key.
+- `OnboardingWizard.tsx` (testing/local only): imports `supabaseAdmin` + `findAuthUser` from the proxy and `findExistingAuthUser` calls `findAuthUser`. Production keeps the original `@/context/auth-context` import and the `listUsers` loop. Both edits carry the marker below.
+- **Marker**: every testing-only edit has `TESTING ONLY / REMOVE BEFORE PRODUCTION PR`, so the existing `grep -r "REMOVE BEFORE PRODUCTION"` check also finds it.
+- **Still on the admin key (fails on testing)**: `changePassword` in `auth-context.tsx` (`updateUserById`). Not part of onboarding; left alone.
+- **Deploy (manual, live project, additive)**: `supabase functions deploy admin-instructor-auth`. Then push to `testing`. The function is harmless to production (nothing there calls it) but it is deployed to the shared project.
+- Verified before handing over: `deno check`, and a 24-case Deno harness against a fake Supabase (anon-only and non-admin rejected; caller-supplied role ignored; old, non-instructor and malformed ids refused; only phone fields forwarded; key never in a response). The harness lives outside the repo; a real end-to-end run needs the function deployed.
+
+**Local git hooks (never part of a PR)**: `.git/hooks/pre-commit`, `pre-push` and `guard.mjs`. They are not versioned, so on a fresh clone they must be recreated.
+
+- `pre-commit` refuses to commit a service-role JWT (decoded role is not `anon`), `sb_secret_*` / `sbp_*` tokens, private keys, `.env*` (except `.env.example`), `playwright-credentials.local.json` and `.auth/*.json`. The anon key is allowed (public by design).
+- `pre-push` refuses any push to `inlane/inlane-web-app` (HTTPS or SSH URL) whose diff contains a testing-only path (`tempMonitoring.ts`, `temp-monitoring.spec.ts`, `sales-dashboard-report.mjs`, the temp-logs migrations, `supabase/functions/admin-instructor-auth/`, `src/lib/testing/`, `deploy-testing.yml`) or an added line containing `REMOVE BEFORE PRODUCTION`. Pushing to the `testing` remote is unaffected. Bypass only with `--no-verify`.
+- Tested with real commits: the clean PR #475 branch passes; the testing branch is blocked.
+- Because the wizard now differs between environments, a production PR must take `OnboardingWizard.tsx` from `origin/main` (plus the service-area edits), not from the local branch. PR #475 already does.
 
 **Keep the monitoring code committed.** It currently exists only as untracked files plus edits in the working tree; commit it on the local branch (or push it to `testing`) so it cannot be lost by a clean or checkout.
 
