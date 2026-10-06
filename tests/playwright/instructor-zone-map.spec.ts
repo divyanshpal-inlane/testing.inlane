@@ -1354,6 +1354,56 @@ test.describe("Instructor Zone Map — editing on the main map", () => {
     await expect(bar.getByTestId("zone-undo")).toBeDisabled();
   });
 
+  test("a first draw accepts map clicks despite the other polygons", async ({
+    page,
+  }) => {
+    // Regression: "Draw area" for an unmapped instructor used to be dead, for
+    // two independent reasons.
+    //
+    // 1. addEditPoint guarded the empty ring with `ring[i - 1] ?? at`, so the
+    //    very first click of every new boundary compared `at` to itself and was
+    //    discarded — no Unmapped instructor could ever start a ring.
+    // 2. Even past that, Google's map "click" never fires when the click lands
+    //    on another instructor's polygon or residence dot. In a city where the
+    //    map is covered by 68 areas, a first draw was confined to the gaps
+    //    between everyone else's boundaries. During a first draw (ring < 3) the
+    //    other overlays are now non-clickable, so every click reaches the map.
+    const row = unmappedList(page).locator("button").first();
+    await expect(row).toHaveAttribute("aria-label", /^Draw .+ service area$/);
+    const label = (await row.getAttribute("aria-label"))!;
+    await page.getByLabel(label, { exact: true }).first().click();
+    const bar = page.getByTestId("zone-edit-bar");
+    await expect(bar).toBeVisible();
+    await expect(bar).toContainText("3 more needed to save.");
+
+    // The middle of the map, where a click is most likely to land inside one of
+    // the other drawn polygons — exactly the spots that used to be dead zones.
+    // Feed a handful of nearby points: Google occasionally swallows a stray map
+    // click of its own (it is literally a hit-test on a canvas), so the guard
+    // is "the ring reaches 3 points across these", not "every click registers".
+    const gmBox = await page.locator(".gm-style").first().boundingBox();
+    expect(gmBox).not.toBeNull();
+    const cx = Math.round(gmBox!.x + gmBox!.width / 2);
+    const cy = Math.round(gmBox!.y + gmBox!.height / 2);
+    for (
+      let i = 0;
+      i < 6 && !(await bar.innerText()).includes("Drag a point");
+      i++
+    ) {
+      await page.mouse.click(cx + i * 40 - 60, cy + i * 50);
+    }
+
+    await expect(bar).toContainText("3 points");
+    await expect(bar).toContainText(/Drag a point to move it/);
+    await expect(bar.getByTestId("zone-edit-save")).toBeEnabled();
+
+    // Clean up so nothing is written to the DB: Discard drops the draft back to
+    // empty (Cancel alone refuses while the edit is dirty), then close the bar.
+    await bar.getByTestId("zone-edit-discard").click();
+    await bar.getByTestId("zone-edit-cancel").click();
+    await expect(bar).toHaveCount(0);
+  });
+
   test("an existing area is seeded with its current ring", async ({ page }) => {
     // Reshaping must start from the stored geometry, not silently from nothing
     // — an empty session would imply the area had been lost.
