@@ -89,8 +89,8 @@ export interface RejectionReason {
 export const REJECTION_REASONS: RejectionReason[] = [
   {
     id: "legibility",
-    label: "Document not legible",
-    backendTag: "illegible",
+    label: "Document not eligible",
+    backendTag: "eligible",
   },
   {
     id: "expired",

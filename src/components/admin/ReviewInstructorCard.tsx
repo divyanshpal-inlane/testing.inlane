@@ -13,37 +13,79 @@ interface ReviewInstructorCardProps {
   instructor: InstructorInReview;
 }
 
+/**
+ * Generate a consistent avatar background color based on instructor name
+ * Uses the avatar_bg_color from API if available, otherwise generates from initials
+ */
+const getAvatarColor = (instructor: InstructorInReview): string => {
+  // If backend provides avatar_bg_color, use it
+  if (instructor.avatar_bg_color) {
+    return instructor.avatar_bg_color;
+  }
+
+  // Always use light emerald green for all avatars
+  return "#10b981"; // Light emerald green
+};
+
+/**
+ * Generate initials from instructor name
+ * e.g., "Demo Lane" -> "DL", "John Doe Smith" -> "JD"
+ */
+const getInitials = (name: string): string => {
+  return name
+    .split(" ")
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase();
+};
+
 export function ReviewInstructorCard({
   instructor,
 }: ReviewInstructorCardProps) {
   const navigate = useNavigate();
   const stageMeta = getReviewStageMeta(instructor.stage);
   const statusMeta = getReviewStatusMeta(instructor.status);
+  
+  // Determine if this is a stage 1 or stage 2 instructor
+  const isStage1 = instructor.stage === "documents" || instructor.stage === "stage1_documents";
+  const isStage2 = instructor.stage === "pedal_videos" || instructor.stage === "stage2_pedal_video";
 
-  // Format the applied date to show relative time like "2d ago", "6h ago"
+  // Format the applied date using waiting_days from backend
+  // If waiting_days is available, use it; otherwise fallback to date calculation
   let appliedDate = "";
-  try {
-    const parsedDate = parseISO(instructor.applied_at);
-    appliedDate = formatDistanceToNow(parsedDate, { addSuffix: true }).replace(
-      "about ",
-      "",
-    );
-  } catch (e) {
-    appliedDate = "Recently";
+  if (instructor.waiting_days !== undefined) {
+    appliedDate = instructor.waiting_days === 0 
+      ? "Today" 
+      : `${instructor.waiting_days}d ago`;
+  } else {
+    try {
+      const parsedDate = parseISO(instructor.applied_at);
+      appliedDate = formatDistanceToNow(parsedDate, { addSuffix: true }).replace(
+        "about ",
+        "",
+      );
+    } catch (e) {
+      appliedDate = "Recently";
+    }
   }
 
   // Calculate progress percentage and color dynamically
   const getProgressData = () => {
-    if (instructor.stage === "stage1_documents") {
-      const MAX_DOCUMENTS = 5;
-      // Cap the reviewed count at MAX_DOCUMENTS (in case backend has more)
-      const current = Math.min(instructor.progress.documents_reviewed || 0, MAX_DOCUMENTS);
-      const total = MAX_DOCUMENTS;
-      const percentage = (current / total) * 100;
+    // Handle backend stage names (documents, pedal_videos) and frontend names (stage1_documents, stage2_pedal_video)
+    const isDocumentsStage = instructor.stage === "documents" || instructor.stage === "stage1_documents";
+    const isPedalVideoStage = instructor.stage === "pedal_videos" || instructor.stage === "stage2_pedal_video";
+
+    if (isDocumentsStage) {
+      // Use documents data from backend if available, otherwise fallback to progress
+      const total = instructor.documents?.total || instructor.progress?.documents_total || 5;
+      const current = instructor.documents?.approved || instructor.progress?.documents_reviewed || 0;
+      const percentage = total > 0 ? (current / total) * 100 : 0;
 
       return { current, total, percentage, label: "docs" };
-    } else if (instructor.stage === "stage2_pedal_video") {
-      const current = instructor.progress.video_status === "pending" ? 0 : 1;
+    } else if (isPedalVideoStage) {
+      // Use pedal_video data from backend if available, otherwise fallback to progress
+      const isUploaded = instructor.pedal_video?.status === "uploaded" || instructor.progress?.video_status === "uploaded";
+      const current = isUploaded ? 1 : 0;
       const total = 1;
       const percentage = (current / total) * 100;
 
@@ -78,9 +120,15 @@ export function ReviewInstructorCard({
         {/* Header: Avatar + Name + Badge */}
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2">
-            {/* Light Green Avatar */}
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-sm font-semibold text-emerald-700">
-              {instructor.initials}
+            {/* Avatar with light green background and dark green initials */}
+            <div
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-semibold"
+              style={{
+                backgroundColor: "#DDF8EF", // Light green/teal background
+                color: "#00CE84", // Dark green text
+              }}
+            >
+              {instructor.initials || getInitials(instructor.name)}
             </div>
             <div className="min-w-0">
               <h3 className="text-base font-bold text-gray-900">
@@ -139,7 +187,10 @@ export function ReviewInstructorCard({
         {/* Action Button - With more spacing and rounded corners */}
         <div className="flex flex-1 items-end pt-3">
           <Button 
-            onClick={() => navigate(`/admin/instructor-approval/${instructor.instructor_id}`)}
+            onClick={() => {
+              // Route based on stage - both lead to instructor-approval but page detects stage
+              navigate(`/admin/instructor-approval/${instructor.instructor_id}?stage=${isStage1 ? "stage1_documents" : "stage2_pedal_video"}`);
+            }}
             className="w-full rounded-full bg-primary text-primary-foreground py-2 font-semibold transition-colors hover:bg-primary/90"
           >
             Review application

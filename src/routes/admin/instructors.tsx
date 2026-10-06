@@ -646,23 +646,42 @@ const AddressAutocomplete = memo(
 
 export default function InstructorsManagement() {
   const navigate = useNavigate();
-  const { data: reviewInstructors = [] } = useReviewInstructors();
-  const reviewCount = reviewInstructors.length;
   
   // Review stage filter state - must be defined before useMemo
   const [reviewStageFilter, setReviewStageFilter] = useState<"all" | "stage1_documents" | "stage2_pedal_video">("all");
 
-  // Get filtered review instructors based on stage
-  const filteredReviewInstructors = useMemo(() => {
-    if (reviewStageFilter === "all") {
-      return reviewInstructors;
-    }
-    return reviewInstructors.filter((instructor) => instructor.stage === reviewStageFilter);
-  }, [reviewInstructors, reviewStageFilter]);
+  // Map frontend stage filter to backend API parameter
+  const apiStageParam = reviewStageFilter === "all" 
+    ? "all" 
+    : reviewStageFilter === "stage1_documents" 
+    ? "documents" 
+    : "pedal_videos";
 
-  // Count instructors by stage for the sub-tabs
-  const stage1Count = reviewInstructors.filter((i) => i.stage === "stage1_documents").length;
-  const stage2Count = reviewInstructors.filter((i) => i.stage === "stage2_pedal_video").length;
+  // DEBUG: Check token before calling hook
+  useEffect(() => {
+    const token = localStorage.getItem("go_access_token");
+    console.log("[INSTRUCTORS] DEBUG - go_access_token in localStorage:", !!token);
+    if (token) {
+      console.log("[INSTRUCTORS] DEBUG - Token length:", token.length);
+    } else {
+      console.log("[INSTRUCTORS] DEBUG - ALL localStorage keys:", Object.keys(localStorage));
+    }
+  }, []);
+
+  // Fetch review instructors from backend API
+  const { data: reviewResponse, isLoading: reviewLoading, error: reviewError } = useReviewInstructors(apiStageParam as "all" | "documents" | "pedal_videos");
+
+  // Extract instructors and counts from API response
+  const reviewInstructors = reviewResponse?.instructors || [];
+  const reviewCounts = reviewResponse?.counts || { all: 0, documents: 0, pedal_videos: 0 };
+
+  // Use counts directly from API response
+  const reviewCount = reviewCounts.all;
+  const stage1Count = reviewCounts.documents;
+  const stage2Count = reviewCounts.pedal_videos;
+
+  // Review instructors are already filtered by backend based on stage parameter
+  const filteredReviewInstructors = reviewInstructors;
 
   const { data: currentAdmin } = useCurrentAdmin();
   const { data: currentUser } = useCurrentUser();
@@ -787,12 +806,25 @@ export default function InstructorsManagement() {
   // navigation away, per the PRD.
   const [statusFilter, setStatusFilter] = useState<InstructorStatus[]>([]);
 
-  const toggleStatusFilter = (status: InstructorStatus) => {
-    setStatusFilter((prev) =>
-      prev.includes(status)
-        ? prev.filter((s) => s !== status)
-        : [...prev, status],
-    );
+  // Handle status filter selection - multi-select allowed, but mutually exclusive with Review
+  const handleStatusFilterClick = (status: InstructorStatus) => {
+    // If Review is ON and user clicks any status filter, turn OFF Review and show that filter
+    if (showReviewFilter) {
+      setShowReviewFilter(false);
+      setStatusFilter([status]);
+      return;
+    }
+    
+    // Multi-select logic for status filters
+    setStatusFilter((prev) => {
+      if (prev.includes(status)) {
+        // Toggle off if already selected
+        return prev.filter((s) => s !== status);
+      } else {
+        // Add to multi-select
+        return [...prev, status];
+      }
+    });
   };
 
   // Review filter toggle
@@ -809,10 +841,14 @@ export default function InstructorsManagement() {
     }
   }, [searchParams]);
 
-  const toggleReviewFilter = () => {
-    setShowReviewFilter((prev) => !prev);
-    // Clear status filter when switching to review view
-    if (!showReviewFilter) {
+  // Handle Review tab click - mutually exclusive with status filters
+  const handleReviewFilterClick = () => {
+    if (showReviewFilter) {
+      // If already on Review tab, turn it off
+      setShowReviewFilter(false);
+    } else {
+      // If not on Review tab, turn it on and clear status filters
+      setShowReviewFilter(true);
       setStatusFilter([]);
       setReviewStageFilter("all");
     }
@@ -1355,7 +1391,7 @@ export default function InstructorsManagement() {
             <button
               key={s.value}
               type="button"
-              onClick={() => toggleStatusFilter(s.value)}
+              onClick={() => handleStatusFilterClick(s.value)}
               className={cn(
                 "flex items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors",
                 selected
@@ -1379,7 +1415,7 @@ export default function InstructorsManagement() {
         })}
         <button
           type="button"
-          onClick={toggleReviewFilter}
+          onClick={handleReviewFilterClick}
           className={cn(
             "flex items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors",
             showReviewFilter
@@ -1461,7 +1497,22 @@ export default function InstructorsManagement() {
       {/* Show review instructors when Review tab is selected, otherwise show status-filtered instructors */}
       {showReviewFilter ? (
         // Review tab selected - show review instructor cards
-        filteredReviewInstructors && filteredReviewInstructors.length > 0 ? (
+        reviewLoading ? (
+          <div className="flex h-64 items-center justify-center">
+            <div className="text-center">
+              <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent mx-auto mb-2"></div>
+              <p className="text-gray-500">Loading review data...</p>
+            </div>
+          </div>
+        ) : reviewError ? (
+          <div className="flex h-64 items-center justify-center">
+            <div className="text-center">
+              <AlertCircle className="h-8 w-8 text-red-500 mx-auto mb-2" />
+              <p className="text-red-600 font-semibold">Error loading review data</p>
+              <p className="text-gray-500 text-sm">{(reviewError as Error).message}</p>
+            </div>
+          </div>
+        ) : filteredReviewInstructors && filteredReviewInstructors.length > 0 ? (
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3 px-6 py-4">
             {filteredReviewInstructors.map((reviewInstructor) => (
               <ReviewInstructorCard key={reviewInstructor.id} instructor={reviewInstructor} />
@@ -7030,3 +7081,6 @@ export const InstructorSchedulePage = () => {
     </div>
   );
 };
+
+
+

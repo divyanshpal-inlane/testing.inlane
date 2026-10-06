@@ -1,5 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 
+// Backend API configuration
+// In dev: Vite proxy rewrites /go-api/* → http://localhost:8080/v1/*
+// In prod: Set VITE_BACKEND_API to the real Go service URL (e.g. https://api.inlane.in/v1)
+const BACKEND_API =
+  import.meta.env.VITE_BACKEND_API || "/go-api";
+
 /**
  * Review stage for instructor onboarding
  * stage1_documents: Instructor is in document review stage
@@ -23,151 +29,104 @@ export interface ReviewProgress {
 
 /**
  * Instructor in review stage
- * This data will come from Go backend API later
+ * Data comes from Go backend API
  */
 export interface InstructorInReview {
   id: string;
-  instructor_id: string;
+  instructor_id?: string;
   name: string;
   phone: string;
-  initials: string;
-  avatar_bg_color: string;
-  stage: ReviewStage;
+  email?: string;
+  initials?: string;
+  avatar_bg_color?: string;
+  stage: "documents" | "pedal_videos" | ReviewStage;
   applied_at: string;
-  progress: ReviewProgress;
-  status: ReviewStatus;
+  waiting_days?: number;
+  progress?: ReviewProgress;
+  documents?: {
+    total: number;
+    approved: number;
+    rejected: number;
+    pending: number;
+  };
+  pedal_video?: {
+    status: "uploaded" | null;
+    uploaded_at: string | null;
+  } | null;
+  status: ReviewStatus | "pending" | "active";
 }
 
-/**
- * Mock data generator - Replace with Go API call later
- * When integrating Go API, replace the queryFn with actual API endpoint
- */
-const generateMockReviewData = (): InstructorInReview[] => {
-  // Mock data for testing - Replace with actual Go API call later
-  // const response = await fetch(`${BACKEND_API}/v1/instructors/review`, {
-  //   headers: { "Authorization": `Bearer ${token}` }
-  // });
-  // return response.json();
-  
-  return [
-    {
-      id: "1",
-      instructor_id: "instr_001",
-      name: "Rajesh Kumar",
-      phone: "+91 98765 43210",
-      initials: "RK",
-      avatar_bg_color: "#a855f7",
-      stage: "stage1_documents",
-      applied_at: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
-      progress: {
-        documents_reviewed: 1,
-        documents_total: 5,
-        video_status: undefined,
-      },
-      status: "awaiting_review",
-    },
-    {
-      id: "2",
-      instructor_id: "instr_002",
-      name: "Priya Singh",
-      phone: "+91 90001 23456",
-      initials: "PS",
-      avatar_bg_color: "#06b6d4",
-      stage: "stage1_documents",
-      applied_at: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(),
-      progress: {
-        documents_reviewed: 4,
-        documents_total: 5,
-        video_status: undefined,
-      },
-      status: "approved",
-    },
-    {
-      id: "3",
-      instructor_id: "instr_003",
-      name: "Amit Patel",
-      phone: "+91 88765 54321",
-      initials: "AP",
-      avatar_bg_color: "#ec4899",
-      stage: "stage2_pedal_video",
-      applied_at: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-      progress: {
-        documents_reviewed: undefined,
-        documents_total: undefined,
-        video_status: "uploaded",
-      },
-      status: "awaiting_review",
-    },
-    {
-      id: "4",
-      instructor_id: "instr_004",
-      name: "Neha Gupta",
-      phone: "+91 99887 66543",
-      initials: "NG",
-      avatar_bg_color: "#f59e0b",
-      stage: "stage2_pedal_video",
-      applied_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
-      progress: {
-        documents_reviewed: undefined,
-        documents_total: undefined,
-        video_status: "reviewed",
-      },
-      status: "approved",
-    },
-    {
-      id: "5",
-      instructor_id: "instr_005",
-      name: "Vikram Sharma",
-      phone: "+91 87654 32109",
-      initials: "VS",
-      avatar_bg_color: "#8b5cf6",
-      stage: "stage1_documents",
-      applied_at: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
-      progress: {
-        documents_reviewed: 5,
-        documents_total: 5,
-        video_status: undefined,
-      },
-      status: "rejected",
-    },
-  ];
-};
+
+
 
 /**
- * Hook to fetch instructors in review stage
- * Returns instructors awaiting document or video review
+ * Hook to fetch instructors in review stage from backend API with authentication
+ * Returns instructors awaiting document or video review with counts
  * 
  * Usage:
- * const { data: reviewInstructors, isLoading } = useReviewInstructors();
- * 
- * Future API Integration:
- * - Replace generateMockReviewData() with actual Go API endpoint
- * - Add filters like: useReviewInstructors(stage?: ReviewStage)
+ * const { data: reviewResponse, isLoading } = useReviewInstructors("all");
+ * const instructors = reviewResponse?.instructors || [];
+ * const counts = reviewResponse?.counts || { all: 0, documents: 0, pedal_videos: 0 };
  */
-export const useReviewInstructors = () => {
+export const useReviewInstructors = (stage: "all" | "documents" | "pedal_videos" = "all") => {
   return useQuery({
-    queryKey: ["review-instructors"],
+    queryKey: ["review-instructors", stage],
     queryFn: async () => {
-      // PLACEHOLDER: This will be replaced with Go API call
-      // const token = localStorage.getItem("go_access_token");
-      // const response = await fetch(`${BACKEND_API}/v1/instructors/review`, {
-      //   headers: { "Authorization": `Bearer ${token}` }
-      // });
-      // if (!response.ok) throw new Error("Failed to fetch review instructors");
-      // return response.json();
+      try {
+        // Get Go access token from localStorage
+        const goAccessToken = localStorage.getItem("go_access_token");
+        
+        if (!goAccessToken) {
+          throw new Error("No Go access token found. Please login again.");
+        }
 
-      return generateMockReviewData();
+        // Call Go backend API with the correct stage parameter
+        console.log(`[REVIEW API] Fetching instructors for stage: ${stage}`);
+        
+        const response = await fetch(
+          `${BACKEND_API}/admin/instructors/review?stage=${stage}`,
+          {
+            method: "GET",
+            headers: {
+              "Authorization": `Bearer ${goAccessToken}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        if (!response.ok) {
+          throw new Error(`API Error: ${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        console.log(`[REVIEW API] ✅ Successfully fetched ${data.instructors?.length || 0} instructors for stage: ${stage}`);
+        console.log("[REVIEW API] Response data:", data);
+        
+        return {
+          counts: data.counts || {
+            all: data.instructors?.length || 0,
+            documents: data.instructors?.filter((i: InstructorInReview) => i.stage === "stage1_documents" || i.stage === "documents").length || 0,
+            pedal_videos: data.instructors?.filter((i: InstructorInReview) => i.stage === "stage2_pedal_video" || i.stage === "pedal_videos").length || 0,
+          },
+          instructors: data.instructors || [],
+        };
+      } catch (error) {
+        console.error("[REVIEW API] ❌ Error fetching from Go backend:", error);
+        throw error;
+      }
     },
-    staleTime: 5 * 60 * 1000, // 5 minutes
+    staleTime: 5 * 60 * 1000,
   });
 };
 
+
 /**
  * Get metadata for review stage (for UI labels, colors, etc.)
+ * Handles both backend names (documents, pedal_videos) and frontend names (stage1_documents, stage2_pedal_video)
  */
-export const getReviewStageMeta = (stage: ReviewStage) => {
+export const getReviewStageMeta = (stage: ReviewStage | "documents" | "pedal_videos") => {
   const stageMap: Record<
-    ReviewStage,
+    string,
     {
       label: string;
       badgeClass: string;
@@ -184,16 +143,28 @@ export const getReviewStageMeta = (stage: ReviewStage) => {
       badgeClass: "bg-purple-100 text-purple-700",
       dotClass: "bg-purple-500",
     },
+    // Backend stage names
+    documents: {
+      label: "Stage 1: Documents",
+      badgeClass: "bg-red-100 text-red-700",
+      dotClass: "bg-red-500",
+    },
+    pedal_videos: {
+      label: "Stage 2: Pedal video",
+      badgeClass: "bg-purple-100 text-purple-700",
+      dotClass: "bg-purple-500",
+    },
   };
-  return stageMap[stage];
+  return stageMap[stage] || stageMap.stage1_documents;
 };
 
 /**
  * Get metadata for review status
+ * Handles both backend names (pending, active, rejected) and frontend names (awaiting_review, approved, rejected)
  */
-export const getReviewStatusMeta = (status: ReviewStatus) => {
+export const getReviewStatusMeta = (status: ReviewStatus | "pending" | "active") => {
   const statusMap: Record<
-    ReviewStatus,
+    string,
     {
       label: string;
       badge_class: string;
@@ -211,6 +182,15 @@ export const getReviewStatusMeta = (status: ReviewStatus) => {
       label: "Rejected",
       badge_class: "text-red-600 font-semibold",
     },
+    // Backend status names
+    pending: {
+      label: "Awaiting review",
+      badge_class: "text-gray-500",
+    },
+    active: {
+      label: "Approved",
+      badge_class: "text-green-600 font-semibold",
+    },
   };
-  return statusMap[status];
+  return statusMap[status] || statusMap.awaiting_review;
 };

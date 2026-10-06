@@ -1,7 +1,7 @@
 ﻿"use client";
 "use client";
 import { useState, useRef, useEffect } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ChevronLeft, ZoomIn, ZoomOut, Expand, Check, X, Play, Pause, ChevronDown, Upload, AlertCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -16,18 +16,49 @@ import {
 } from "@/queries/instructorApproval";
 import { formatDistanceToNow, parseISO } from "date-fns";
 
+/**
+ * Generate initials from instructor name
+ * e.g., "Demo Lane" -> "DL", "John Doe Smith" -> "JD"
+ */
+const getInitials = (name: string): string => {
+  return name
+    .split(" ")
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase();
+};
+
 export default function InstructorApprovalPage(): JSX.Element {
   const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
   
   // Get instructor by ID from mock data
   const allInstructors = generateMockApprovalData();
-  const instructor = allInstructors.find(instr => instr.instructor_id === id) || allInstructors[0];
   
-  // For testing Stage 2, you can manually change the instructor data
-  // Uncomment the line below to test Stage 2
-  // const instructor = allInstructors[1];
-  const isStage2 = instructor.stage === "stage2_pedal_video";
+  // Determine stage from URL query parameter (passed from Review card)
+  const stageParam = searchParams.get("stage");
+  const isStage2Param = stageParam === "stage2_pedal_video";
+  
+  // Find instructor by ID, or filter by stage if ID doesn't match
+  let instructor = allInstructors.find(instr => instr.instructor_id === id);
+  
+  // If exact ID not found, try to find by stage from the stageParam
+  if (!instructor) {
+    // Filter by stage and get first matching instructor
+    if (isStage2Param) {
+      instructor = allInstructors.find(instr => instr.stage === "stage2_pedal_video");
+    } else {
+      instructor = allInstructors.find(instr => instr.stage === "stage1_documents");
+    }
+  }
+  
+  // Fallback to first instructor if still not found
+  if (!instructor) {
+    instructor = allInstructors[0];
+  }
+  
+  const isStage2 = isStage2Param || instructor.stage === "stage2_pedal_video";
   
   // Document states
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>(
@@ -383,7 +414,7 @@ export default function InstructorApprovalPage(): JSX.Element {
               className="flex h-12 w-12 items-center justify-center rounded-full font-bold text-base flex-shrink-0"
               style={{ backgroundColor: "#DDF8EF", color: "#00CE84" }}
             >
-              {instructor.initials}
+              {instructor.initials || getInitials(instructor.name)}
             </div>
             {/* Instructor Info */}
             <div>
@@ -790,7 +821,7 @@ export default function InstructorApprovalPage(): JSX.Element {
               className="flex h-12 w-12 items-center justify-center rounded-full font-bold text-base flex-shrink-0"
               style={{ backgroundColor: "#DDF8EF", color: "#00CE84" }}
             >
-              {instructor.initials}
+              {instructor.initials || getInitials(instructor.name)}
             </div>
             <div>
               <h2 className="text-lg font-bold text-gray-900">{instructor.name}</h2>

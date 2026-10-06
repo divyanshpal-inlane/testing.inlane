@@ -35,7 +35,7 @@ const FEATURE_FLAG_API = `${BACKEND_API}/internal/feature-flags`;
 const INTERNAL_API_KEY = import.meta.env.VITE_INTERNAL_API_KEY || 'local-internal-secret-key';
 
 // Default flags when Go service is unavailable — falls back to Supabase
-const DEFAULT_FLAGS: FeatureFlags = { shadow_auth_enabled: false, use_go_auth: false };
+const DEFAULT_FLAGS: FeatureFlags = { shadow_auth_enabled: false, use_go_auth: true };
 
 // Timeout for feature flag fetch (in ms) — fail fast in local dev when Go service isn't running
 const FETCH_TIMEOUT_MS = 3000;
