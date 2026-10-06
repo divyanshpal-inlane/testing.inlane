@@ -338,10 +338,9 @@ export default function Home() {
 
   // Applies to predefined, custom AND demo learners. Pending requests created
   // during payment must never bypass pickup, licence upload and availability.
+  // Always show "Continue setup" button instead of auto-redirecting, so learners
+  // can see their home page first and choose when to start the setup flow.
   if (!shouldRenderLLFlow && nextSetupRoute) {
-    if (!returnedFromSetup) {
-      return <Navigate to={nextSetupRoute} replace />;
-    }
     return (
       <div className="flex min-h-screen flex-col">
         <LearnerHomeHeader learnerName={learner?.name} />
