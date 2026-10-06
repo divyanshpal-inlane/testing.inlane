@@ -8,6 +8,7 @@ import {
 import { useUser } from "@/context/auth-context";
 import { selectLatestLearnerServiceEnrollment } from "@/lib/learner-service";
 import { supabase } from "@/lib/supabaseClient";
+import { invalidateSchedulingRequestQueries } from "@/queries/preferences";
 import { Database } from "@/types/database.types";
 import { getAllPhoneFormats } from "@/utils/phoneNormalization";
 
@@ -348,6 +349,14 @@ export function useUploadLLMutation() {
       file: File;
       fileName?: string;
     }) => {
+      if (!phone)
+        throw new Error("Please sign in again to upload your licence.");
+      if (!["image/jpeg", "image/png", "application/pdf"].includes(file.type)) {
+        throw new Error("Please upload a JPEG, PNG or PDF file.");
+      }
+      if (file.size > 4 * 1024 * 1024) {
+        throw new Error("Your licence file must be 4 MB or smaller.");
+      }
       const { data, error } = await supabase.storage
         .from("LL")
         .upload(`${phone}/${fileName}.${file.type.split("/")[1]}`, file, {
@@ -646,6 +655,7 @@ export function useLearnerEnrollmentCourse({
 }
 
 export function useMutationRescheduleRequest() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({
       learnerId,
@@ -668,7 +678,7 @@ export function useMutationRescheduleRequest() {
       // inserting a second one would show the same learner twice in admin's
       // New Schedules tab, so refresh the existing request instead.
       if (type === "new" && status === "pending") {
-        const { data: existingRequest } = await supabase
+        const { data: existingRequest, error: existingError } = await supabase
           .from("reschedule_requests")
           .select("id")
           .eq("learner_id", learnerId)
@@ -678,13 +688,15 @@ export function useMutationRescheduleRequest() {
           .limit(1)
           .maybeSingle();
 
+        if (existingError) throw existingError;
         if (existingRequest) {
           const { data: updatedRequest, error: updateError } = await supabase
             .from("reschedule_requests")
             .update({
               amount: totalFee,
               lesson_ids: lessonIds,
-              payment_id: paymentId,
+              // Preserve the payment link on pre-created demo/custom requests.
+              ...(paymentId ? { payment_id: paymentId } : {}),
             })
             .eq("id", existingRequest.id)
             .select()
@@ -709,6 +721,8 @@ export function useMutationRescheduleRequest() {
       if (rescheduleError) throw rescheduleError;
       return rescheduleRequest;
     },
+    onSuccess: (_, variables) =>
+      invalidateSchedulingRequestQueries(queryClient, variables.learnerId),
   });
 }
 
@@ -724,11 +738,7 @@ export function useMutationCompleteRescheduleRequest() {
       if (error) throw error;
       return data;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["scheduling-requests"],
-      });
-    },
+    onSuccess: () => invalidateSchedulingRequestQueries(queryClient),
   });
 }
 

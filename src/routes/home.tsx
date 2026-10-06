@@ -25,7 +25,7 @@ import {
   User,
 } from "lucide-react";
 import React, { useEffect, useState } from "react";
-import { Link, Navigate, useNavigate } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
 import LLFlow from "@/components/ll_flow";
@@ -57,6 +57,7 @@ import {
 } from "@/components/ui/tooltip";
 import { LESSON_CONTENT } from "@/constants/Lesson";
 import { SALES_PHONE_TEL, telHref } from "@/constants/support";
+import { nextLearnerScheduleSetupRoute } from "@/lib/learner-schedule-onboarding";
 import {
   learnerHomeExperience,
   shouldRenderLearnerLLFlow,
@@ -73,7 +74,10 @@ import {
   useUpcomingLesson,
 } from "@/queries/learner";
 import { usePaymentsByLearner } from "@/queries/payment";
-import { useLearnerRescheduleRequests } from "@/queries/preferences";
+import {
+  useLearnerRescheduleRequests,
+  useSchedulePreferences,
+} from "@/queries/preferences";
 import { useCompletedRescheduleRequests } from "@/queries/schedule-requests";
 
 const isWithin30MinutesOfLesson = (
@@ -104,6 +108,7 @@ function LearnerHomeHeader({ learnerName }: { learnerName?: string | null }) {
 
 export default function Home() {
   const navigate = useNavigate();
+  const location = useLocation();
 
   const { data: learner, isLoading, error } = useLearner();
   const {
@@ -134,21 +139,16 @@ export default function Home() {
   });
 
   const isDemo = enrolledCourse?.progress?.type === "demo";
-  const isCustom = enrolledCourse?.progress?.type === "custom";
-  // A custom-course payment pre-creates the pending "new" scheduling request
-  // (with no course_id, lesson_ids is the only way admin learns how many hours
-  // to book — see complete-payment's custom branch). A predefined course has no
-  // such request until the learner finishes onboarding, so the presence of one
-  // must NOT be read as "already onboarded" here: otherwise the LL flow, pickup
-  // location, start-date questions and availability screens below are all
-  // skipped and admin gets a learner it can't actually schedule.
-  const needsScheduleOnboarding =
-    isCustom &&
-    (!learner?.LL_received ||
-      !learner?.address_lat ||
-      !learner?.address_lng ||
-      !learner?.preferred_start_date);
-  const { data: scheduledLessons } = useLearnerSchedule({
+  const {
+    data: schedulePreferences,
+    isLoading: preferencesLoading,
+    error: preferencesError,
+  } = useSchedulePreferences(learner?.id);
+  const {
+    data: scheduledLessons,
+    isLoading: scheduledLessonsLoading,
+    error: scheduledLessonsError,
+  } = useLearnerSchedule({
     learnerId: learner?.id,
     courseId: enrolledCourse?.course_id,
     isDemo,
@@ -157,7 +157,8 @@ export default function Home() {
     learner?.id,
   );
   // Lesson status updates are handled exclusively by instructor OTP verification
-  const { mutate: updateLearner } = useLearnerUpdate();
+  const { mutate: updateLearner, isPending: isUpdatingLearner } =
+    useLearnerUpdate();
   const queryClient = useQueryClient();
   const maxNumLessonsOnHalfInstallment = 1;
   const numWaiveredLessonUnlocked = 1;
@@ -193,24 +194,55 @@ export default function Home() {
     isEnrolledCourseLoading ||
     isEnrolledCourseFetching ||
     isServiceEnrollmentLoading ||
-    isServiceEnrollmentFetching
+    isServiceEnrollmentFetching ||
+    preferencesLoading ||
+    scheduledLessonsLoading
   ) {
     return <div>Loading...</div>;
   }
 
-  if (error || serviceEnrollmentError) {
-    return <p>Error: {error?.message || serviceEnrollmentError?.message}</p>;
+  if (
+    error ||
+    serviceEnrollmentError ||
+    preferencesError ||
+    scheduledLessonsError
+  ) {
+    return (
+      <p>
+        Error:{" "}
+        {error?.message ||
+          serviceEnrollmentError?.message ||
+          preferencesError?.message ||
+          scheduledLessonsError?.message}
+      </p>
+    );
   }
 
   const selectedCaseType = serviceEnrollment?.case_type;
   const homeExperience = learnerHomeExperience(selectedCaseType);
-  const shouldRenderLLFlow = shouldRenderLearnerLLFlow(
-    selectedCaseType,
-    learner?.LL_received,
-    isDemo,
-  );
+  const shouldRenderLLFlow =
+    shouldRenderLearnerLLFlow(selectedCaseType, learner?.LL_received, isDemo) &&
+    !(selectedCaseType === "lessons_with_rto" && learner?.LL_received);
+  const nextSetupRoute = learner
+    ? nextLearnerScheduleSetupRoute(learner, {
+        isDemo,
+        hasPreferences: (schedulePreferences?.length ?? 0) > 0,
+        hasScheduledLessons:
+          Array.isArray(scheduledLessons) && scheduledLessons.length > 0,
+      })
+    : null;
+  const needsScheduleOnboarding = !!nextSetupRoute || shouldRenderLLFlow;
+  // Back is an explicit exit, not proof of completed setup. Keep this on the
+  // returned history entry (and scoped to the learner), never in the database.
+  const returnedFromSetup =
+    !!learner?.id && location.state?.scheduleSetupReturnFor === learner.id;
 
-  if (homeExperience === "rto") {
+  // RTO-only stays in the licence journey. Combined learners can start class
+  // setup once their LL is received instead of being trapped in the RTO home.
+  if (
+    homeExperience === "rto" &&
+    (shouldRenderLLFlow || (returnedFromSetup && !!nextSetupRoute))
+  ) {
     return (
       <div className="flex min-h-screen flex-col">
         <LearnerHomeHeader learnerName={learner?.name} />
@@ -242,30 +274,18 @@ export default function Home() {
     );
   }
 
-  // Demo learners need pickup coords before admin can match an instructor.
-  // Redirect to the address capture page immediately so this check can't be
-  // bypassed by a later short-circuit (e.g. the scheduleRequests-based
-  // "Schedule is Being Created" branch below).
-  if (isDemo && (!learner?.address_lat || !learner?.address_lng)) {
-    return <Navigate to="/createSchedule/details?type=demo" />;
-  }
-
   // After payment is complete, check if DL question has been answered
   const handleDLResponse = (hasDL: boolean) => {
-    if (hasDL) {
-      // User has a DL - they already have LL
-      updateLearner({
-        LL_result: true,
-        has_a_DL: true,
-        LL_received: true,
-      });
-    } else {
-      // User does not have a DL - needs to go through LL flow
-      updateLearner({
-        LL_result: null,
-        has_a_DL: false,
-      });
-    }
+    if (isUpdatingLearner) return;
+    updateLearner(
+      hasDL
+        ? { LL_result: true, has_a_DL: true, LL_received: true }
+        : { LL_result: null, has_a_DL: false },
+      {
+        onError: () =>
+          toast.error("Unable to save your licence answer. Please try again."),
+      },
+    );
   };
 
   // Show DL question if not answered yet (has_a_DL is null/undefined)
@@ -295,18 +315,48 @@ export default function Home() {
             </p>
           </div>
           <div className="flex flex-col gap-4">
-            <Button className="w-full" onClick={() => handleDLResponse(true)}>
+            <Button
+              className="w-full"
+              disabled={isUpdatingLearner}
+              onClick={() => handleDLResponse(true)}
+            >
               Yes, I have a DL
             </Button>
             <Button
               className="w-full"
               variant="outline"
+              disabled={isUpdatingLearner}
               onClick={() => handleDLResponse(false)}
             >
               No, I need to get LL first
             </Button>
           </div>
         </div>
+      </div>
+    );
+  }
+
+  // Applies to predefined, custom AND demo learners. Pending requests created
+  // during payment must never bypass pickup, licence upload and availability.
+  if (!shouldRenderLLFlow && nextSetupRoute) {
+    if (!returnedFromSetup) {
+      return <Navigate to={nextSetupRoute} replace />;
+    }
+    return (
+      <div className="flex min-h-screen flex-col">
+        <LearnerHomeHeader learnerName={learner?.name} />
+        <Card className="m-4">
+          <CardContent className="space-y-4 p-6 text-center">
+            <h2 className="text-xl font-semibold">Set up your lessons</h2>
+            <p className="text-muted-foreground">
+              Your setup is not submitted yet. Continue when you are ready to
+              share your pickup location and availability.
+            </p>
+            <Button asChild className="w-full">
+              <Link to={nextSetupRoute}>Continue setup</Link>
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     );
   }

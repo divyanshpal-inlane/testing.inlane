@@ -1,10 +1,11 @@
 import { ArrowLeft } from "lucide-react";
 import React, { useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, Navigate, useSearchParams } from "react-router-dom";
 
 import PreferenceSelector from "@/components/lesson/PreferenceSelector";
 import { Button } from "@/components/ui/button";
 import { demoLessonOffsetFor } from "@/constants/courses";
+import { nextLearnerScheduleSetupRoute } from "@/lib/learner-schedule-onboarding";
 import {
   useLearner,
   useLearnerEnrollment,
@@ -17,7 +18,7 @@ function Preferences() {
   const [searchParams] = useSearchParams();
   const type = searchParams.get("type") as "new" | "reschedule" | "lesson10";
   const [isFlexible, setIsFlexible] = useState(false);
-  const { data: learner } = useLearner();
+  const { data: learner, isLoading: learnerLoading } = useLearner();
   const { data: enrolledCourse, isLoading: enrolledCourseLoading } =
     useLearnerEnrollmentCourse({
       learnerId: learner?.id ?? "",
@@ -95,6 +96,7 @@ function Preferences() {
   }
 
   if (
+    learnerLoading ||
     enrolledCourseLoading ||
     lessonsLoading ||
     enrollmentLoading ||
@@ -107,6 +109,16 @@ function Preferences() {
     return <div>No enrolled course</div>;
   }
 
+  // Also guard direct links from the licence journey: slot preferences alone
+  // are not enough for Operations to assign an instructor.
+  if (type === "new" && learner) {
+    const setupRoute = nextLearnerScheduleSetupRoute(learner, {
+      isDemo,
+      hasPreferences: true,
+    });
+    if (setupRoute) return <Navigate to={setupRoute} replace />;
+  }
+
   return (
     <div className="flex h-full w-full flex-col overflow-y-auto">
       <div className="flex flex-col rounded-b-[40px] bg-primary">
@@ -117,7 +129,16 @@ function Preferences() {
             className="text-primary-foreground"
             asChild
           >
-            <Link to="/home">
+            <Link
+              to="/home"
+              replace
+              aria-label="Back to learner home"
+              state={
+                type === "new"
+                  ? { scheduleSetupReturnFor: learner?.id }
+                  : undefined
+              }
+            >
               <ArrowLeft className="h-6 w-6" />
             </Link>
           </Button>
@@ -153,6 +174,7 @@ function Preferences() {
         <div className="flex-1 overflow-y-auto px-2 py-4">
           {learner && lessonsToSchedule && lessonsToSchedule.length > 0 ? (
             <PreferenceSelector
+              isFlexible={isFlexible}
               type={type}
               lessons={lessonsToSchedule}
               learnerId={learner.id}
