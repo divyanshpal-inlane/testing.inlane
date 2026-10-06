@@ -195,6 +195,22 @@ test("request failure stays on screen with a visible error and permits retry", a
   assert.equal(ui.events.at(-1)[0], "navigate");
 });
 
+test("RLS rejection explains authorization failure without navigating or notifying", async () => {
+  const ui = selector({
+    saveRequest: async () => {
+      throw { code: "42501", message: "new row violates row-level security policy" };
+    },
+  });
+  await ui.save();
+  assert.equal(
+    ui.events.some(([name]) => name === "navigate" || name === "notify"),
+    false,
+  );
+  const alert = nodes(ui.render()).find((n) => n.props?.role === "alert");
+  assert.match(alert.props.children, /couldn't be authorized/);
+  assert.match(alert.props.children, /selected timings have been kept/);
+});
+
 test("preference failure does not create a queue request", async () => {
   const ui = selector({
     savePreferences: async () => {

@@ -180,8 +180,15 @@ function PreferenceSelector({
       navigate("/loading", { state: { next: "/home" } });
     } catch (error) {
       console.error("Error saving preferences:", error);
+      const isPermissionError =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "42501";
       setSaveError(
-        "We couldn't submit your scheduling request. Please try Save again. Your selected timings have been kept.",
+        isPermissionError
+          ? "Your account couldn't be authorized to save this scheduling request. Please sign in again or contact support. Your selected timings have been kept."
+          : "We couldn't submit your scheduling request. Please try Save again. Your selected timings have been kept.",
       );
     } finally {
       savingRef.current = false;
