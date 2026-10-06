@@ -54,11 +54,14 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/use-toast";
 import { COURSES_DATA, demoLessonOffsetFor } from "@/constants/courses";
+import { uniqueAdminLearners } from "@/lib/admin-learner-list";
+import { fetchAdminSchedules } from "@/lib/admin-schedules";
 import { sendMultiEventCalendarInvite } from "@/lib/calendarUtils";
 import { supabase } from "@/lib/supabaseClient";
 import { generateRandomOTP } from "@/lib/utils";
 import { useMutationCompleteRescheduleRequest } from "@/queries/learner";
 import {
+  invalidateSchedulingRequestQueries,
   SchedulingRequests,
   useEnrollmentTypesByLearner,
   useInfiniteSchedulingRequests,
@@ -186,6 +189,7 @@ export default function AdminSchedules() {
     isLoading,
     isRefetching,
     error: requestsError,
+    refetch: refetchRequests,
     fetchNextPage: fetchNextRequestsPage,
     hasNextPage: hasNextRequestsPage,
     isFetchingNextPage: isFetchingNextRequestsPage,
@@ -201,7 +205,12 @@ export default function AdminSchedules() {
   // Auto-fetch all scheduling request pages on mount (they're usually small - <100 total)
   // This ensures we show accurate counts in tab headers
   useEffect(() => {
-    if (hasNextRequestsPage && !isFetchingNextRequestsPage && !isLoading) {
+    if (
+      hasNextRequestsPage &&
+      !isFetchingNextRequestsPage &&
+      !isLoading &&
+      !isRefetching
+    ) {
       fetchNextRequestsPage();
     }
   }, [
@@ -209,6 +218,7 @@ export default function AdminSchedules() {
     isFetchingNextRequestsPage,
     fetchNextRequestsPage,
     isLoading,
+    isRefetching,
   ]);
 
   // Flatten all pages into a single array
@@ -239,12 +249,6 @@ export default function AdminSchedules() {
   const [newRequestFilter, setNewRequestFilter] = useState<
     "all" | "course" | "demo" | "topup"
   >("all");
-
-  useEffect(() => {
-    if (!isRefetching) {
-      setSelectedRequest(null);
-    }
-  }, [isRefetching]);
 
   const completeRescheduleRequestMutation =
     useMutationCompleteRescheduleRequest();
@@ -470,8 +474,11 @@ export default function AdminSchedules() {
       // the just-scheduled learner appears immediately in Active Learners
       // and the New Schedule list refreshes. The bare refetchActiveLearners
       // call in handleScheduleCreate is kept as a belt-and-suspenders.
-      queryClient.invalidateQueries({ queryKey: ["activeLearners"] });
-      queryClient.invalidateQueries({ queryKey: ["scheduling-requests"] });
+      queryClient.invalidateQueries({ queryKey: ["activeLearners-infinite"] });
+      queryClient.invalidateQueries({ queryKey: ["instructor-full"] });
+      queryClient.invalidateQueries({ queryKey: ["instructor"] });
+      queryClient.invalidateQueries({ queryKey: ["learner-schedules-admin"] });
+      invalidateSchedulingRequestQueries(queryClient);
     },
   });
 
@@ -627,6 +634,7 @@ export default function AdminSchedules() {
                 })
               : Promise.resolve(),
           ]);
+          setSelectedRequest(null);
         } catch (error) {
           console.error("Error completing reschedule request:", error);
         }
@@ -830,11 +838,12 @@ export default function AdminSchedules() {
     }
   }, [learnersError]);
 
-  // Flatten all learner pages into a single array
-  const allLearners = useMemo(() => {
-    if (!learnersData?.pages) return [];
-    return learnersData.pages.flatMap((page) => page?.learners || []);
-  }, [learnersData]);
+  // Deduplicate across pages, not just within each page. Keep raw page sizes
+  // above for pagination so an overlapping page cannot prematurely end loading.
+  const allLearners = useMemo(
+    () => uniqueAdminLearners(learnersData?.pages),
+    [learnersData],
+  );
 
   const totalLearnersCount = learnersData?.pages?.[0]?.totalCount || 0;
 
@@ -1109,7 +1118,23 @@ export default function AdminSchedules() {
             </Button>
             <h1 className="text-2xl font-bold">Schedule Management</h1>
           </div>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={isRefetching}
+            onClick={() => refetchRequests()}
+          >
+            <RefreshCcw
+              className={`mr-2 h-4 w-4 ${isRefetching ? "animate-spin" : ""}`}
+            />
+            Refresh requests
+          </Button>
         </div>
+        {requestsError && (
+          <p role="alert" className="mt-2 text-sm text-red-600">
+            Scheduling requests could not be loaded. Please refresh to retry.
+          </p>
+        )}
       </div>
 
       <Tabs
@@ -1945,6 +1970,8 @@ export const LearnerSchedulesManager = ({
 }: LearnerSchedulesManagerProps) => {
   const [learner, setLearner] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const dataControllerRef = useRef<AbortController | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -2073,25 +2100,27 @@ export const LearnerSchedulesManager = ({
   // 1. Data Fetching
   const syncData = useCallback(async () => {
     if (!learnerId) return;
+    dataControllerRef.current?.abort();
+    const controller = new AbortController();
+    dataControllerRef.current = controller;
+    const { signal } = controller;
     try {
       setIsLoading(true);
-      const { data, error } = await supabase
-        .from("Learner")
-        .select(
-          `
-          id, name, area, phone, email, pick_up_location, address_lat, address_lng,
-          schedules:Schedule(
-            id, date, start_time, end_time, instructor_id,
-            status, course_id, started_at, ended_at,
-            Lesson(id, number),
-            Instructor(name)
+      setLoadError("");
+      const [profile, schedules] = await Promise.all([
+        supabase
+          .from("Learner")
+          .select(
+            "id, name, area, phone, email, pick_up_location, address_lat, address_lng",
           )
-        `,
-        )
-        .eq("id", learnerId)
-        .single();
-
-      if (error) throw error;
+          .eq("id", learnerId)
+          .abortSignal(signal)
+          .single(),
+        fetchAdminSchedules("learner_id", learnerId, signal),
+      ]);
+      if (profile.error) throw profile.error;
+      if (signal.aborted) return;
+      const data = { ...profile.data, schedules };
 
       // Sort schedules by date and time, then assign lesson numbers based on chronological order
       if (data && data.schedules) {
@@ -2143,15 +2172,34 @@ export const LearnerSchedulesManager = ({
       // under ["instructor", phone] — invalidate both so they refetch.
       queryClient.invalidateQueries({ queryKey: ["instructor-full"] });
       queryClient.invalidateQueries({ queryKey: ["instructor"] });
+      queryClient.invalidateQueries({ queryKey: ["activeLearners-infinite"] });
+      queryClient.invalidateQueries({ queryKey: ["learner-schedules-admin"] });
     } catch (error: any) {
-      console.error("Data fetch error:", error.message);
+      if (!signal.aborted) {
+        console.error("Data fetch error:", error.message);
+        setLearner(null);
+        setLoadError("Schedules could not be loaded. Please retry.");
+      }
     } finally {
-      setIsLoading(false);
+      if (!signal.aborted) setIsLoading(false);
     }
   }, [learnerId, queryClient]);
 
   useEffect(() => {
+    setLearner(null);
     syncData();
+    // Also refresh when returning from Instructor Management, even if
+    // Realtime replication is not enabled on this database.
+    const refresh = () => {
+      if (!document.hidden) void syncData();
+    };
+    window.addEventListener("focus", refresh);
+    const timer = window.setInterval(refresh, 30_000);
+    return () => {
+      dataControllerRef.current?.abort();
+      window.removeEventListener("focus", refresh);
+      window.clearInterval(timer);
+    };
   }, [syncData]);
 
   // 2. Action Handlers
@@ -2911,7 +2959,7 @@ export const LearnerSchedulesManager = ({
       // the Active Learners list in the parent uses its own useQuery, so
       // invalidate it here too. Otherwise the new topup/demo schedule
       // wouldn't appear under the learner's card until the cache expired.
-      queryClient.invalidateQueries({ queryKey: ["activeLearners"] });
+      queryClient.invalidateQueries({ queryKey: ["activeLearners-infinite"] });
       toast({
         title: isDemo ? "Demo Scheduled" : "Topup Added",
         description: `${topupTotalClasses} class(es) scheduled. Payment link (₹${paymentAmount}) sent to ${learner.name}.`,
@@ -3055,7 +3103,22 @@ export const LearnerSchedulesManager = ({
         </CardHeader>
         <CardContent className="p-3 pt-0">
           <div className="space-y-2">
-            {learner?.schedules?.length > 0 ? (
+            {loadError ? (
+              <div
+                role="alert"
+                className="rounded-md bg-red-50 p-4 text-red-700"
+              >
+                <p>{loadError}</p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="mt-2"
+                  onClick={() => void syncData()}
+                >
+                  Retry schedules
+                </Button>
+              </div>
+            ) : learner?.schedules?.length > 0 ? (
               [...learner.schedules]
                 .sort(
                   (a, b) =>

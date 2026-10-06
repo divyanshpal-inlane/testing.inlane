@@ -113,6 +113,7 @@ import {
 } from "@/constants/instructorStatus";
 import { usePhoneVisibility } from "@/context/phone-visibility-context";
 import { useAdminImportedCalendar } from "@/hooks/useAdminImportedCalendar";
+import { fetchAdminSchedules } from "@/lib/admin-schedules";
 import {
   deleteZoneById,
   insertZone,
@@ -1269,7 +1270,12 @@ export default function InstructorsManagement() {
       latitude: instructor.latitude || null,
       longitude: instructor.longitude || null,
       car_fuel_type: instructor.car_fuel_type as
-        "petrol" | "diesel" | "ev" | "cng" | "lpg" | null,
+        | "petrol"
+        | "diesel"
+        | "ev"
+        | "cng"
+        | "lpg"
+        | null,
       unavailability: instructor.unavailability || [],
       serviceZone: null,
       serviceZoneId: null,
@@ -1979,7 +1985,12 @@ export default function InstructorsManagement() {
                   onValueChange={(value) =>
                     handleCarFuelChange(
                       value as
-                        "petrol" | "diesel" | "ev" | "cng" | "lpg" | null,
+                        | "petrol"
+                        | "diesel"
+                        | "ev"
+                        | "cng"
+                        | "lpg"
+                        | null,
                     )
                   }
                 >
@@ -5981,29 +5992,34 @@ export const InstructorSchedulePage = () => {
     return slots;
   }, []);
 
-  const { data: instructor, isLoading } = useQuery({
+  const {
+    data: instructor,
+    isLoading,
+    error: scheduleError,
+    refetch: refetchSchedules,
+    isRefetching,
+  } = useQuery({
     queryKey: ["instructor-full", id],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("Instructor")
-        .select(
-          `
-          *,
-          schedules:Schedule (
-            *,
-            learner:learner_id (
-              name, phone, pick_up_location, address_lat, address_lng
-            ),
-            lesson:lesson_id (number)
-          )
-        `,
-        )
-        .eq("id_instructor", id)
-        .single();
-      if (error) throw error;
-
-      return data;
+    enabled: !!id,
+    queryFn: async ({ signal }) => {
+      if (!id) throw new Error("Instructor ID is required");
+      const [profile, schedules] = await Promise.all([
+        supabase
+          .from("Instructor")
+          .select("*")
+          .eq("id_instructor", id)
+          .abortSignal(signal)
+          .single(),
+        fetchAdminSchedules("instructor_id", id, signal),
+      ]);
+      if (profile.error) throw profile.error;
+      return {
+        ...profile.data,
+        schedules: schedules.map((row) => ({ ...row, lesson: row.Lesson })),
+      };
     },
+    // Fallback for databases without Schedule Realtime publication enabled.
+    refetchInterval: 30_000,
   });
 
   // Reverse sync: pick up Schedule changes made elsewhere (e.g. a tentative
@@ -6061,10 +6077,16 @@ export const InstructorSchedulePage = () => {
 
   const deleteMutation = useMutation({
     mutationFn: async (scheduleId) => {
-      await supabase.from("Schedule").delete().eq("id", scheduleId);
+      const { error } = await supabase
+        .from("Schedule")
+        .delete()
+        .eq("id", scheduleId);
+      if (error) throw error;
     },
     onSuccess: () => {
-      queryClient.invalidateQueries(["instructor-full"]);
+      queryClient.invalidateQueries({ queryKey: ["instructor-full"] });
+      queryClient.invalidateQueries({ queryKey: ["activeLearners-infinite"] });
+      queryClient.invalidateQueries({ queryKey: ["learner-schedules-admin"] });
       if (selectedSlot) setSelectedSlot(null);
     },
   });
@@ -6106,7 +6128,7 @@ export const InstructorSchedulePage = () => {
       if (error) throw error;
     },
     onSuccess: () => {
-      queryClient.invalidateQueries(["instructor-full"]);
+      queryClient.invalidateQueries({ queryKey: ["instructor-full"] });
     },
   });
 
@@ -6304,6 +6326,15 @@ export const InstructorSchedulePage = () => {
             />
           </div>
 
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={isRefetching}
+            onClick={() => void refetchSchedules()}
+          >
+            {isRefetching ? "Refreshing..." : "Refresh schedules"}
+          </Button>
           {/* Import Calendar Button */}
           <Button
             variant="outline"
@@ -6319,6 +6350,11 @@ export const InstructorSchedulePage = () => {
         </div>
       </header>
 
+      {scheduleError && (
+        <div role="alert" className="bg-red-50 px-4 py-3 text-sm text-red-700">
+          Schedules could not be loaded. Use Refresh schedules to retry.
+        </div>
+      )}
       {/* Calendar Import Dialog */}
       <Dialog open={showCalendarImport} onOpenChange={setShowCalendarImport}>
         <DialogContent className="max-w-md">

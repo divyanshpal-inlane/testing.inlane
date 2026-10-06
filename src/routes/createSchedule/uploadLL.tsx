@@ -5,16 +5,18 @@ import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useUser } from "@/context/auth-context";
-import { useUploadLLMutation } from "@/queries/learner";
+import { useLearner, useUploadLLMutation } from "@/queries/learner";
 
 export default function UploadLL() {
-  const { phone } = useUser();
+  const { data: learner } = useLearner();
+  const licenceName = learner?.has_a_DL
+    ? "Driving Licence (DL)"
+    : "Learner's Licence (LL)";
   const [file, setFile] = useState<File | undefined>(undefined);
   const [fileName, setFileName] = useState<string>("");
   const [isEditingName, setIsEditingName] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const { mutate, isPending } = useUploadLLMutation();
+  const { mutate, isPending, error } = useUploadLLMutation();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -39,9 +41,9 @@ export default function UploadLL() {
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (file) {
+    if (file && !isPending) {
       mutate(
-        { file, phone },
+        { file },
         {
           onSuccess: () => {
             navigate("/createSchedule/preferences?type=new");
@@ -70,7 +72,7 @@ export default function UploadLL() {
         </div>
         <div className="relative z-10 rounded-b-[40px] bg-primary p-6 text-primary-foreground">
           <h1 className="mb-1 text-xl font-semibold">
-            Please upload the Learner's license
+            Upload your {licenceName}
           </h1>
           <p className="">Required for government compliance</p>
         </div>
@@ -132,7 +134,7 @@ export default function UploadLL() {
                         id="replace-file"
                         type="file"
                         className="sr-only"
-                        accept=".jpeg,.jpg,.pdf"
+                        accept=".jpeg,.jpg,.pdf,.png"
                         onChange={handleFileChange}
                       />
                     </Label>
@@ -145,7 +147,7 @@ export default function UploadLL() {
                 onClick={() => document.getElementById("file-upload")?.click()}
               >
                 <Upload className="h-12 w-12 text-gray-400" />
-                <span className="text-lg font-medium">Upload the LL</span>
+                <span className="text-lg font-medium">Upload your licence</span>
                 <input
                   id="file-upload"
                   type="file"
@@ -154,19 +156,24 @@ export default function UploadLL() {
                   onChange={handleFileChange}
                 />
                 <p className="text-xs text-muted-foreground">
-                  jpeg or pdf (4mb max)
+                  JPEG, PNG or PDF (4 MB max)
                 </p>
               </div>
             )}
           </div>
         </div>
         <div className="sticky bottom-0 border-t bg-white p-4">
+          {error && (
+            <p role="alert" className="mb-3 text-sm text-red-600">
+              {error.message || "Upload failed. Please try again."}
+            </p>
+          )}
           <Button
             type="submit"
             className="w-full"
             disabled={isPending || !file}
           >
-            Upload now
+            {isPending ? "Uploading..." : "Upload and select slots"}
           </Button>
         </div>
       </form>
