@@ -14,6 +14,13 @@ const TEST_MARKER = "PW-SUITE-TEST-BOOKING";
 const PAID_INFO_MARKER = "PW-SUITE-PAID-INFO-BOOKING";
 
 /**
+ * A second instructor, used only to prove that a locked booking hides the
+ * OTHER rows. It has to be a real, active, bookable-looking row and its name has
+ * to be distinctive enough not to substring-match "test_dp".
+ */
+const SECOND_INSTRUCTOR_NAME = "test-instr-latehrs_dont_delete";
+
+/**
  * A grid cell the booking modal will actually open for.
  *
  * `cell-free` is applied to every free 30-minute slot, *including* ones whose
@@ -495,6 +502,66 @@ test.describe("Sales Dashboard — tentative booking flow", () => {
     await phoneInput.pressSequentially("abc123def4567890");
     await expect(phoneInput).toHaveValue("1234567890");
     await page.getByRole("button", { name: "Cancel" }).click();
+  });
+
+  test("opening a booking auto-opens that instructor's schedule and hides the other rows", async ({
+    page,
+  }) => {
+    // The first slot of a booking used to be picked from a collapsed row while
+    // every LATER one ("+ Add another class", "Change slot") was picked from the
+    // open monthly timetable -- so the flow asked for a view it had not opened
+    // yet. Opening a booking now opens that instructor's "Schedule" view itself.
+    // Both halves are pinned here because they are one behaviour: the row that
+    // opens is the only row left on the grid.
+    test.setTimeout(120_000);
+
+    await clearSeededDay(TEST_DP_ID, CONTROLLED_DATE);
+    await searchAndAdd(page, "test_dp");
+    // A second instructor on the roster is what makes "the other rows are
+    // hidden" observable at all -- with one row it would pass either way.
+    await searchAndAdd(page, SECOND_INSTRUCTOR_NAME);
+    await expect(page.locator(".row", { hasText: "test_dp" })).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(
+      page.locator(".row", { hasText: SECOND_INSTRUCTOR_NAME }),
+    ).toBeVisible({ timeout: 15_000 });
+
+    const opened = await openTentativeModal(page, CONTROLLED_DATE);
+    test.skip(!opened, "no free hour available for test_dp on the test date");
+    if (!opened) return;
+
+    // The booking form is open ...
+    await expect(page.getByText("Create Tentative Slot Booking")).toBeVisible();
+
+    // ... and the row's own "Schedule" control is now open, not collapsed.
+    // Asserted on the control rather than on the timetable: the control is the
+    // thing the user said should open, and `aria-expanded` distinguishes "the
+    // button is showing as open" from "a timetable happens to be rendered".
+    const scheduleToggle = page
+      .getByRole("button", { name: /^Hide test_dp's expanded timetable$/ })
+      .first();
+    await expect(scheduleToggle).toBeVisible({ timeout: 15_000 });
+    await expect(scheduleToggle).toHaveAttribute("aria-expanded", "true");
+    // The expanded monthly timetable is really rendered, not just labelled.
+    await expect(page.locator(".detail-row .mini")).toBeVisible();
+
+    // Only the booked instructor's row survives. `.detail-row` is the extra
+    // <tr> the expanded timetable renders, so counting `.row` (not every <tr>)
+    // is what isolates the instructor rows.
+    await expect(page.locator(".row", { hasText: "test_dp" })).toHaveCount(1);
+    await expect(
+      page.locator(".row", { hasText: SECOND_INSTRUCTOR_NAME }),
+    ).toHaveCount(0);
+
+    // And the change is not sticky: cancelling the booking brings the rest of
+    // the roster back, because the lock is derived from the batch and the
+    // expanded set is left alone rather than being reset.
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await expect(
+      page.locator(".row", { hasText: SECOND_INSTRUCTOR_NAME }),
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator(".row", { hasText: "test_dp" })).toBeVisible();
   });
 });
 

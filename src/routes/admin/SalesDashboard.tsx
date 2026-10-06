@@ -1623,6 +1623,47 @@ export default function SalesDashboard() {
 
   const pendingExpandRowId = isExpandTransitionPending ? pendingExpandId : null;
 
+  // Opens a row without the way `toggleExpand` can work against the caller:
+  // membership is read inside the updater, so an already-open row is left
+  // alone. That matters because this is driven from an effect, and an effect
+  // runs twice under StrictMode — a toggle would open the row and then shut
+  // it again on the second pass, leaving the booking with no schedule at all.
+  const expandRow = useCallback((id: string) => {
+    setPendingExpandId(id);
+    startExpandTransition(() => {
+      setExpanded((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+    });
+  }, []);
+
+  // Opening a booking auto-opens that instructor's "Schedule" view.
+  //
+  // Every next step of the flow ("+ Add another class", "Change slot") tells
+  // Sales to click a green cell on the schedule, so the FIRST class should be
+  // picked from the same view the later ones are, rather than having to be
+  // chosen from a collapsed row and then re-opened mid-booking. Only the locked
+  // instructor is on screen at this point (see the gridRows filter), so this
+  // opens exactly the one row the booking belongs to.
+  //
+  // Keyed on `lockedInstructorId`, which is derived from the batch rather than
+  // stored (see above), so it can only change when a booking starts or ends.
+  // Re-running on an open row is a no-op, not a collapse.
+  useEffect(() => {
+    // Nothing to ensure outside a booking. This guard also keeps the telemetry
+    // below honest: without it the effect would fire on mount and again when
+    // the booking ends, both times with no instructor to report.
+    if (!lockedInstructorId) return;
+    // TEMP SALES DASHBOARD MONITORING / REMOVE BEFORE PRODUCTION
+    // Named "ensured", not "opened": expandRow is idempotent, so this also
+    // fires when a class is added to a batch whose view is already open.
+    // Counting opens would then over-report, by one per added class.
+    trackEvent("booking_schedule_view_ensured", {
+      instructorId: lockedInstructorId,
+      success: true,
+      details: { batch_size: pendingSlots.length },
+    });
+    expandRow(lockedInstructorId);
+  }, [expandRow, lockedInstructorId, pendingSlots.length]);
+
   // Hides the modal (formData/pendingSlots stay exactly as they are — both
   // live in this component, not the modal) and arms "pick another slot" mode.
   // handleSlotSelect appends the next clicked free slot to
@@ -1648,13 +1689,11 @@ export default function SalesDashboard() {
     // `addingSlotMode` append branch.
     // Reuse the row's existing "Schedule" control so the next class is
     // picked from the same view Sales would reach by hand, and from where
-    // other days and months are reachable via its month arrows. Guarded on
-    // `expanded` because toggleExpand toggles: calling it for an
-    // already-open row would collapse the timetable we just asked for.
-    if (lockedInstructorId && !expanded.has(lockedInstructorId)) {
-      toggleExpand(lockedInstructorId);
-    }
-  }, [lockedInstructorId, expanded, pendingSlots.length, toggleExpand]);
+    // other days and months are reachable via its month arrows. Safe on an
+    // already-open row: expandRow only opens, so it can be called
+    // unconditionally.
+    if (lockedInstructorId) expandRow(lockedInstructorId);
+  }, [lockedInstructorId, expandRow, pendingSlots.length]);
 
   // "Change slot" on a conflicting class: same hide-the-modal / pick-on-the-
   // calendar flow as "+ Add another class", but remembers WHICH row is being
@@ -1674,16 +1713,13 @@ export default function SalesDashboard() {
       setReplacingSlotIndex(index);
       setTentativeModalOpen(false);
       setAddingSlotMode(true);
-      if (lockedInstructorId && !expanded.has(lockedInstructorId)) {
-        toggleExpand(lockedInstructorId);
-      }
+      if (lockedInstructorId) expandRow(lockedInstructorId);
     },
     [
       customerFormData.customerName,
-      expanded,
+      expandRow,
       lockedInstructorId,
       pendingSlots,
-      toggleExpand,
     ],
   );
 
