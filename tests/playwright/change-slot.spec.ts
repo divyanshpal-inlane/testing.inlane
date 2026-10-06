@@ -5,7 +5,7 @@ import { createClient } from "@supabase/supabase-js";
 
 // Sales Dashboard booking modal: a conflicting class shows a bare "Conflict"
 // badge and a "Change slot" button. Clicking it sends Sales to the calendar;
-// double-clicking a FREE slot there replaces that class (same position) and
+// clicking a FREE slot there replaces that class (same position) and
 // reopens the modal. Nothing is submitted, so the DB only ever holds the one
 // seeded conflict row, which is removed afterwards.
 
@@ -123,16 +123,12 @@ async function dpRow(page: Page) {
   return { row, labels };
 }
 
-async function dblclickSlot(
-  page: Page,
-  hhmm: string,
-  until: () => Promise<void>,
-) {
+async function clickSlot(page: Page, hhmm: string, until: () => Promise<void>) {
   const { row, labels } = await dpRow(page);
   const idx = labels.findIndex((t) => t.includes(hhmm));
   expect(idx, `grid has a ${hhmm} column`).toBeGreaterThanOrEqual(0);
   await expect(async () => {
-    await row.locator("td.cell").nth(idx).dblclick();
+    await row.locator("td.cell").nth(idx).click();
     await until();
   }).toPass({ timeout: 30_000 });
 }
@@ -176,7 +172,7 @@ test("conflicting class: bare 'Conflict' badge + Change slot replaces it from th
   // Base class 07-07 09:00, then Bulk Daily x2 -> 07-08 (conflict), 07-09.
   const heading = page.getByText("Create Tentative Slot Booking");
   await gotoDate(page, "2027-07-07");
-  await dblclickSlot(page, "09:00", () =>
+  await clickSlot(page, "09:00", () =>
     expect(heading).toBeVisible({ timeout: 3_000 }),
   );
   await page.getByRole("button", { name: /Bulk Add/ }).click();
@@ -212,9 +208,9 @@ test("conflicting class: bare 'Conflict' badge + Change slot replaces it from th
   await expect(heading).toBeHidden();
   await expect(page.getByText("Pick a new slot for Class 2")).toBeVisible();
 
-  // Double-click a FREE slot (07-12 09:00) -> replaces Class 2 in place.
+  // click a FREE slot (07-12 09:00) -> replaces Class 2 in place.
   await gotoDate(page, "2027-07-12");
-  await dblclickSlot(page, "09:00", () =>
+  await clickSlot(page, "09:00", () =>
     expect(heading).toBeVisible({ timeout: 3_000 }),
   );
   await expect(page.getByText("Selected Slots (3)")).toBeVisible();

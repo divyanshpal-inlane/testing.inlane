@@ -14,12 +14,19 @@ const TEST_MARKER = "PW-SUITE-TEST-BOOKING";
 const PAID_INFO_MARKER = "PW-SUITE-PAID-INFO-BOOKING";
 
 /**
+ * A second instructor, used only to prove that a locked booking hides the
+ * OTHER rows. It has to be a real, active, bookable-looking row and its name has
+ * to be distinctive enough not to substring-match "test_dp".
+ */
+const SECOND_INSTRUCTOR_NAME = "test-instr-latehrs_dont_delete";
+
+/**
  * A grid cell the booking modal will actually open for.
  *
  * `cell-free` is applied to every free 30-minute slot, *including* ones whose
  * hour partner is already taken — those additionally get `cell-half`. The app
  * computes `canBook1Hour = free && validateOneHourBlock(...)` and refuses a
- * 1-hour booking when that is false, so double-clicking a `cell-half` correctly
+ * 1-hour booking when that is false, so clicking a `cell-half` correctly
  * shows a toast instead of the modal.
  *
  * Selecting plain `td.cell.cell-free` therefore picked a slot that sometimes
@@ -155,7 +162,7 @@ const MONTH_NAMES = [
  *
  * So: wipe the date BEFORE navigating (navigating is what triggers the grid's
  * Schedule fetch for it), then click a cell that is both free and able to take
- * a full hour. The double-click is retried because React swaps the grid's <td>
+ * a full hour. The click is retried because React swaps the grid's <td>
  * nodes while that fetch settles, which can swallow the event entirely.
  *
  * The caller must have added `test_dp` to the roster first (searchAndAdd).
@@ -243,7 +250,7 @@ async function openTentativeModal(page: Page, date: string): Promise<boolean> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const cell = row.locator(BOOKABLE_CELL).first();
     if ((await cell.count()) === 0) return false;
-    await cell.dblclick();
+    await cell.click();
     try {
       await expect(heading).toBeVisible({ timeout: 3_000 });
       return true;
@@ -386,7 +393,7 @@ test.describe("Sales Dashboard — location map collapse persistence", () => {
 });
 
 test.describe("Sales Dashboard — tentative booking flow", () => {
-  test("double-clicking a free slot, filling the form, and submitting creates a tentative booking", async ({
+  test("clicking a free slot, filling the form, and submitting creates a tentative booking", async ({
     page,
   }) => {
     // Month navigation (7 clicks forward), waiting for the date strip to
@@ -416,6 +423,64 @@ test.describe("Sales Dashboard — tentative booking flow", () => {
     ).toBe(true);
   });
 
+  test("booking form offers only New Customer -- no reuse mode, picker, or follow-up", async ({
+    page,
+  }) => {
+    // The "Reuse Customer" path (mode toggle, previous-customer search, and
+    // the post-booking "Book another class" toast) was removed: a slot can only
+    // be booked for a customer typed into the form. These assertions pin that,
+    // because the feature was easy to reintroduce by adding a second button
+    // next to a surviving label.
+    test.setTimeout(120_000);
+
+    await clearSeededDay(TEST_DP_ID, CONTROLLED_DATE);
+    await searchAndAdd(page, "test_dp");
+    const opened = await openTentativeModal(page, CONTROLLED_DATE);
+    test.skip(!opened, "no free hour available for test_dp on the test date");
+    if (!opened) return;
+
+    // No mode toggle survives in any form.
+    // Scope to the booking dialog itself. The dashboard's own instructor
+    // search is legitimately a combobox, so an unscoped role query matches it
+    // and passes or fails for the wrong reason.
+    const dialog = page.locator(".modal-backdrop");
+
+    // No mode toggle survives in any form.
+    await expect(
+      dialog.getByRole("group", { name: /Customer entry mode/i }),
+    ).toHaveCount(0);
+    await expect(
+      dialog.getByRole("button", { name: /^(New|Reuse) Customer$/ }),
+    ).toHaveCount(0);
+
+    // No previous-customer search. The picker added its own input, so "the
+    // dialog still has exactly the four New Customer fields and nothing else"
+    // is the precise form of this -- an unscoped role query would also match
+    // the dashboard's own instructor search.
+    await expect(page.locator("#reusableCustomerSearch")).toHaveCount(0);
+    await expect(dialog.getByText(/Search previous customers/i)).toHaveCount(0);
+    await expect(dialog.locator("input")).toHaveCount(4);
+
+    // The plain New Customer fields are all still present and usable.
+    for (const id of [
+      "#customerName",
+      "#customerPhone",
+      "#customerAddress",
+      "#salesAgent",
+    ]) {
+      await expect(page.locator(id)).toBeVisible();
+    }
+
+    // And a booking still completes, with no reuse follow-up offered.
+    expect(await fillAndSubmitTentative(page)).toBe(true);
+    await expect(
+      page.getByRole("button", { name: /Book another class/i }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: /Change Customer/i }),
+    ).toHaveCount(0);
+  });
+
   test("phone number input rejects non-digits and caps at 10 characters", async ({
     page,
   }) => {
@@ -437,6 +502,66 @@ test.describe("Sales Dashboard — tentative booking flow", () => {
     await phoneInput.pressSequentially("abc123def4567890");
     await expect(phoneInput).toHaveValue("1234567890");
     await page.getByRole("button", { name: "Cancel" }).click();
+  });
+
+  test("opening a booking auto-opens that instructor's schedule and hides the other rows", async ({
+    page,
+  }) => {
+    // The first slot of a booking used to be picked from a collapsed row while
+    // every LATER one ("+ Add another class", "Change slot") was picked from the
+    // open monthly timetable -- so the flow asked for a view it had not opened
+    // yet. Opening a booking now opens that instructor's "Schedule" view itself.
+    // Both halves are pinned here because they are one behaviour: the row that
+    // opens is the only row left on the grid.
+    test.setTimeout(120_000);
+
+    await clearSeededDay(TEST_DP_ID, CONTROLLED_DATE);
+    await searchAndAdd(page, "test_dp");
+    // A second instructor on the roster is what makes "the other rows are
+    // hidden" observable at all -- with one row it would pass either way.
+    await searchAndAdd(page, SECOND_INSTRUCTOR_NAME);
+    await expect(page.locator(".row", { hasText: "test_dp" })).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(
+      page.locator(".row", { hasText: SECOND_INSTRUCTOR_NAME }),
+    ).toBeVisible({ timeout: 15_000 });
+
+    const opened = await openTentativeModal(page, CONTROLLED_DATE);
+    test.skip(!opened, "no free hour available for test_dp on the test date");
+    if (!opened) return;
+
+    // The booking form is open ...
+    await expect(page.getByText("Create Tentative Slot Booking")).toBeVisible();
+
+    // ... and the row's own "Schedule" control is now open, not collapsed.
+    // Asserted on the control rather than on the timetable: the control is the
+    // thing the user said should open, and `aria-expanded` distinguishes "the
+    // button is showing as open" from "a timetable happens to be rendered".
+    const scheduleToggle = page
+      .getByRole("button", { name: /^Hide test_dp's expanded timetable$/ })
+      .first();
+    await expect(scheduleToggle).toBeVisible({ timeout: 15_000 });
+    await expect(scheduleToggle).toHaveAttribute("aria-expanded", "true");
+    // The expanded monthly timetable is really rendered, not just labelled.
+    await expect(page.locator(".detail-row .mini")).toBeVisible();
+
+    // Only the booked instructor's row survives. `.detail-row` is the extra
+    // <tr> the expanded timetable renders, so counting `.row` (not every <tr>)
+    // is what isolates the instructor rows.
+    await expect(page.locator(".row", { hasText: "test_dp" })).toHaveCount(1);
+    await expect(
+      page.locator(".row", { hasText: SECOND_INSTRUCTOR_NAME }),
+    ).toHaveCount(0);
+
+    // And the change is not sticky: cancelling the booking brings the rest of
+    // the roster back, because the lock is derived from the batch and the
+    // expanded set is left alone rather than being reset.
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await expect(
+      page.locator(".row", { hasText: SECOND_INSTRUCTOR_NAME }),
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator(".row", { hasText: "test_dp" })).toBeVisible();
   });
 });
 
