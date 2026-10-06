@@ -1,7 +1,7 @@
 import "@/components/admin/sales-dashboard/sales-dashboard.css";
 
 import { ArrowLeft, ChevronLeft, ChevronRight } from "lucide-react";
-import type { KeyboardEvent, RefObject } from "react";
+import type { CSSProperties, KeyboardEvent, RefObject } from "react";
 import {
   Fragment,
   lazy,
@@ -20,7 +20,6 @@ import { useNavigate } from "react-router-dom";
 import type { LocateStatus } from "@/components/admin/sales-dashboard/LocationSearch";
 import type {
   CustomerFormValues,
-  CustomerMode,
   SlotPick,
 } from "@/components/admin/sales-dashboard/TentativeBookingModal";
 import {
@@ -51,7 +50,6 @@ import { pointInPolygon } from "@/lib/sales-dashboard/kml";
 import {
   dateToWeekdayLower,
   minutesToTime,
-  normalizePhone,
   timeToMinutes,
 } from "@/lib/sales-dashboard/validation";
 import type { InstructorWorkingHours } from "@/lib/sales-dashboard/workingHours";
@@ -63,13 +61,33 @@ import {
   warnOnCompanyInstructorZones,
 } from "@/lib/sales-dashboard/zones-db";
 import { supabase } from "@/lib/supabaseClient";
+import { cn } from "@/lib/utils";
 import { useCurrentAdmin } from "@/queries/adminPermissions";
-import type { ReusableCustomer } from "@/queries/salesBookingCustomers";
 import { useCurrentUser } from "@/queries/userManagement";
 
 const LocationSearch = lazy(
   () => import("@/components/admin/sales-dashboard/LocationSearch"),
 );
+
+// Plain-English name for each SlotInfo.kind, shown as the badge at the top of
+// the side panel when a taken slot is selected. Mirrors the cell colours.
+const SLOT_KIND_LABELS: Record<SlotInfo["kind"], string> = {
+  free: "Free",
+  tentative: "Tentative",
+  booked: "Booked",
+  paused: "Paused",
+  unavailable: "Unavailable",
+  pending: "In this booking",
+  "pending-blocked": "Blocked",
+  default: "Slot",
+};
+
+// The customer's home area/address is one of the few multi-word values in a
+// detail line, so a hover popover sized to the grid turns into a tall ragged
+// block that covers the neighbouring instructors. It is still shown - the side
+// panel keeps the full `detail` array - it is only hidden on hover, where the
+// popover is a glance rather than a reading surface.
+const ADDRESS_DETAIL_PREFIX = "Area: ";
 
 interface SlotInfo {
   title: string;
@@ -305,7 +323,13 @@ interface GridProps {
   onNextMonth: () => void;
   onToggleSelectRow: (id: string) => void;
   onRemove?: (id: string) => void;
-  onDoubleClick?: (instrId: string, date: string, minute: number) => void;
+  onSelect?: (
+    instrId: string,
+    date: string,
+    minute: number,
+    free: boolean,
+    info: SlotInfo,
+  ) => void;
   onOverrideClick?: (override: NonNullable<SlotInfo["override"]>) => void;
   onDeleteTentative?: (action: NonNullable<SlotInfo["deleteAction"]>) => void;
   resolveInfo: (
@@ -325,7 +349,13 @@ interface SlotCellProps {
   timeLabel: string;
   canBook1Hour?: boolean;
   expandedCalendar?: boolean;
-  onDoubleClick?: (instrId: string, date: string, minute: number) => void;
+  onSelect?: (
+    instrId: string,
+    date: string,
+    minute: number,
+    free: boolean,
+    info: SlotInfo,
+  ) => void;
   onOverrideClick?: (override: NonNullable<SlotInfo["override"]>) => void;
   onDeleteTentative?: (action: NonNullable<SlotInfo["deleteAction"]>) => void;
   resolveInfo: (
@@ -334,6 +364,23 @@ interface SlotCellProps {
     minute: number,
     free: boolean,
   ) => SlotInfo;
+}
+
+// Where a slot popover has to sit so its scroll container does not clip it.
+// Both grids live inside an `overflow: auto` box (.grid-wrap for the main
+// grid, .detail for the expanded calendar), so a popover anchored below a cell
+// near the bottom edge, or a wide one beside the first/last column, used to be
+// cut off. Measured once per hover in SlotCellInner; CSS applies the result.
+interface PopPlacement {
+  // Render above the cell instead of below it (flipped for lack of room).
+  above: boolean;
+  // Horizontal nudge, in px, applied on top of the normal centring.
+  shiftX: number;
+  // Where the little arrow sits, measured from the popover's left edge, so it
+  // keeps pointing at the cell even when the popover has been shifted.
+  arrowX: number;
+  // Cap on the popover's height; anything taller scrolls instead of clipping.
+  maxH: number;
 }
 
 function SlotCellInner({
@@ -345,16 +392,71 @@ function SlotCellInner({
   timeLabel,
   canBook1Hour,
   expandedCalendar = false,
-  onDoubleClick,
+  onSelect,
   onOverrideClick,
   onDeleteTentative,
   resolveInfo,
 }: SlotCellProps) {
   const [isHovered, setIsHovered] = useState(false);
+  const popRef = useRef<HTMLDivElement>(null);
+  const [pop, setPop] = useState<PopPlacement | null>(null);
   // Computed on every render, not just while hovered — kind drives the
   // cell's background color (yellow tentative / purple booked), which
   // must be visible at a glance, not only on hover.
   const info = resolveInfo(instrId, date, minute, free);
+  // Stable string key for the popover's contents, so the measurement effect
+  // below re-runs when the text changes but not on every unrelated render.
+  const popKey = `${info.title}\u0000${info.detail.join("\u0000")}`;
+
+  // Runs after the popover mounts (it is only rendered while hovered), so its
+  // real size is known. Cheap: one hovered cell at a time, and the state
+  // update is skipped entirely when nothing would move.
+  useLayoutEffect(() => {
+    const popEl = popRef.current;
+    if (!isHovered || !popEl) {
+      setPop(null);
+      return;
+    }
+    const cellEl = popEl.parentElement;
+    if (!cellEl) return;
+    const cellRect = cellEl.getBoundingClientRect();
+    // Fall back to the viewport if this cell is somehow outside both boxes.
+    const clipEl = popEl.closest<HTMLElement>(".detail, .grid-wrap");
+    const view = clipEl
+      ? clipEl.getBoundingClientRect()
+      : {
+          top: 0,
+          left: 0,
+          right: window.innerWidth,
+          bottom: window.innerHeight,
+        };
+    const gap = 8;
+    const pad = 6;
+    const roomBelow = view.bottom - cellRect.bottom - gap;
+    const roomAbove = cellRect.top - view.top - gap;
+    const above = popEl.offsetHeight > roomBelow && roomAbove > roomBelow;
+    const centred = cellRect.left + cellRect.width / 2 - popEl.offsetWidth / 2;
+    const minLeft = view.left + pad;
+    // maxLeft can be < minLeft on a very narrow container; the Math.max keeps
+    // the clamp from pushing the popover back outside the left edge.
+    const maxLeft = Math.max(minLeft, view.right - pad - popEl.offsetWidth);
+    const left = Math.min(Math.max(centred, minLeft), maxLeft);
+    const next: PopPlacement = {
+      above,
+      shiftX: Math.round(left - centred),
+      arrowX: Math.round(cellRect.left + cellRect.width / 2 - left),
+      maxH: Math.max(140, Math.round(above ? roomAbove : roomBelow)),
+    };
+    setPop((prev) =>
+      prev &&
+      prev.above === next.above &&
+      prev.shiftX === next.shiftX &&
+      prev.arrowX === next.arrowX &&
+      prev.maxH === next.maxH
+        ? prev
+        : next,
+    );
+  }, [isHovered, popKey]);
   const cls = ["cell"];
   // info.kind's pending states take priority over the plain free/busy
   // look — they reflect the in-progress multi-class batch (Task 19),
@@ -392,22 +494,25 @@ function SlotCellInner({
             : free
               ? canBook1Hour === false
                 ? `Free ${timeLabel} — adjacent slot booked, can't book 1hr`
-                : `Free ${timeLabel} — double-click to book 1hr`
+                : `Free ${timeLabel} — click to book 1hr`
               : "Hover for details"
       }
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
-      onDoubleClick={() => {
-        if (free && onDoubleClick) {
-          onDoubleClick(instrId, date, minute);
-        }
+      onClick={() => {
+        // Single click selects the slot: a free one opens the booking form in
+        // the side panel, a taken one (booked / tentative / paused /
+        // unavailable) shows its details there. Replaces the old double-click.
+        if (onSelect) onSelect(instrId, date, minute, free, info);
       }}
     >
       {expandedCalendar && info.scheduleBlock && (
         <div
           className={`mini-schedule-card mini-schedule-card-${info.kind}`}
           style={{
-            width: `calc(${info.scheduleBlock.span} * var(--mini-time-column-width) - 4px)`,
+            // Transposed grid: a class spans vertically (its slots are now
+            // consecutive ROWS), so the block grows by height, not width.
+            height: `calc(${info.scheduleBlock.span} * var(--mini-slot-height) - 4px)`,
           }}
           aria-label={`${info.scheduleBlock.customerName}, ${info.scheduleBlock.statusLabel}, ${minutesToTime(info.scheduleBlock.startMinute)} to ${minutesToTime(info.scheduleBlock.endMinute)}`}
         >
@@ -429,15 +534,29 @@ function SlotCellInner({
         </div>
       )}
       {isHovered && (
-        <div className="slot-pop">
+        <div
+          ref={popRef}
+          className={pop?.above ? "slot-pop above" : "slot-pop"}
+          style={
+            pop
+              ? ({
+                  "--pop-shift-x": `${pop.shiftX}px`,
+                  "--pop-arrow-x": `${pop.arrowX}px`,
+                  "--pop-max-h": `${pop.maxH}px`,
+                } as CSSProperties)
+              : undefined
+          }
+        >
           <div className={free ? "pop-title free" : "pop-title busy"}>
             {info.title}
           </div>
-          {info.detail.map((line, i) => (
-            <div key={i} className="pop-line">
-              {line}
-            </div>
-          ))}
+          {info.detail
+            .filter((line) => !line.startsWith(ADDRESS_DETAIL_PREFIX))
+            .map((line, i) => (
+              <div key={i} className="pop-line">
+                {line}
+              </div>
+            ))}
           {info.override && (
             <button
               type="button"
@@ -474,15 +593,21 @@ function SlotCellInner({
 // instructors with expanded monthly schedules are open at once.
 const SlotCell = memo(SlotCellInner);
 
-interface MiniRowProps {
+interface MiniTimeRowProps {
   instrId: string;
-  d: string;
-  isCurrent: boolean;
-  timeCols: string[];
+  timeLabel: string;
+  timeIndex: number;
+  dates: string[];
   timeStarts: number[];
   gridMinutes: number;
   freeGrid: Map<string, Map<string, number[]>>;
-  onDoubleClick?: (instrId: string, date: string, minute: number) => void;
+  onSelect?: (
+    instrId: string,
+    date: string,
+    minute: number,
+    free: boolean,
+    info: SlotInfo,
+  ) => void;
   onOverrideClick?: (override: NonNullable<SlotInfo["override"]>) => void;
   onDeleteTentative?: (action: NonNullable<SlotInfo["deleteAction"]>) => void;
   resolveInfo: (
@@ -493,53 +618,53 @@ interface MiniRowProps {
   ) => SlotInfo;
 }
 
-function MiniRowInner({
+// One ROW per time slot, one COLUMN per date. This is the transpose of the
+// previous layout (a row per date, a column per 30-minute slot): dates now run
+// along the x axis and times down the y axis.
+//
+// Free-ness is read straight from `freeGrid` (date -> free minutes) per cell —
+// two map lookups plus a scan of at most one day's slots. No per-row Set is
+// built any more: a Set per date would now be rebuilt for every time row
+// (~30 dates x ~18 slots) instead of once per date.
+function MiniTimeRowInner({
   instrId,
-  d,
-  isCurrent,
-  timeCols,
+  timeLabel,
+  timeIndex,
+  dates,
   timeStarts,
   gridMinutes,
   freeGrid,
-  onDoubleClick,
+  onSelect,
   onOverrideClick,
   onDeleteTentative,
   resolveInfo,
-}: MiniRowProps) {
-  // Computed here (inside the memoized row), not in the parent's map loop —
-  // so this Set only gets rebuilt when THIS row actually re-renders, not on
-  // every popover click anywhere in the table.
-  const dayFree = useMemo(
-    () => new Set(freeGrid.get(instrId)?.get(d) ?? []),
-    [freeGrid, instrId, d],
-  );
-  const { weekday, date } = shortDate(d);
+}: MiniTimeRowProps) {
+  const minute = timeStarts[timeIndex];
+  // Still time-based shading, so the alternating bands now run horizontally
+  // across the date columns rather than vertically down the time columns.
+  const band = Math.floor(timeIndex / 2) % 2 === 1;
+  const dayFree = freeGrid.get(instrId);
   return (
-    <tr className={isCurrent ? "mini-row current" : "mini-row"}>
-      <td className="mini-date">
-        <span className="mini-date-label">
-          {weekday} {date}
-        </span>
-        <span className="mini-count">{dayFree.size} free</span>
-      </td>
-      {timeCols.map((t, ti) => {
-        const m = timeStarts[ti];
-        const free = dayFree.has(m);
-        const band = Math.floor(ti / 2) % 2 === 1;
+    <tr className="mini-row">
+      <th scope="row" className="mini-gutter">
+        <span className="time-label">{timeLabel}</span>
+      </th>
+      {dates.map((d) => {
+        const free = dayFree?.get(d)?.includes(minute) ?? false;
         const canBook1Hour =
-          free && validateOneHourBlock(instrId, d, m, freeGrid);
+          free && validateOneHourBlock(instrId, d, minute, freeGrid);
         return (
           <SlotCell
-            key={t}
+            key={d}
             instrId={instrId}
             date={d}
             free={free}
             band={band}
-            minute={m}
-            timeLabel={`${t}–${minutesToTime(m + gridMinutes)}`}
+            minute={minute}
+            timeLabel={`${timeLabel}–${minutesToTime(minute + gridMinutes)}`}
             canBook1Hour={canBook1Hour}
             expandedCalendar
-            onDoubleClick={onDoubleClick}
+            onSelect={onSelect}
             onOverrideClick={onOverrideClick}
             onDeleteTentative={onDeleteTentative}
             resolveInfo={resolveInfo}
@@ -551,9 +676,12 @@ function MiniRowInner({
 }
 
 // Memoized so that, within one instructor's expanded monthly schedule, only
-// the date row whose popover state changed re-renders. Combined with
+// the time row whose popover state changed re-renders. Combined with
 // InstructorRowGroup below, this keeps slot interaction O(1).
-const MiniRow = memo(MiniRowInner);
+const MiniTimeRow = memo(MiniTimeRowInner);
+
+// Stable empty map so the collapsed case below allocates nothing per render.
+const NO_FREE_COUNTS: Map<string, number> = new Map();
 
 interface InstructorRowGroupProps {
   instr: InstructorRow;
@@ -582,7 +710,13 @@ interface InstructorRowGroupProps {
   onNextMonth: () => void;
   onToggleSelectRow: (id: string) => void;
   onRemove?: (id: string) => void;
-  onDoubleClick?: (instrId: string, date: string, minute: number) => void;
+  onSelect?: (
+    instrId: string,
+    date: string,
+    minute: number,
+    free: boolean,
+    info: SlotInfo,
+  ) => void;
   onOverrideClick?: (override: NonNullable<SlotInfo["override"]>) => void;
   onDeleteTentative?: (action: NonNullable<SlotInfo["deleteAction"]>) => void;
   resolveInfo: (
@@ -609,7 +743,7 @@ function InstructorRowGroupInner(props: InstructorRowGroupProps) {
     activeMonth,
     canGoPreviousMonth,
     canGoNextMonth,
-    onDoubleClick,
+    onSelect,
     onOverrideClick,
     onDeleteTentative,
     gridMinutes,
@@ -629,6 +763,16 @@ function InstructorRowGroupInner(props: InstructorRowGroupProps) {
     slotEnd,
     dates[0] ?? new Date().toISOString().slice(0, 10),
   );
+  // Per-date free counts for the transposed mini grid's date column headers.
+  // Skipped entirely while collapsed so an unexpanded row does no extra work
+  // (same reason the table itself is not rendered).
+  const miniFreeCounts = useMemo(() => {
+    if (!isExpanded) return NO_FREE_COUNTS;
+    const perInstructor = freeGrid.get(instr.id);
+    const counts = new Map<string, number>();
+    for (const d of dates) counts.set(d, perInstructor?.get(d)?.length ?? 0);
+    return counts;
+  }, [freeGrid, instr.id, dates, isExpanded]);
   const detailTitle = showDetailTitle(
     instr,
     windowTotal,
@@ -640,71 +784,73 @@ function InstructorRowGroupInner(props: InstructorRowGroupProps) {
     <Fragment>
       <tr className={isSelected ? "row row-selected" : "row"}>
         <td className="instructor-cell" title={detailTitle}>
-          <button
-            type="button"
-            className="row-select"
-            aria-label={
-              isSelected
-                ? `Un-highlight ${instr.name}'s row`
-                : `Highlight ${instr.name}'s row`
-            }
-            title="Highlight this row"
-            onClick={() => onToggleSelectRow(instr.id)}
-          >
-            {isSelected ? "●" : "○"}
-          </button>
-          {rowColor && (
-            <span
-              className="loc-swatch"
-              style={{ background: rowColor }}
-              title={`${instr.name}’s zone colour on the map`}
-            />
-          )}
-          <button
-            type="button"
-            className={isExpanded ? "expand open" : "expand"}
-            aria-expanded={isExpanded}
-            aria-label={
-              isExpanded
-                ? `Hide ${instr.name}'s expanded timetable`
-                : `Show ${instr.name}'s expanded timetable`
-            }
-            title={
-              isExpanded
-                ? "Hide this instructor's full timetable"
-                : "Show this instructor's monthly schedule"
-            }
-            onClick={() => onToggleExpand(instr.id)}
-          >
-            <span className="expand-chev" aria-hidden="true">
-              {isExpanded ? "▲" : "▼"}
-            </span>
-            <span className="expand-label">
-              {isExpanded ? "Hide schedule" : "Schedule"}
-            </span>
-          </button>
-          <button
-            type="button"
-            className="instructor-name"
-            title={detailTitle}
-            onClick={() => onToggleExpand(instr.id)}
-          >
-            {instr.name}
-            {statusNote(instr) && (
-              <span className="break-badge">{statusNote(instr)}</span>
-            )}
-          </button>
-          {onRemove && (
+          <div className="instructor-cell-inner">
             <button
               type="button"
-              className="remove-instr"
-              title={`Remove ${instr.name} from the grid`}
-              aria-label={`Remove ${instr.name} from the grid`}
-              onClick={() => onRemove(instr.id)}
+              className="row-select"
+              aria-label={
+                isSelected
+                  ? `Un-highlight ${instr.name}'s row`
+                  : `Highlight ${instr.name}'s row`
+              }
+              title="Highlight this row"
+              onClick={() => onToggleSelectRow(instr.id)}
             >
-              ×
+              {isSelected ? "●" : "○"}
             </button>
-          )}
+            {rowColor && (
+              <span
+                className="loc-swatch"
+                style={{ background: rowColor }}
+                title={`${instr.name}’s zone colour on the map`}
+              />
+            )}
+            <button
+              type="button"
+              className={isExpanded ? "expand open" : "expand"}
+              aria-expanded={isExpanded}
+              aria-label={
+                isExpanded
+                  ? `Hide ${instr.name}'s expanded timetable`
+                  : `Show ${instr.name}'s expanded timetable`
+              }
+              title={
+                isExpanded
+                  ? "Hide this instructor's full timetable"
+                  : "Show this instructor's monthly schedule"
+              }
+              onClick={() => onToggleExpand(instr.id)}
+            >
+              <span className="expand-chev" aria-hidden="true">
+                {isExpanded ? "▲" : "▼"}
+              </span>
+              <span className="expand-label">
+                {isExpanded ? "Hide schedule" : "Schedule"}
+              </span>
+            </button>
+            <button
+              type="button"
+              className="instructor-name"
+              title={detailTitle}
+              onClick={() => onToggleExpand(instr.id)}
+            >
+              {instr.name}
+              {statusNote(instr) && (
+                <span className="break-badge">{statusNote(instr)}</span>
+              )}
+            </button>
+            {onRemove && (
+              <button
+                type="button"
+                className="remove-instr"
+                title={`Remove ${instr.name} from the grid`}
+                aria-label={`Remove ${instr.name} from the grid`}
+                onClick={() => onRemove(instr.id)}
+              >
+                ×
+              </button>
+            )}
+          </div>
         </td>
         {timeCols.map((t, ti) => {
           const m = timeStarts[ti];
@@ -722,7 +868,7 @@ function InstructorRowGroupInner(props: InstructorRowGroupProps) {
               minute={m}
               timeLabel={`${t}–${minutesToTime(m + gridMinutes)}`}
               canBook1Hour={canBook1Hour}
-              onDoubleClick={onDoubleClick}
+              onSelect={onSelect}
               onOverrideClick={onOverrideClick}
               onDeleteTentative={onDeleteTentative}
               resolveInfo={resolveInfo}
@@ -818,26 +964,40 @@ function InstructorRowGroupInner(props: InstructorRowGroupProps) {
                 <table className="mini">
                   <thead>
                     <tr>
-                      <th className="mini-date">Date</th>
-                      {timeCols.map((t) => (
-                        <th key={t} className="mini-time">
-                          <span className="time-label">{t}</span>
-                        </th>
-                      ))}
+                      <th className="mini-gutter">
+                        <span className="time-label">Time</span>
+                      </th>
+                      {dates.map((d) => {
+                        const { weekday, day } = shortDate(d);
+                        const isCurrent = d === selectedDate;
+                        return (
+                          <th
+                            key={d}
+                            className={cn("mini-date", isCurrent && "current")}
+                            title={`${weekday} ${day}`}
+                          >
+                            <span className="mini-date-label">{weekday}</span>
+                            <span className="mini-date-num">{day}</span>
+                            <span className="mini-count">
+                              {miniFreeCounts.get(d) ?? 0} free
+                            </span>
+                          </th>
+                        );
+                      })}
                     </tr>
                   </thead>
                   <tbody>
-                    {dates.map((d) => (
-                      <MiniRow
-                        key={d}
+                    {timeCols.map((t, ti) => (
+                      <MiniTimeRow
+                        key={t}
                         instrId={instr.id}
-                        d={d}
-                        isCurrent={d === selectedDate}
-                        timeCols={timeCols}
+                        timeLabel={t}
+                        timeIndex={ti}
+                        dates={dates}
                         timeStarts={timeStarts}
                         gridMinutes={gridMinutes}
                         freeGrid={freeGrid}
-                        onDoubleClick={onDoubleClick}
+                        onSelect={onSelect}
                         onOverrideClick={onOverrideClick}
                         onDeleteTentative={onDeleteTentative}
                         resolveInfo={resolveInfo}
@@ -889,7 +1049,7 @@ function AvailabilityGridInner(props: GridProps) {
     onNextMonth,
     onToggleSelectRow,
     onRemove,
-    onDoubleClick,
+    onSelect,
     onOverrideClick,
     onDeleteTentative,
     resolveInfo,
@@ -934,7 +1094,7 @@ function AvailabilityGridInner(props: GridProps) {
             onNextMonth={onNextMonth}
             onToggleSelectRow={onToggleSelectRow}
             onRemove={onRemove}
-            onDoubleClick={onDoubleClick}
+            onSelect={onSelect}
             onOverrideClick={onOverrideClick}
             onDeleteTentative={onDeleteTentative}
             resolveInfo={resolveInfo}
@@ -942,7 +1102,9 @@ function AvailabilityGridInner(props: GridProps) {
         ))}
         {loadingRows.map((li) => (
           <tr key={li.id} className="row row-loading">
-            <td className="instructor-cell">{li.name}</td>
+            <td className="instructor-cell">
+              <div className="instructor-cell-inner">{li.name}</div>
+            </td>
             <td colSpan={timeCols.length}>
               <span className="row-loading-msg">Loading schedule…</span>
             </td>
@@ -1012,6 +1174,16 @@ export default function SalesDashboard() {
     label: string;
   } | null>(null);
   const [tentativeModalOpen, setTentativeModalOpen] = useState(false);
+  // The slot the side panel is describing. Set by EVERY cell click (the
+  // booking form owns the panel while it is open, so this is only read once
+  // that closes). Cleared on close so the panel falls back to its empty state.
+  const [selectedSlot, setSelectedSlot] = useState<{
+    instrId: string;
+    date: string;
+    minute: number;
+    free: boolean;
+    info: SlotInfo;
+  } | null>(null);
   // Task 19 (multiple-class booking): one customer form can carry N
   // slots. Both live here, not inside the modal, specifically so they
   // survive the modal hiding/reopening while Sales picks each additional
@@ -1020,17 +1192,6 @@ export default function SalesDashboard() {
   const [customerFormData, setCustomerFormData] = useState<CustomerFormValues>(
     () => DEFAULT_CUSTOMER_FORM(currentUserName),
   );
-  const [customerMode, setCustomerMode] = useState<CustomerMode>("new");
-  // These profiles contain only the three fields approved for reuse and are
-  // intentionally session-only. They are never written to localStorage.
-  const [activeCustomer, setActiveCustomer] = useState<ReusableCustomer | null>(
-    null,
-  );
-  const [bookingFollowUp, setBookingFollowUp] = useState<{
-    message: string;
-    customer: ReusableCustomer;
-  } | null>(null);
-  const [nextCustomerMode, setNextCustomerMode] = useState<CustomerMode>("new");
   // currentUserName resolves asynchronously (a real DB/edge-function call),
   // so it's almost always still empty at the lazy-init above -- keep
   // salesAgent synced to it as soon as it resolves, and again if it ever
@@ -1051,7 +1212,7 @@ export default function SalesDashboard() {
   // the next slot for the SAME in-progress batch.
   const [addingSlotMode, setAddingSlotMode] = useState(false);
   // Set (together with addingSlotMode) when Sales clicks "Change slot" on a
-  // conflicting class: the next double-clicked free slot REPLACES that row of
+  // conflicting class: the next clicked free slot REPLACES that row of
   // pendingSlots instead of being appended. Cleared whenever the picking mode
   // ends, by any path (picked, cancelled, rejected, modal closed), so it can
   // never leak into a later "Add another class".
@@ -1112,7 +1273,7 @@ export default function SalesDashboard() {
 
   // Hides the modal (formData/pendingSlots stay exactly as they are —
   // both live in this component, not the modal) and arms "pick another
-  // slot" mode. handleSlotDoubleClick appends the next double-clicked
+  // slot" mode. handleSlotSelect appends the next clicked
   // free slot to pendingSlots and reopens the modal.
   //
   // Declared below toggleExpand (rather than alongside the other
@@ -1128,36 +1289,12 @@ export default function SalesDashboard() {
     setTentativeModalOpen(false);
     setPendingSlots([]);
     setCustomerFormData(DEFAULT_CUSTOMER_FORM(currentUserName));
-    setCustomerMode("new");
     setOverrideContext(null);
     setAddingSlotMode(false);
+    // Back to the panel's "select a slot" empty state rather than leaving a
+    // stale slot's details on screen after its booking form is dismissed.
+    setSelectedSlot(null);
   }, [currentUserName]);
-
-  const handleCustomerModeChange = useCallback(
-    (mode: CustomerMode) => {
-      if (mode === customerMode) return;
-      setCustomerMode(mode);
-      setActiveCustomer(null);
-      setCustomerFormData((previous) => ({
-        ...previous,
-        customerName: "",
-        customerPhone: "",
-        customerAddress: mode === "new" ? (locSearch?.label ?? "") : "",
-      }));
-    },
-    [customerMode, locSearch?.label],
-  );
-
-  const handleReuseCustomer = useCallback((customer: ReusableCustomer) => {
-    setActiveCustomer(null);
-    setCustomerFormData((previous) => ({
-      ...previous,
-      customerName: customer.name,
-      customerPhone: customer.phone,
-      customerAddress: customer.address,
-      course: customer.course || previous.course,
-    }));
-  }, []);
 
   const handleTentativeSuccess = useCallback(() => {
     const message = overrideContext
@@ -1165,23 +1302,7 @@ export default function SalesDashboard() {
       : pendingSlots.length > 1
         ? `✅ ${pendingSlots.length} tentative classes booked successfully.`
         : "✅ Tentative slot booked successfully.";
-    const normalizedPhone = normalizePhone(customerFormData.customerPhone);
-    if (!overrideContext && normalizedPhone) {
-      setBookingFollowUp({
-        message,
-        customer: {
-          key: normalizedPhone,
-          name: customerFormData.customerName.trim(),
-          phone: normalizedPhone,
-          address: customerFormData.customerAddress.trim(),
-          course: customerFormData.course,
-          source: "session",
-          lastUsedAt: new Date().toISOString(),
-        },
-      });
-    } else {
-      showSuccessNotice(message);
-    }
+    showSuccessNotice(message);
     // Only the instructor(s) just booked actually changed -- a full
     // reload() would reset phase to "loading" and re-fetch every OTHER
     // instructor in the roster too, showing a disruptive full-page loading
@@ -1192,44 +1313,16 @@ export default function SalesDashboard() {
     setTentativeModalOpen(false);
     setPendingSlots([]);
     setCustomerFormData(DEFAULT_CUSTOMER_FORM(currentUserName));
-    setCustomerMode("new");
-    setActiveCustomer(null);
-    setNextCustomerMode("new");
     setOverrideContext(null);
     setAddingSlotMode(false);
     refreshInstructors(affectedIds);
   }, [
     refreshInstructors,
+    showSuccessNotice,
     overrideContext,
     pendingSlots,
-    showSuccessNotice,
     currentUserName,
-    customerFormData.customerAddress,
-    customerFormData.customerName,
-    customerFormData.customerPhone,
-    customerFormData.course,
   ]);
-
-  const handleBookAnotherClass = useCallback(() => {
-    if (!bookingFollowUp) return;
-    setActiveCustomer(bookingFollowUp.customer);
-    setCustomerMode("reuse");
-    setNextCustomerMode("reuse");
-    setBookingFollowUp(null);
-  }, [bookingFollowUp]);
-
-  const handleChangeActiveCustomer = useCallback(() => {
-    setActiveCustomer(null);
-    setBookingFollowUp(null);
-    setNextCustomerMode("reuse");
-  }, []);
-
-  const handleDoneWithCustomer = useCallback(() => {
-    setActiveCustomer(null);
-    setBookingFollowUp(null);
-    setNextCustomerMode("new");
-    setCustomerMode("new");
-  }, []);
 
   useEffect(() => {
     if (!addingSlotMode) return;
@@ -1412,6 +1505,34 @@ export default function SalesDashboard() {
     });
   }, []);
 
+  // Opens a row without the way `toggleExpand` can work against the caller:
+  // membership is read inside the updater, so an already-open row is left
+  // alone. That matters because this is driven from an effect, and an effect
+  // runs twice under StrictMode — a toggle would open the row and then shut
+  // it again on the second pass, leaving the booking with no schedule at all.
+  const expandRow = useCallback((id: string) => {
+    setPendingExpandId(id);
+    startExpandTransition(() => {
+      setExpanded((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+    });
+  }, []);
+
+  // Opening a booking auto-opens that instructor's "Schedule" view.
+  //
+  // Every next step of the flow ("+ Add another class", "Change slot") tells
+  // Sales to click a green cell on the schedule, so the FIRST class should be
+  // picked from the same view the later ones are, rather than having to be
+  // chosen from a collapsed row and then re-opened mid-booking. Only the locked
+  // instructor is on screen at this point (see the gridRows filter), so this
+  // opens exactly the one row the booking belongs to.
+  //
+  // Keyed on `lockedInstructorId`, which is derived from the batch rather than
+  // stored (see above), so it can only change when a booking starts or ends.
+  // Re-running on an open row is a no-op, not a collapse.
+  useEffect(() => {
+    if (lockedInstructorId) expandRow(lockedInstructorId);
+  }, [expandRow, lockedInstructorId]);
+
   // Clears the stale row id once its transition actually settles, so a
   // later render can't misread a leftover pendingExpandId as "still
   // pending" for some other reason.
@@ -1423,34 +1544,40 @@ export default function SalesDashboard() {
 
   // Hides the modal (formData/pendingSlots stay exactly as they are — both
   // live in this component, not the modal) and arms "pick another slot" mode.
-  // handleSlotDoubleClick appends the next double-clicked free slot to
+  // handleSlotSelect appends the next clicked free slot to
   // pendingSlots and reopens the modal.
   const handleAddAnotherSlot = useCallback(() => {
-    setTentativeModalOpen(false);
     setAddingSlotMode(true);
+    // `tentativeModalOpen` is deliberately LEFT TRUE. This used to close the
+    // form, which was fine when the form was a floating dialog over the grid:
+    // hiding it just handed the screen back to the calendar. But the panel now
+    // renders `selectedSlot` detail whenever the form is not open, and
+    // `selectedSlot` still points at the class the user just booked - so
+    // "+ Add another class" snapped the panel to "In this booking / Already
+    // added to this booking", i.e. the summary of the class they were in the
+    // middle of building. Keeping the form mounted leaves the customer form
+    // and Selected Slots exactly where they were; the next green cell click
+    // appends and the form updates in place. See handleSlotSelect's
+    // `addingSlotMode` append branch.
     // Reuse the row's existing "Schedule" control so the next class is
     // picked from the same view Sales would reach by hand, and from where
-    // other days and months are reachable via its month arrows. Guarded on
-    // `expanded` because toggleExpand toggles: calling it for an
-    // already-open row would collapse the timetable we just asked for.
-    if (lockedInstructorId && !expanded.has(lockedInstructorId)) {
-      toggleExpand(lockedInstructorId);
-    }
-  }, [lockedInstructorId, expanded, toggleExpand]);
+    // other days and months are reachable via its month arrows. Safe on an
+    // already-open row: expandRow only opens, so it can be called
+    // unconditionally.
+    if (lockedInstructorId) expandRow(lockedInstructorId);
+  }, [expandRow, lockedInstructorId]);
 
   // "Change slot" on a conflicting class: same hide-the-modal / pick-on-the-
   // calendar flow as "+ Add another class", but remembers WHICH row is being
-  // replaced so handleSlotDoubleClick swaps it instead of appending.
+  // replaced so handleSlotSelect swaps it instead of appending.
   const handleChangeSlot = useCallback(
     (index: number) => {
       setReplacingSlotIndex(index);
       setTentativeModalOpen(false);
       setAddingSlotMode(true);
-      if (lockedInstructorId && !expanded.has(lockedInstructorId)) {
-        toggleExpand(lockedInstructorId);
-      }
+      if (lockedInstructorId) expandRow(lockedInstructorId);
     },
-    [expanded, lockedInstructorId, toggleExpand],
+    [expandRow, lockedInstructorId],
   );
 
   const cancelAddingSlot = useCallback(() => {
@@ -1843,8 +1970,9 @@ export default function SalesDashboard() {
   // freeGrid, not displayGrid: these are the collapsed-row/date-tab summary
   // counts, and they need to agree with what the expanded view's own count
   // and green cells show (both driven by freeGrid, the strict "a full
-  // 1-hour class actually fits here" grid -- see MiniRowInner's dayFree
-  // below). displayGrid only requires a 30-min gridMinutes-long opening,
+  // 1-hour class actually fits here" grid -- see MiniTimeRowInner's
+  // per-cell freeGrid read below). displayGrid only requires a 30-min
+  // gridMinutes-long opening,
   // which is right for coloring buffer-vs-free half-hour cells but counts
   // scattered half-hour gaps that can't fit an actual class -- e.g. an
   // instructor with classes back-to-back except for a 30-min gap every
@@ -1931,8 +2059,21 @@ export default function SalesDashboard() {
   // needs both in its dependency array, and referencing a const before its
   // own declaration executes throws a ReferenceError (temporal dead zone),
   // not just a lint nit.
-  const handleSlotDoubleClick = useCallback(
-    (instrId: string, date: string, minute: number) => {
+  const handleSlotSelect = useCallback(
+    (
+      instrId: string,
+      date: string,
+      minute: number,
+      free: boolean,
+      info: SlotInfo,
+    ) => {
+      // Any single click selects the slot, so the side panel can show it.
+      // A taken slot (booked / tentative / paused / unavailable) has nothing
+      // to book, so it just displays its details -- no validation, no notice,
+      // and it must not disturb an in-progress booking.
+      setSelectedSlot({ instrId, date, minute, free, info });
+      if (!free) return;
+
       // Defence in depth for the one-instructor-per-booking lock. Other
       // instructors' rows aren't rendered while locked, so this should be
       // unreachable - but gridRows is a render-time filter, and a stale
@@ -1977,7 +2118,7 @@ export default function SalesDashboard() {
       // customer's already-entered phone actually waives it (chaining
       // back-to-back classes for the SAME learner) -- that's the one
       // case where opening the modal anyway is useful. A fresh
-      // double-click has no customer yet to justify that, so it would
+      // fresh click has no customer yet to justify that, so it would
       // always end up rejected at submit after a wasted form fill; show
       // the same notice a genuine overlap gets instead of opening the
       // modal. (validateSlotFresh still re-checks everything for real
@@ -2099,29 +2240,12 @@ export default function SalesDashboard() {
       }
 
       // Fresh booking — reset to a clean single-slot batch and blank
-      // customer form unless Sales explicitly armed a reusable customer.
-      // Auto-fill address from map search if available for a new customer.
+      // customer form. Auto-fill address from map search if available.
       setOverrideContext(null);
       setPendingSlots([newSlot]);
-      setBookingFollowUp(null);
-      const startingMode = activeCustomer ? "reuse" : nextCustomerMode;
-      const startingForm = DEFAULT_CUSTOMER_FORM(
-        currentUserName,
-        activeCustomer?.address ?? locSearch?.label ?? "",
-      );
-      setCustomerMode(startingMode);
       setCustomerFormData(
-        activeCustomer
-          ? {
-              ...startingForm,
-              customerName: activeCustomer.name,
-              customerPhone: activeCustomer.phone,
-              customerAddress: activeCustomer.address,
-              course: activeCustomer.course || startingForm.course,
-            }
-          : startingForm,
+        DEFAULT_CUSTOMER_FORM(currentUserName, locSearch?.label ?? ""),
       );
-      setNextCustomerMode("new");
       setTentativeModalOpen(true);
     },
     [
@@ -2136,8 +2260,6 @@ export default function SalesDashboard() {
       customerFormData.customerPhone,
       data?.freeGrid,
       locSearch,
-      activeCustomer,
-      nextCustomerMode,
       lockedInstructorId,
       lockedInstructorName,
     ],
@@ -2145,7 +2267,7 @@ export default function SalesDashboard() {
 
   // Fresh re-check of a single pending slot's 1-hour availability, run
   // again right before submit (the grid may have changed since it was
-  // added to the batch, possibly minutes ago). Unlike the double-click
+  // added to the batch, possibly minutes ago). Unlike the click
   // gate, the customer's phone is known here (it's in the form by now),
   // so a buffer-only conflict can be resolved for real: waived if every
   // conflicting block is a Sales tentative hold for this same phone,
@@ -2256,10 +2378,6 @@ export default function SalesDashboard() {
   const handleOverrideClick = useCallback(
     (override: NonNullable<SlotInfo["override"]>) => {
       const instr = instructorsById.get(override.instrId);
-      setActiveCustomer(null);
-      setBookingFollowUp(null);
-      setCustomerMode("new");
-      setNextCustomerMode("new");
       setOverrideContext({
         blockId: override.blockId,
         tentativeDetails: override.tentativeDetails,
@@ -2501,7 +2619,7 @@ export default function SalesDashboard() {
         ) {
           const detail = [blockTime, `Instructor: ${name}`];
           if (cover.learnerName) detail.push(`Learner: ${cover.learnerName}`);
-          if (cover.area) detail.push(`Area: ${cover.area}`);
+          if (cover.area) detail.push(`${ADDRESS_DETAIL_PREFIX}${cover.area}`);
           if (cover.courseName) detail.push(`Course: ${cover.courseName}`);
           return {
             title: isBuffer
@@ -2574,7 +2692,8 @@ export default function SalesDashboard() {
           const tentativeDetail = [blockTime, `Instructor: ${name}`];
           if (cover.learnerName)
             tentativeDetail.push(`Learner: ${cover.learnerName}`);
-          if (cover.area) tentativeDetail.push(`Area: ${cover.area}`);
+          if (cover.area)
+            tentativeDetail.push(`${ADDRESS_DETAIL_PREFIX}${cover.area}`);
           if (cover.courseName)
             tentativeDetail.push(`Course: ${cover.courseName}`);
           // Override is only offered for status:"hold" rows (Sales
@@ -2713,7 +2832,7 @@ export default function SalesDashboard() {
   ]);
 
   // A locked booking shows only its own instructor's row, so there is no
-  // other instructor left to double-click while picking the next class. This
+  // other instructor left to click while picking the next class. This
   // is a render-time filter ONLY - `rows`/`visibleInstructors` (and the
   // persisted roster behind them) are untouched, so the full grid comes back
   // untouched the moment the booking ends.
@@ -2726,16 +2845,25 @@ export default function SalesDashboard() {
 
   // Guarantees the timeline (06:00 column onward) always starts exactly
   // where the Instructor column ends, for any name length. The table's own
-  // auto column-sizing can't be trusted here: .instructor-cell is a <td>
-  // with display: flex (needed for the row-select/Schedule-button/name
-  // layout), and browsers don't reliably feed a flex box's true content
-  // width back into the table's intrinsic-width algorithm the way they do
-  // for a plain table-cell — so a sufficiently long name can render wider
-  // than the column the browser decided to allocate, spilling into the
-  // first time column. Measuring the actual rendered content width
-  // (scrollWidth, which reports the true extent even when it overflows the
-  // box) and handing the table an explicit min-width sidesteps that
-  // unreliable inference entirely.
+  // auto column-sizing can't be trusted here: browsers don't reliably feed a
+  // box's true content width back into the table's intrinsic-width algorithm
+  // — so a sufficiently long name can render wider than the column the
+  // browser decided to allocate, spilling into the first time column.
+  // Measuring the actual rendered content width (scrollWidth, which reports
+  // the true extent even when it overflows the box) and handing the table an
+  // explicit min-width sidesteps that unreliable inference entirely.
+  //
+  // The +1 is load-bearing, not slack. scrollWidth is an INTEGER: the real
+  // min-content width is fractional (measured 346.547px for `test_dp`). When
+  // the min-width lands a hair UNDER the fractional min-content, the two cells
+  // in that one column stop agreeing — <th> takes its specified min-width
+  // exactly while <td> is floored up by its own intrinsic width — and the
+  // header's time lines sit a fraction of a pixel off the body's, which is
+  // visible as a ragged seam down the grid. +1 puts min-width safely back on
+  // the ">= intrinsic" side of that boundary, which is the only state in which
+  // the header and body cells are guaranteed to resolve to one width. It is
+  // derived from the content width, not from the applied width, so the column
+  // still shrinks correctly when a shorter name replaces a longer one.
   useLayoutEffect(() => {
     const root = rootRef.current;
     if (!root) return;
@@ -2745,7 +2873,7 @@ export default function SalesDashboard() {
       if (cell.scrollWidth > widest) widest = cell.scrollWidth;
     });
     if (widest > 0) {
-      root.style.setProperty("--instr-col-width", `${widest}px`);
+      root.style.setProperty("--instr-col-width", `${widest + 1}px`);
     }
   }, [gridRows]);
 
@@ -2958,503 +3086,634 @@ export default function SalesDashboard() {
           </div>
         </header>
 
-        <Suspense fallback={null}>
-          <LocationSearch
-            zones={dbZones}
-            zonesError={zoneError}
-            status={locStatus}
-            resultLabel={locSearch?.label ?? null}
-            point={
-              locSearch ? { lat: locSearch.lat, lng: locSearch.lng } : null
-            }
-            matchedNames={locResult?.zones ?? []}
-            via={locResult?.via ?? "none"}
-            zoneInfo={locResult?.zoneInfo ?? {}}
-            onLocate={handleLocation}
-            onClear={clearLocation}
-            collapsed={locCollapsed}
-            onToggleCollapsed={toggleLocCollapsed}
-            theme={theme}
-          />
-        </Suspense>
-
-        <div className="summary">
-          {!locCollapsed && locSearch && (
-            <div className="loc-results">
-              <span className="loc-results-count">
-                {locStatus === "found" ? (
-                  <>
-                    <strong>{locResult?.instrs.length ?? 0}</strong> instructor
-                    {(locResult?.instrs.length ?? 0) === 1 ? "" : "s"} near “
-                    {locSearch.label}”
-                  </>
-                ) : (
-                  <>No instructor covers “{locSearch.label}” yet.</>
+        {/* Two-column body: the calendar keeps its width and the slot panel
+            takes the space to its right, instead of the booking form
+            covering the grid. Mirrors InstructorSchedulePage's detail column. */}
+        <div className="shell-body">
+          {/* Slot panel. Sits on the LEFT of the calendar: a booking form
+              for a free slot, that slot's details for a taken one, and a
+              "select a slot" prompt when nothing is picked. Every cell is a
+              single click now, so both cases come through this one handler. */}
+          <aside className="slot-panel" aria-label="Slot panel">
+            {tentativeModalOpen ? (
+              <TentativeBookingModal
+                variant="panel"
+                isOpen={tentativeModalOpen}
+                onClose={handleCloseTentativeModal}
+                onSuccess={handleTentativeSuccess}
+                slots={pendingSlots}
+                onRemoveSlot={handleRemoveSlot}
+                onAddAnotherSlot={handleAddAnotherSlot}
+                onChangeSlot={handleChangeSlot}
+                onAddBulkSlots={handleAddBulkSlots}
+                validateSlot={validateSlotFresh}
+                formData={customerFormData}
+                onFormDataChange={setCustomerFormData}
+                overrideContext={overrideContext}
+              />
+            ) : selectedSlot ? (
+              <div className="slot-panel-detail">
+                <div className="slot-panel-detail-top">
+                  <span
+                    className={`slot-panel-badge slot-panel-badge-${selectedSlot.info.kind}`}
+                  >
+                    {SLOT_KIND_LABELS[selectedSlot.info.kind] ??
+                      selectedSlot.info.kind}
+                  </span>
+                  <button
+                    type="button"
+                    className="slot-panel-detail-close"
+                    onClick={() => setSelectedSlot(null)}
+                    aria-label="Close slot details"
+                  >
+                    &times;
+                  </button>
+                </div>
+                <h2 className="slot-panel-detail-title">
+                  {selectedSlot.info.title}
+                </h2>
+                <p className="slot-panel-detail-when">
+                  {instructorsById.get(selectedSlot.instrId)?.name ??
+                    selectedSlot.instrId}{" "}
+                  &middot; {selectedSlot.date} &middot;{" "}
+                  {minutesToTime(selectedSlot.minute)}&ndash;
+                  {minutesToTime(selectedSlot.minute + 60)}
+                </p>
+                {selectedSlot.info.detail.length > 0 && (
+                  <dl className="slot-panel-detail-list">
+                    {selectedSlot.info.detail.map((line, i) => (
+                      <div className="slot-panel-detail-row" key={i}>
+                        <dd>{line}</dd>
+                      </div>
+                    ))}
+                  </dl>
                 )}
-              </span>
-              {locResult && locResult.instrs.length > 0 && (
-                <div className="loc-results-chips">
-                  {locResult.instrs.map((instr) => {
-                    const added = compareIds.includes(instr.id);
-                    const rawZones = Object.values(locResult.zoneInfo)
-                      .filter((z) => z.instructorName === instr.name)
-                      .map((z) => z.rawName);
-                    return (
+                {(selectedSlot.info.override ||
+                  selectedSlot.info.deleteAction) && (
+                  <div className="slot-panel-detail-actions">
+                    {selectedSlot.info.override && (
                       <button
-                        key={instr.id}
                         type="button"
-                        className={added ? "loc-chip added" : "loc-chip"}
-                        title={
-                          rawZones.length
-                            ? `Zone on map: ${rawZones.join(", ")}`
-                            : undefined
-                        }
+                        className="slot-pop-override-btn"
                         onClick={() =>
-                          added
-                            ? removeFromCompare(instr.id)
-                            : addToCompare(instr.id)
+                          handleOverrideClick(selectedSlot.info.override!)
                         }
                       >
-                        <span
-                          className="loc-swatch"
-                          style={{
-                            background: locResult.instrColors[instr.id],
-                          }}
-                          title={`${instr.name}’s zone colour on the map`}
-                        />
-                        {`${instr.name} · ${bookableCounts.get(instr.id) ?? 0} free`}
-                        {statusNote(instr) && (
-                          <span className="break-badge">
-                            {statusNote(instr)}
-                          </span>
-                        )}
+                        Override Slot
                       </button>
-                    );
-                  })}
-                </div>
-              )}
-              <button
-                type="button"
-                className="clear-select"
-                onClick={clearLocation}
-              >
-                Clear location
-              </button>
-            </div>
-          )}
-          {inSelectionMode && (
-            <button
-              type="button"
-              className="clear-select"
-              onClick={() => setCompareIds([])}
-            >
-              Clear selection
-            </button>
-          )}
-        </div>
-
-        <nav className="tabs" aria-label="Select date">
-          {visibleDates.map((d, i) => {
-            const { weekday, day } = shortDate(d);
-            const total = dateTotals.get(d) ?? 0;
-            return (
-              <button
-                type="button"
-                key={d}
-                className={i === safeDateIndex ? "tab active" : "tab"}
-                onClick={() => {
-                  setDateIndex(i);
-                  setSortAnchorDate(d);
-                }}
-              >
-                <span>{weekday}</span>
-                <strong>{day}</strong>
-                <em>{total} free</em>
-              </button>
-            );
-          })}
-        </nav>
-
-        <div
-          className={
-            addingSlotMode ? "grid-wrap grid-wrap-picking" : "grid-wrap"
-          }
-          ref={gridWrapRef}
-        >
-          <AvailabilityGrid
-            instructors={gridRows}
-            // The strict, full-60-min grid -- canBook1Hour (in both the
-            // main row and MiniRow) validates against this prop, so it
-            // must NOT be displayGrid (30-min duration check), or
-            // validateOneHourBlock trivially agrees with `free` itself and
-            // the cell-half downgrade never fires. Cell color/coloring
-            // still gets the lenient displayGrid separately via freeSets
-            // below.
-            freeGrid={
-              data?.freeGrid ?? new Map<string, Map<string, number[]>>()
-            }
-            freeSets={freeSets}
-            windowTotals={windowTotals}
-            timeCols={timeCols}
-            timeStarts={timeStarts}
-            dates={visibleDates}
-            selectedDate={selectedDate}
-            activeMonth={activeMonth}
-            canGoPreviousMonth={monthIdx > 0}
-            canGoNextMonth={monthIdx < months.length - 1}
-            gridMinutes={config.gridMinutes}
-            slotStart={config.slotStart}
-            slotEnd={config.slotEnd}
-            expanded={expanded}
-            pendingExpandId={pendingExpandRowId}
-            selectedRows={selectedRows}
-            rowColors={rowColors}
-            loadingRows={(data?.loading ?? []).filter(
-              (li) => !lockedInstructorId || li.id === lockedInstructorId,
-            )}
-            onToggleExpand={toggleExpand}
-            onPreviousMonth={goPrev}
-            onNextMonth={goNext}
-            onToggleSelectRow={toggleSelectRow}
-            onRemove={
-              inSelectionMode ? removeFromCompare : removeRosterInstructor
-            }
-            onDoubleClick={handleSlotDoubleClick}
-            onOverrideClick={handleOverrideClick}
-            onDeleteTentative={handleDeleteTentative}
-            resolveInfo={resolveInfo}
-          />
-          {gridRows.length === 0 && lockedInstructorId && (
-            <p className="empty">
-              {lockedInstructorName} is no longer on the grid. Cancel or
-              complete the booking, then search for the instructor again.
-            </p>
-          )}
-          {gridRows.length === 0 && !lockedInstructorId && !locSearch && (
-            <p className="empty">
-              No instructors loaded yet. Search by name above or use Search by
-              location.
-            </p>
-          )}
-          {gridRows.length === 0 && !lockedInstructorId && locSearch && (
-            <p className="empty">
-              No instructors match this location. Try another area.
-            </p>
-          )}
-        </div>
-
-        <footer className="legend">
-          <span>
-            <i className="swatch free" /> Free slot (no class, not on
-            unavailability, outside the {config.instructor_gap_minutes}-minute
-            travel gap)
-          </span>
-          <span>
-            <i className="swatch tentative" /> 🟡 Tentative (unpaid can be
-            overridden)
-          </span>
-          <span>
-            <i className="swatch booked" /> 🟣 Booked
-          </span>
-          <span>
-            <i className="swatch pending" /> 🔵 Selected for this booking
-          </span>
-          <span>
-            <i className="swatch busy" /> Busy / other
-          </span>
-          <button
-            type="button"
-            className="reload"
-            onClick={() => void reload()}
-          >
-            Refresh
-          </button>
-        </footer>
-
-        {helpOpen && (
-          // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- standard click-outside-to-dismiss backdrop; the modal itself has role="dialog" and a visible close button
-          <div className="modal-backdrop" onClick={() => setHelpOpen(false)}>
-            {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions, jsx-a11y/no-noninteractive-element-interactions -- stops the backdrop's dismiss click from bubbling; the modal itself has role="dialog" and a visible close button */}
-            <div
-              className="modal"
-              role="dialog"
-              aria-modal="true"
-              aria-label="How to use this dashboard"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="modal-header">
-                <h2>How to use this dashboard</h2>
-                <button
-                  type="button"
-                  className="modal-close"
-                  onClick={() => setHelpOpen(false)}
-                  aria-label="Close help"
-                >
-                  ×
-                </button>
+                    )}
+                    {selectedSlot.info.deleteAction && (
+                      <button
+                        type="button"
+                        className="slot-pop-delete-btn"
+                        onClick={() =>
+                          handleDeleteTentative(selectedSlot.info.deleteAction!)
+                        }
+                      >
+                        Delete Slot
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
-
-              <div className="help-section">
-                <h3>What this page shows</h3>
-                <p>
-                  Live availability from the sales database: which of{" "}
-                  {rows.length} active instructors can take a new learner in
-                  each 30-minute slot, across {dates.length} days from{" "}
-                  {fromLabel.weekday} {fromLabel.date}.
+            ) : (
+              <div className="slot-panel-empty">
+                <div className="slot-panel-empty-icon" aria-hidden="true">
+                  &#128197;
+                </div>
+                <p className="slot-panel-empty-title">
+                  Select a slot to view schedules
+                </p>
+                <p className="slot-panel-empty-hint">
+                  {addingSlotMode
+                    ? `Click a green (free) cell on ${lockedInstructorName}'s schedule to pick ${
+                        replacingSlotIndex !== null
+                          ? "a replacement slot"
+                          : "the next class"
+                      }.`
+                    : "Click any slot on the calendar. A free one opens the booking form here; a booked or paused one shows its details."}
                 </p>
               </div>
+            )}
+          </aside>
+          <div className="shell-main">
+            <Suspense fallback={null}>
+              <LocationSearch
+                zones={dbZones}
+                zonesError={zoneError}
+                status={locStatus}
+                resultLabel={locSearch?.label ?? null}
+                point={
+                  locSearch ? { lat: locSearch.lat, lng: locSearch.lng } : null
+                }
+                matchedNames={locResult?.zones ?? []}
+                via={locResult?.via ?? "none"}
+                zoneInfo={locResult?.zoneInfo ?? {}}
+                onLocate={handleLocation}
+                onClear={clearLocation}
+                collapsed={locCollapsed}
+                onToggleCollapsed={toggleLocCollapsed}
+                theme={theme}
+              />
+            </Suspense>
 
-              <div className="help-section">
-                <h3>Pick a month</h3>
-                <ul>
-                  <li>
-                    Use the ‹ and › arrows beside the month name to step one
-                    month at a time.
-                  </li>
-                  <li>
-                    The month selector on the right jumps straight to any
-                    visible month.
-                  </li>
-                  <li>The arrows stop at the start and end of the window.</li>
-                </ul>
-              </div>
-
-              <div className="help-section">
-                <h3>Pick a date</h3>
-                <ul>
-                  <li>
-                    Each tab is one date: weekday, day number, and total free
-                    slots for that day.
-                  </li>
-                  <li>
-                    Click a tab to view that date. The active day shows a blue
-                    circle.
-                  </li>
-                </ul>
-              </div>
-
-              <div className="help-section">
-                <h3>Filter the instructor list</h3>
-                <ul>
-                  <li>
-                    The Filter select reorders instructors using the selected
-                    date.
-                  </li>
-                  <li>
-                    Most free slots first, least free slots first, or
-                    alphabetical A to Z.
-                  </li>
-                </ul>
-              </div>
-
-              <div className="help-section">
-                <h3>Search and compare instructors</h3>
-                <ul>
-                  <li>
-                    Type a name to search; results drop down below the field.
-                  </li>
-                  <li>
-                    Click + Compare (or press Enter for the top result) to pin
-                    an instructor.
-                  </li>
-                  <li>
-                    While comparing, the grid shows only the pinned instructors.
-                  </li>
-                  <li>
-                    Remove one with the small ×, or reset with Clear selection.
-                  </li>
-                </ul>
-              </div>
-
-              <div className="help-section">
-                <h3>Search by location</h3>
-                <ul>
-                  <li>
-                    Below the search box, type an area or address (e.g.
-                    Koramangala, Bangalore).
-                  </li>
-                  <li>
-                    Picking a suggestion applies it immediately. Search remains
-                    available for typed addresses.
-                  </li>
-                  <li>
-                    The grid narrows to instructors who work in that location.
-                    Click a name chip to pin instructor(s) for comparison.
-                  </li>
-                  <li>
-                    Clear location or ↺ Reset to go back to the full roster.
-                  </li>
-                </ul>
-              </div>
-
-              <div className="help-section">
-                <h3>Read the grid</h3>
-                <ul>
-                  <li>Columns are 30-minute slots; rows are instructors.</li>
-                  <li>
-                    <strong>🟢 Green</strong> = free: no class, no time off,
-                    enough travel time.
-                  </li>
-                  <li>
-                    <strong>🟡 Yellow</strong> = tentative (created from this
-                    dashboard) — unpaid, half paid, or full paid.
-                  </li>
-                  <li>
-                    <strong>🟣 Purple</strong> = booked, completed, or a real
-                    learner booking mid-payment — a confirmed class, never
-                    editable from here.
-                  </li>
-                  <li>
-                    Plain/unshaded = paused, unavailable, or a travel-gap buffer
-                    around another slot.
-                  </li>
-                  <li>
-                    <strong>Hover</strong> any slot for full details: status,
-                    time, instructor, and — for a booked class — learner, area,
-                    and course when known.
-                  </li>
-                  <li>
-                    A {config.instructor_gap_minutes}-minute travel gap around
-                    classes is applied, so green slots are safe to assign.
-                  </li>
-                </ul>
-              </div>
-
-              <div className="help-section">
-                <h3>Create a tentative booking</h3>
-                <ul>
-                  <li>
-                    <strong>Double-click</strong> any green (free) slot to open
-                    the booking form for that 1-hour block.
-                  </li>
-                  <li>
-                    Fill in the customer&apos;s name, phone, sales agent,
-                    payment status, address, and course, then submit.
-                  </li>
-                  <li>
-                    This always creates a <strong>tentative</strong> hold (shown
-                    yellow) — it is never a confirmed/booked class. Operations
-                    verifies the customer and converts valid tentative slots to
-                    confirmed bookings separately.
-                  </li>
-                </ul>
-              </div>
-
-              <div className="help-section">
-                <h3>Book multiple classes in one go</h3>
-                <ul>
-                  <li>
-                    While the booking form is open, click{" "}
-                    <strong>+ Add another class</strong> instead of submitting —
-                    useful for a customer buying a course of several classes at
-                    once.
-                  </li>
-                  <li>
-                    The form hides and the grid gets a pulsing yellow border:{" "}
-                    <strong>double-click the next free slot</strong> (any
-                    date/instructor) to add it. The form reopens with that class
-                    added — your name/phone/agent/course entries are kept,
-                    nothing is lost.
-                  </li>
-                  <li>
-                    Every class you&apos;ve already picked shows{" "}
-                    <strong>🔵 blue</strong> on the grid while you&apos;re
-                    picking the next one, so it&apos;s always clear what
-                    you&apos;ve selected so far.
-                  </li>
-                  <li>
-                    Any free slot that would <strong>overlap</strong> a class
-                    already in this booking is greyed out and can&apos;t be
-                    selected — e.g. picking 7:00–8:00 disables 7:30–8:30 for
-                    that same instructor.
-                  </li>
-                  <li>
-                    Repeat for as many classes as needed. Each one appears in a
-                    &quot;Selected Slots&quot; list with a × to remove it (the
-                    last remaining slot can&apos;t be removed — use Cancel
-                    instead).
-                  </li>
-                  <li>
-                    Submitting creates all selected classes together as
-                    tentative holds. If any one of them is no longer available
-                    by the time you submit, the form tells you exactly which
-                    class and creates none of them — so you never end up with a
-                    half-created batch.
-                  </li>
-                </ul>
-              </div>
-
-              <div className="help-section">
-                <h3>Override an unpaid tentative slot</h3>
-                <ul>
-                  <li>
-                    Hover a <strong>yellow</strong> slot. If its payment status
-                    is <strong>unpaid</strong>, the popover shows{" "}
-                    <strong>🟡 Tentative (Unpaid)</strong> with an{" "}
-                    <strong>Override Slot</strong> button.
-                  </li>
-                  <li>
-                    Half-paid and full-paid tentative slots show plainly as{" "}
-                    <strong>Tentative</strong> with no override option — once
-                    any payment has been collected, that slot is protected and
-                    can&apos;t be taken from this dashboard.
-                  </li>
-                  <li>
-                    Clicking <strong>Override Slot</strong> opens the booking
-                    form immediately for that <strong>same</strong> slot — no
-                    need to pick a different time. This is for handing an unpaid
-                    hold to a new, paying learner, not moving the existing
-                    customer elsewhere.
-                  </li>
-                  <li>
-                    Fill in the <strong>new</strong> learner&apos;s details.
-                    Payment Status only offers <strong>Half Paid</strong> or{" "}
-                    <strong>Full Paid</strong> — a new unpaid hold can&apos;t
-                    override an existing one, so &quot;Unpaid&quot; isn&apos;t
-                    an option here.
-                  </li>
-                  <li>
-                    Submitting releases the old unpaid hold and creates a new
-                    tentative slot (still tentative, never directly booked) for
-                    the new learner at the same time. This is re-checked on the
-                    server, not just here — if the old slot was paid or changed
-                    by someone else in the meantime, the override is rejected
-                    and the original booking stays exactly as it was.
-                  </li>
-                </ul>
-              </div>
-
-              <div className="help-section">
-                <h3>View an instructor&apos;s schedule</h3>
-                <ul>
-                  <li>
-                    Click an instructor&apos;s name or the Schedule button to
-                    open their day-by-day timetable for the selected month.
-                  </li>
-                  <li>
-                    Each day shows its free-slot count; the highlighted row is
-                    the currently selected date.
-                  </li>
-                  <li>
-                    Use the month arrows in the expanded timetable to view the
-                    previous or next loaded month.
-                  </li>
-                  <li>
-                    Click the name or Hide schedule to collapse the timetable.
-                  </li>
-                </ul>
-              </div>
-
-              <div className="help-section">
-                <h3>Refresh and legend</h3>
-                <ul>
-                  <li>Bottom-right Refresh fetches the latest data.</li>
-                  <li>The legend explains the slot colors used in the grid.</li>
-                </ul>
-              </div>
+            <div className="summary">
+              {!locCollapsed && locSearch && (
+                <div className="loc-results">
+                  <span className="loc-results-count">
+                    {locStatus === "found" ? (
+                      <>
+                        <strong>{locResult?.instrs.length ?? 0}</strong>{" "}
+                        instructor
+                        {(locResult?.instrs.length ?? 0) === 1 ? "" : "s"} near
+                        “{locSearch.label}”
+                      </>
+                    ) : (
+                      <>No instructor covers “{locSearch.label}” yet.</>
+                    )}
+                  </span>
+                  {locResult && locResult.instrs.length > 0 && (
+                    <div className="loc-results-chips">
+                      {locResult.instrs.map((instr) => {
+                        const added = compareIds.includes(instr.id);
+                        const rawZones = Object.values(locResult.zoneInfo)
+                          .filter((z) => z.instructorName === instr.name)
+                          .map((z) => z.rawName);
+                        return (
+                          <button
+                            key={instr.id}
+                            type="button"
+                            className={added ? "loc-chip added" : "loc-chip"}
+                            title={
+                              rawZones.length
+                                ? `Zone on map: ${rawZones.join(", ")}`
+                                : undefined
+                            }
+                            onClick={() =>
+                              added
+                                ? removeFromCompare(instr.id)
+                                : addToCompare(instr.id)
+                            }
+                          >
+                            <span
+                              className="loc-swatch"
+                              style={{
+                                background: locResult.instrColors[instr.id],
+                              }}
+                              title={`${instr.name}’s zone colour on the map`}
+                            />
+                            {`${instr.name} · ${bookableCounts.get(instr.id) ?? 0} free`}
+                            {statusNote(instr) && (
+                              <span className="break-badge">
+                                {statusNote(instr)}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    className="clear-select"
+                    onClick={clearLocation}
+                  >
+                    Clear location
+                  </button>
+                </div>
+              )}
+              {inSelectionMode && (
+                <button
+                  type="button"
+                  className="clear-select"
+                  onClick={() => setCompareIds([])}
+                >
+                  Clear selection
+                </button>
+              )}
             </div>
+
+            <nav className="tabs" aria-label="Select date">
+              {visibleDates.map((d, i) => {
+                const { weekday, day } = shortDate(d);
+                const total = dateTotals.get(d) ?? 0;
+                return (
+                  <button
+                    type="button"
+                    key={d}
+                    className={i === safeDateIndex ? "tab active" : "tab"}
+                    onClick={() => {
+                      setDateIndex(i);
+                      setSortAnchorDate(d);
+                    }}
+                  >
+                    <span>{weekday}</span>
+                    <strong>{day}</strong>
+                    <em>{total} free</em>
+                  </button>
+                );
+              })}
+            </nav>
+
+            <div
+              className={
+                addingSlotMode ? "grid-wrap grid-wrap-picking" : "grid-wrap"
+              }
+              ref={gridWrapRef}
+            >
+              <AvailabilityGrid
+                instructors={gridRows}
+                // The strict, full-60-min grid -- canBook1Hour (in both the
+                // main row and MiniTimeRow) validates against this prop, so it
+                // must NOT be displayGrid (30-min duration check), or
+                // validateOneHourBlock trivially agrees with `free` itself and
+                // the cell-half downgrade never fires. Cell color/coloring
+                // still gets the lenient displayGrid separately via freeSets
+                // below.
+                freeGrid={
+                  data?.freeGrid ?? new Map<string, Map<string, number[]>>()
+                }
+                freeSets={freeSets}
+                windowTotals={windowTotals}
+                timeCols={timeCols}
+                timeStarts={timeStarts}
+                dates={visibleDates}
+                selectedDate={selectedDate}
+                activeMonth={activeMonth}
+                canGoPreviousMonth={monthIdx > 0}
+                canGoNextMonth={monthIdx < months.length - 1}
+                gridMinutes={config.gridMinutes}
+                slotStart={config.slotStart}
+                slotEnd={config.slotEnd}
+                expanded={expanded}
+                pendingExpandId={pendingExpandRowId}
+                selectedRows={selectedRows}
+                rowColors={rowColors}
+                loadingRows={(data?.loading ?? []).filter(
+                  (li) => !lockedInstructorId || li.id === lockedInstructorId,
+                )}
+                onToggleExpand={toggleExpand}
+                onPreviousMonth={goPrev}
+                onNextMonth={goNext}
+                onToggleSelectRow={toggleSelectRow}
+                onRemove={
+                  inSelectionMode ? removeFromCompare : removeRosterInstructor
+                }
+                onSelect={handleSlotSelect}
+                onOverrideClick={handleOverrideClick}
+                onDeleteTentative={handleDeleteTentative}
+                resolveInfo={resolveInfo}
+              />
+              {gridRows.length === 0 && lockedInstructorId && (
+                <p className="empty">
+                  {lockedInstructorName} is no longer on the grid. Cancel or
+                  complete the booking, then search for the instructor again.
+                </p>
+              )}
+              {gridRows.length === 0 && !lockedInstructorId && !locSearch && (
+                <p className="empty">
+                  No instructors loaded yet. Search by name above or use Search
+                  by location.
+                </p>
+              )}
+              {gridRows.length === 0 && !lockedInstructorId && locSearch && (
+                <p className="empty">
+                  No instructors match this location. Try another area.
+                </p>
+              )}
+            </div>
+
+            <footer className="legend">
+              <span>
+                <i className="swatch free" /> Free slot (no class, not on
+                unavailability, outside the {config.instructor_gap_minutes}
+                -minute travel gap)
+              </span>
+              <span>
+                <i className="swatch tentative" /> 🟡 Tentative (unpaid can be
+                overridden)
+              </span>
+              <span>
+                <i className="swatch booked" /> 🟣 Booked
+              </span>
+              <span>
+                <i className="swatch pending" /> 🔵 Selected for this booking
+              </span>
+              <span>
+                <i className="swatch busy" /> Busy / other
+              </span>
+              <button
+                type="button"
+                className="reload"
+                onClick={() => void reload()}
+              >
+                Refresh
+              </button>
+            </footer>
+
+            {helpOpen && (
+              // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- standard click-outside-to-dismiss backdrop; the modal itself has role="dialog" and a visible close button
+              <div
+                className="modal-backdrop"
+                onClick={() => setHelpOpen(false)}
+              >
+                {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions, jsx-a11y/no-noninteractive-element-interactions -- stops the backdrop's dismiss click from bubbling; the modal itself has role="dialog" and a visible close button */}
+                <div
+                  className="modal"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="How to use this dashboard"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="modal-header">
+                    <h2>How to use this dashboard</h2>
+                    <button
+                      type="button"
+                      className="modal-close"
+                      onClick={() => setHelpOpen(false)}
+                      aria-label="Close help"
+                    >
+                      ×
+                    </button>
+                  </div>
+
+                  <div className="help-section">
+                    <h3>What this page shows</h3>
+                    <p>
+                      Live availability from the sales database: which of{" "}
+                      {rows.length} active instructors can take a new learner in
+                      each 30-minute slot, across {dates.length} days from{" "}
+                      {fromLabel.weekday} {fromLabel.date}.
+                    </p>
+                  </div>
+
+                  <div className="help-section">
+                    <h3>Pick a month</h3>
+                    <ul>
+                      <li>
+                        Use the ‹ and › arrows beside the month name to step one
+                        month at a time.
+                      </li>
+                      <li>
+                        The month selector on the right jumps straight to any
+                        visible month.
+                      </li>
+                      <li>
+                        The arrows stop at the start and end of the window.
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div className="help-section">
+                    <h3>Pick a date</h3>
+                    <ul>
+                      <li>
+                        Each tab is one date: weekday, day number, and total
+                        free slots for that day.
+                      </li>
+                      <li>
+                        Click a tab to view that date. The active day shows a
+                        blue circle.
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div className="help-section">
+                    <h3>Filter the instructor list</h3>
+                    <ul>
+                      <li>
+                        The Filter select reorders instructors using the
+                        selected date.
+                      </li>
+                      <li>
+                        Most free slots first, least free slots first, or
+                        alphabetical A to Z.
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div className="help-section">
+                    <h3>Search and compare instructors</h3>
+                    <ul>
+                      <li>
+                        Type a name to search; results drop down below the
+                        field.
+                      </li>
+                      <li>
+                        Click + Compare (or press Enter for the top result) to
+                        pin an instructor.
+                      </li>
+                      <li>
+                        While comparing, the grid shows only the pinned
+                        instructors.
+                      </li>
+                      <li>
+                        Remove one with the small ×, or reset with Clear
+                        selection.
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div className="help-section">
+                    <h3>Search by location</h3>
+                    <ul>
+                      <li>
+                        Below the search box, type an area or address (e.g.
+                        Koramangala, Bangalore).
+                      </li>
+                      <li>
+                        Picking a suggestion applies it immediately. Search
+                        remains available for typed addresses.
+                      </li>
+                      <li>
+                        The grid narrows to instructors who work in that
+                        location. Click a name chip to pin instructor(s) for
+                        comparison.
+                      </li>
+                      <li>
+                        Clear location or ↺ Reset to go back to the full roster.
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div className="help-section">
+                    <h3>Read the grid</h3>
+                    <ul>
+                      <li>
+                        Columns are 30-minute slots; rows are instructors.
+                      </li>
+                      <li>
+                        <strong>🟢 Green</strong> = free: no class, no time off,
+                        enough travel time.
+                      </li>
+                      <li>
+                        <strong>🟡 Yellow</strong> = tentative (created from
+                        this dashboard) — unpaid, half paid, or full paid.
+                      </li>
+                      <li>
+                        <strong>🟣 Purple</strong> = booked, completed, or a
+                        real learner booking mid-payment — a confirmed class,
+                        never editable from here.
+                      </li>
+                      <li>
+                        Plain/unshaded = paused, unavailable, or a travel-gap
+                        buffer around another slot.
+                      </li>
+                      <li>
+                        <strong>Hover</strong> any slot for full details:
+                        status, time, instructor, and — for a booked class —
+                        learner, area, and course when known.
+                      </li>
+                      <li>
+                        A {config.instructor_gap_minutes}-minute travel gap
+                        around classes is applied, so green slots are safe to
+                        assign.
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div className="help-section">
+                    <h3>Create a tentative booking</h3>
+                    <ul>
+                      <li>
+                        <strong>Click</strong> any green (free) slot to open the
+                        booking form for that 1-hour block.
+                      </li>
+                      <li>
+                        Fill in the customer&apos;s name, phone, sales agent,
+                        payment status, address, and course, then submit.
+                      </li>
+                      <li>
+                        This always creates a <strong>tentative</strong> hold
+                        (shown yellow) — it is never a confirmed/booked class.
+                        Operations verifies the customer and converts valid
+                        tentative slots to confirmed bookings separately.
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div className="help-section">
+                    <h3>Book multiple classes in one go</h3>
+                    <ul>
+                      <li>
+                        While the booking form is open, click{" "}
+                        <strong>+ Add another class</strong> instead of
+                        submitting — useful for a customer buying a course of
+                        several classes at once.
+                      </li>
+                      <li>
+                        The form hides and the grid gets a pulsing yellow
+                        border: <strong>click the next free slot</strong> (any
+                        date/instructor) to add it. The form reopens with that
+                        class added — your name/phone/agent/course entries are
+                        kept, nothing is lost.
+                      </li>
+                      <li>
+                        Every class you&apos;ve already picked shows{" "}
+                        <strong>🔵 blue</strong> on the grid while you&apos;re
+                        picking the next one, so it&apos;s always clear what
+                        you&apos;ve selected so far.
+                      </li>
+                      <li>
+                        Any free slot that would <strong>overlap</strong> a
+                        class already in this booking is greyed out and
+                        can&apos;t be selected — e.g. picking 7:00–8:00 disables
+                        7:30–8:30 for that same instructor.
+                      </li>
+                      <li>
+                        Repeat for as many classes as needed. Each one appears
+                        in a &quot;Selected Slots&quot; list with a × to remove
+                        it (the last remaining slot can&apos;t be removed — use
+                        Cancel instead).
+                      </li>
+                      <li>
+                        Submitting creates all selected classes together as
+                        tentative holds. If any one of them is no longer
+                        available by the time you submit, the form tells you
+                        exactly which class and creates none of them — so you
+                        never end up with a half-created batch.
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div className="help-section">
+                    <h3>Override an unpaid tentative slot</h3>
+                    <ul>
+                      <li>
+                        Hover a <strong>yellow</strong> slot. If its payment
+                        status is <strong>unpaid</strong>, the popover shows{" "}
+                        <strong>🟡 Tentative (Unpaid)</strong> with an{" "}
+                        <strong>Override Slot</strong> button.
+                      </li>
+                      <li>
+                        Half-paid and full-paid tentative slots show plainly as{" "}
+                        <strong>Tentative</strong> with no override option —
+                        once any payment has been collected, that slot is
+                        protected and can&apos;t be taken from this dashboard.
+                      </li>
+                      <li>
+                        Clicking <strong>Override Slot</strong> opens the
+                        booking form immediately for that <strong>same</strong>{" "}
+                        slot — no need to pick a different time. This is for
+                        handing an unpaid hold to a new, paying learner, not
+                        moving the existing customer elsewhere.
+                      </li>
+                      <li>
+                        Fill in the <strong>new</strong> learner&apos;s details.
+                        Payment Status only offers <strong>Half Paid</strong> or{" "}
+                        <strong>Full Paid</strong> — a new unpaid hold
+                        can&apos;t override an existing one, so
+                        &quot;Unpaid&quot; isn&apos;t an option here.
+                      </li>
+                      <li>
+                        Submitting releases the old unpaid hold and creates a
+                        new tentative slot (still tentative, never directly
+                        booked) for the new learner at the same time. This is
+                        re-checked on the server, not just here — if the old
+                        slot was paid or changed by someone else in the
+                        meantime, the override is rejected and the original
+                        booking stays exactly as it was.
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div className="help-section">
+                    <h3>View an instructor&apos;s schedule</h3>
+                    <ul>
+                      <li>
+                        Click an instructor&apos;s name or the Schedule button
+                        to open their day-by-day timetable for the selected
+                        month.
+                      </li>
+                      <li>
+                        Each day shows its free-slot count; the highlighted row
+                        is the currently selected date.
+                      </li>
+                      <li>
+                        Use the month arrows in the expanded timetable to view
+                        the previous or next loaded month.
+                      </li>
+                      <li>
+                        Click the name or Hide schedule to collapse the
+                        timetable.
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div className="help-section">
+                    <h3>Refresh and legend</h3>
+                    <ul>
+                      <li>Bottom-right Refresh fetches the latest data.</li>
+                      <li>
+                        The legend explains the slot colors used in the grid.
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </main>
 
       {/* In-app confirm dialog for deleting a tentative slot — replaces
@@ -3507,29 +3766,10 @@ export default function SalesDashboard() {
         </div>
       )}
 
-      {/* Tentative Booking Modal */}
-      <TentativeBookingModal
-        isOpen={tentativeModalOpen}
-        onClose={handleCloseTentativeModal}
-        onSuccess={handleTentativeSuccess}
-        slots={pendingSlots}
-        onRemoveSlot={handleRemoveSlot}
-        onAddAnotherSlot={handleAddAnotherSlot}
-        onChangeSlot={handleChangeSlot}
-        onAddBulkSlots={handleAddBulkSlots}
-        validateSlot={validateSlotFresh}
-        formData={customerFormData}
-        onFormDataChange={setCustomerFormData}
-        customerMode={customerMode}
-        onCustomerModeChange={handleCustomerModeChange}
-        onReuseCustomer={handleReuseCustomer}
-        overrideContext={overrideContext}
-      />
-
       {/* Persistent banner while picking an additional class for an
           in-progress multi-class booking (Task 19) — the modal is
           hidden (not closed: pendingSlots/customerFormData are untouched)
-          until a new slot is double-clicked or this is cancelled. */}
+          until a new slot is clicked or this is cancelled. */}
       {addingSlotMode && (
         <div className="slot-toast slot-toast-info" role="status">
           <span className="slot-toast-icon" aria-hidden="true">
@@ -3541,7 +3781,7 @@ export default function SalesDashboard() {
                 <strong>
                   👉 Pick a new slot for Class {replacingSlotIndex + 1} now:
                 </strong>{" "}
-                double-click any green (free) cell on {lockedInstructorName}
+                click any green (free) cell on {lockedInstructorName}
                 &apos;s schedule below to replace the conflicting class. The
                 form isn&apos;t closed — it will reopen with your new slot in
                 place of Class {replacingSlotIndex + 1}.
@@ -3551,11 +3791,10 @@ export default function SalesDashboard() {
                 <strong>
                   👉 Pick {lockedInstructorName}&apos;s next class now:
                 </strong>{" "}
-                double-click any green (free) cell on {lockedInstructorName}
-                &apos;s schedule below to add it to this booking. Other
-                instructors are hidden — this booking must stay with the same
-                instructor. The form isn&apos;t closed — it will reopen with
-                your selection added.
+                click any green (free) cell on {lockedInstructorName}
+                &apos;s schedule to add it to this booking. Other instructors
+                are hidden — this booking must stay with the same instructor.
+                Your form stays open here and updates as you pick.
               </>
             )}
           </span>
@@ -3615,62 +3854,6 @@ export default function SalesDashboard() {
           >
             ×
           </button>
-        </div>
-      )}
-
-      {bookingFollowUp && (
-        <div
-          className="slot-toast slot-toast-success customer-reuse-toast"
-          role="status"
-        >
-          <span className="slot-toast-msg">
-            {bookingFollowUp.message} Book another class for{" "}
-            <strong>{bookingFollowUp.customer.name}</strong>?
-          </span>
-          <div className="customer-reuse-actions">
-            <button
-              type="button"
-              className="customer-reuse-action"
-              onClick={handleBookAnotherClass}
-            >
-              Book another class
-            </button>
-            <button
-              type="button"
-              className="customer-reuse-action secondary"
-              onClick={handleDoneWithCustomer}
-            >
-              Done
-            </button>
-          </div>
-        </div>
-      )}
-
-      {activeCustomer && (
-        <div
-          className="slot-toast slot-toast-info customer-reuse-toast"
-          role="status"
-        >
-          <span className="slot-toast-msg">
-            Booking another class for <strong>{activeCustomer.name}</strong>.
-            Double-click a free slot.
-          </span>
-          <div className="customer-reuse-actions">
-            <button
-              type="button"
-              className="customer-reuse-action"
-              onClick={handleChangeActiveCustomer}
-            >
-              Change Customer
-            </button>
-            <button
-              type="button"
-              className="customer-reuse-action secondary"
-              onClick={handleDoneWithCustomer}
-            >
-              Done
-            </button>
-          </div>
         </div>
       )}
     </div>

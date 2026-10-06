@@ -30,7 +30,7 @@ const DB_MARKER = `${MARKER}-DB`;
 const RANGE = { from: "2027-06-01", to: "2027-06-30" };
 
 // Expected result of the bulk-add sequence below.
-//   base class       : 2027-06-07 09:00-10:00   (double-clicked on the grid)
+//   base class       : 2027-06-07 09:00-10:00   (clicked on the grid)
 //   Bulk Daily  x3   : 06-08, 06-09, 06-10 at 09:00-10:00
 //   Bulk Hourly x2   : 06-10 10:00-11:00 and 11:00-12:00
 //   Duplicate single : 2027-06-07 09:00-10:00 (added at preview, rejected at submit by DB)
@@ -228,7 +228,7 @@ test.describe("Sales Dashboard - Bulk Add Schedules (UI <-> DB)", () => {
       const i9 = await colIndex(page, "09:00");
       const heading = page.getByText("Create Tentative Slot Booking");
       await expect(async () => {
-        await row.locator("td.cell").nth(i9).dblclick();
+        await row.locator("td.cell").nth(i9).click();
         await expect(heading).toBeVisible({ timeout: 3_000 });
       }).toPass({ timeout: 30_000 });
     }
@@ -401,7 +401,7 @@ test.describe("Sales Dashboard - Bulk Add Schedules (UI <-> DB)", () => {
     await expectClassState(page, "2027-06-09", "09:00", "tentative"); // neighbours intact
   });
 
-  test("a double-click on Bulk Add does not dismiss the dialog", async ({
+  test("clicking Bulk Add twice does not dismiss the dialog", async ({
     page,
   }) => {
     test.setTimeout(180_000);
@@ -414,18 +414,39 @@ test.describe("Sales Dashboard - Bulk Add Schedules (UI <-> DB)", () => {
     const i9 = await colIndex(page, "09:00");
     const heading = page.getByText("Create Tentative Slot Booking");
     await expect(async () => {
-      await row.locator("td.cell").nth(i9).dblclick();
+      await row.locator("td.cell").nth(i9).click();
       await expect(heading).toBeVisible({ timeout: 3_000 });
     }).toPass({ timeout: 30_000 });
 
-    // Regression: the dialog used to close itself. The panel is 448px wide
-    // inside a full-viewport overlay, and the "Bulk Add" button sits ABOVE the
-    // panel's top edge -- over the backdrop -- so the second click of a
-    // double-click hit the backdrop's onClick and unmounted the dialog the
-    // instant it appeared. Reported as "the background gets darker but Bulk
-    // Add does nothing".
+    // Regression: a rapid extra click used to dismiss the booking dialog the
+    // instant it appeared, reported as "Bulk Add does nothing". "Bulk Add" is
+    // now a full-width button in the side panel's Selected Slots section, so
+    // the old backdrop is gone -- but the regression guard stays: a second
+    // click must leave the dialog mounted with its seeded values.
     const trigger = page.getByRole("button", { name: /Bulk Add/ });
-    await trigger.dblclick();
+    await trigger.click();
+    await expect(bulkDialog(page)).toBeVisible();
+
+    // Where that second click lands has changed, and deliberately so. The Bulk
+    // overlay is portalled to document.body: `ASIDE.slot-panel` is sticky, and
+    // sticky creates a stacking context regardless of z-index, so while the
+    // overlay was rendered inside the panel its z-[110] ranked below the grid's
+    // sticky header and the trigger stayed clickable *through* it (and the
+    // grid header swallowed the overlay's own buttons). Portalled to the body
+    // the overlay covers the trigger, which is ordinary modal behaviour. The
+    // guarantee under test is unchanged: the extra click must not dismiss.
+    const triggerReachable = await trigger.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const top = document.elementFromPoint(
+        r.left + r.width / 2,
+        r.top + r.height / 2,
+      );
+      return !!top && el.contains(top);
+    });
+    expect(triggerReachable, "overlay covers the trigger").toBe(false);
+
+    // So the second click lands on the backdrop instead.
+    await page.mouse.click(8, 300);
     await expect(bulkDialog(page)).toBeVisible();
     // Still there a beat later: the dismissal was synchronous before.
     await page.waitForTimeout(1_000);
