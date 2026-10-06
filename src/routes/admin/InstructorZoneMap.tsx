@@ -849,6 +849,18 @@ export default function InstructorZoneMap() {
   ]);
   const draftRing = zoneHistory.ring;
 
+  /**
+   * A first draw owns every click on the map. Before the ring has 3 points
+   * Google Maps has no editable polygon to hold the input, so points come from
+   * map clicks — and a click that lands on another instructor's polygon or
+   * residence dot would be consumed by that overlay instead (diverting a click
+   * meant for a NEW point into opening that instructor's card). Until the
+   * boundary exists, the other overlays are made non-clickable so every click
+   * reaches the map. See the `clickable: !firstDrawActive` options in the
+   * overlay effect below. Live overlays are rebuilt when it flips.
+   */
+  const firstDrawActive = Boolean(editingId) && draftRing.length < 3;
+
   const [placeQuery, setPlaceQuery] = useState("");
   const [pin, setPin] = useState<{ at: ZoneCoordinate; label: string } | null>(
     null,
@@ -1100,7 +1112,10 @@ export default function InstructorZoneMap() {
             // Clickable so clicking a polygon in the map selects its sidebar
             // row, matching My Maps' two-way layer/map selection. `setMap(null)`
             // on the next render pass drops the listener with the overlay.
-            clickable: true,
+            // During a first draw the NEW boundary must own every click, so the
+            // other polygons are made non-clickable — otherwise the admin can
+            // only add points in the empty gaps between everyone's areas.
+            clickable: !firstDrawActive,
             zIndex: selected ? 3 : 1,
           });
           polygon.addListener("click", () =>
@@ -1121,7 +1136,7 @@ export default function InstructorZoneMap() {
               strokeColor: selected ? SELECTED_STROKE : color,
               strokeWeight: selected ? 3 : 2,
               strokeOpacity: 0.95,
-              clickable: true,
+              clickable: !firstDrawActive,
               zIndex: selected ? 3 : 1,
               icons: [
                 {
@@ -1161,7 +1176,7 @@ export default function InstructorZoneMap() {
             fillOpacity: outlineOnly ? 0.15 : 0.95,
             strokeColor: "#ffffff",
             strokeWeight: 2,
-            clickable: true,
+            clickable: !firstDrawActive,
             zIndex: selected ? 4 : 2,
           });
           marker.addListener("click", () =>
@@ -1186,6 +1201,7 @@ export default function InstructorZoneMap() {
     useInstructorCoords,
     statusById,
     locationMatchedIds,
+    firstDrawActive,
     clearOverlays,
   ]);
 
@@ -1445,9 +1461,15 @@ export default function InstructorZoneMap() {
       // `pointInPolygon`'s even-odd parity turns into a genuine risk for
       // self-touching rings. Re-clicking the last point is also how an admin
       // naturally signals "I'm done", so it must not corrupt the ring.
-      if (
-        isSamePoint(zoneHistory.ring[zoneHistory.ring.length - 1] ?? at, at)
-      ) {
+      //
+      // The ring being empty is a distinct case, not an alias for "tapped the
+      // last point": `ring[length - 1] ?? at` collapses both to `at`, so
+      // `isSamePoint(at, at)` is always true and EVERY click on a first draw
+      // was discarded — "Not mapped" instructors could never start a boundary
+      // at all. `last` must be undefined-checked before comparing, the same
+      // way ZoneDrawingEditor guards its own point-append.
+      const last = zoneHistory.ring[zoneHistory.ring.length - 1];
+      if (last && isSamePoint(last, at)) {
         return;
       }
       zoneHistory.apply([...zoneHistory.ring, at]);
@@ -1793,9 +1815,12 @@ export default function InstructorZoneMap() {
       map,
       position: pin.at,
       title: pin.label,
-      draggable: true,
+      // During a first draw a click must always become the next vertex, so the
+      // search pin stops dragging/selecting until the boundary has 3 points.
+      draggable: !firstDrawActive,
+      clickable: !firstDrawActive,
     });
-  }, [mapInstance, mapsLib, pin]);
+  }, [mapInstance, mapsLib, pin, firstDrawActive]);
 
   /**
    * Resolve free text to a single point.
