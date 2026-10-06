@@ -69,22 +69,32 @@ export function ReviewInstructorCard({
     }
   }
 
-  // Calculate progress percentage and color dynamically
+  // Calculate progress percentage from real API data
   const getProgressData = () => {
     // Handle backend stage names (documents, pedal_videos) and frontend names (stage1_documents, stage2_pedal_video)
     const isDocumentsStage = instructor.stage === "documents" || instructor.stage === "stage1_documents";
     const isPedalVideoStage = instructor.stage === "pedal_videos" || instructor.stage === "stage2_pedal_video";
 
     if (isDocumentsStage) {
-      // Use documents data from backend if available, otherwise fallback to progress
-      const total = instructor.documents?.total || instructor.progress?.documents_total || 5;
-      const current = instructor.documents?.approved || instructor.progress?.documents_reviewed || 0;
-      const percentage = total > 0 ? (current / total) * 100 : 0;
+      // Backend rule: Instructor must upload ALL 5 documents at once
+      // So progress is either 0/5 (nothing uploaded) or 5/5 (all uploaded)
+      
+      const total = instructor.documents?.total || 5;
+      const approved = instructor.documents?.approved || 0;
+      const rejected = instructor.documents?.rejected || 0;
+      const pending = instructor.documents?.pending || 0;
+      
+      // If ANY documents exist, it means all 5 have been uploaded
+      const hasUploadedDocs = (approved + rejected + pending) > 0;
+      const uploaded = hasUploadedDocs ? total : 0;
+      
+      // Percentage: Either 0% (nothing) or 100% (all uploaded)
+      const percentage = hasUploadedDocs ? 100 : 0;
 
-      return { current, total, percentage, label: "docs" };
+      return { current: uploaded, total, percentage, label: "docs" };
     } else if (isPedalVideoStage) {
-      // Use pedal_video data from backend if available, otherwise fallback to progress
-      const isUploaded = instructor.pedal_video?.status === "uploaded" || instructor.progress?.video_status === "uploaded";
+      // For pedal video stage, show 0/1 if pending, 1/1 if uploaded
+      const isUploaded = instructor.pedal_video?.status === "uploaded";
       const current = isUploaded ? 1 : 0;
       const total = 1;
       const percentage = (current / total) * 100;
@@ -95,23 +105,19 @@ export function ReviewInstructorCard({
   };
 
   const getProgressBarColor = (percentage: number) => {
-    if (percentage <= 25) return "#EF4444"; // Red - Not started/Very low (0-25%)
-    if (percentage > 25 && percentage <= 75) return "#F97316"; // Orange - In progress (26-75%)
-    if (percentage > 75 && percentage < 100) return "#86EFAC"; // Light Green - Almost done (76-99%)
-    if (percentage === 100) return "#10B981"; // Green - Complete (100%)
-    return "#EF4444";
-  };
-
-  // Dynamically determine status based on progress percentage
-  const getDynamicStatus = (percentage: number) => {
-    if (percentage === 100) return "approved"; // 100% completion = Approved
-    if (percentage <= 25) return "rejected"; // ≤25% = Rejected (not enough progress)
-    return "awaiting_review"; // 26-99% = Awaiting review
+    // Since instructors upload all 5 docs at once, progress is either 0% or 100%
+    if (percentage === 0) return "#EF4444"; // Red - No documents uploaded yet
+    if (percentage === 100) return "#10B981"; // Green - All documents uploaded
+    return "#EF4444"; // Default to red
   };
 
   const progressData = getProgressData();
   const barColor = getProgressBarColor(progressData.percentage);
-  const dynamicStatus = getDynamicStatus(progressData.percentage);
+  
+  // Use actual status from API instead of deriving from percentage
+  // API returns: "pending", "active", or "rejected"
+  // These are mapped by getReviewStatusMeta to display labels
+  const displayStatus = instructor.status;
 
   return (
     <Card className="flex h-full flex-col overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm transition-shadow hover:shadow-md">
@@ -177,10 +183,10 @@ export function ReviewInstructorCard({
           </div>
         </div>
 
-        {/* Status Text - Centered */}
+        {/* Status Text - Centered - Using actual API status */}
         <div className="flex justify-center pt-3">
-          <span className={cn("text-xs font-medium", getReviewStatusMeta(dynamicStatus).badge_class)}>
-            {getReviewStatusMeta(dynamicStatus).label}
+          <span className={cn("text-xs font-medium", getReviewStatusMeta(displayStatus).badge_class)}>
+            {getReviewStatusMeta(displayStatus).label}
           </span>
         </div>
 
