@@ -14,16 +14,11 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
 import LLDocumentsReview from "@/components/admin/LLDocumentsReview";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -32,6 +27,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
@@ -129,7 +129,10 @@ const ROUTE_FILTER_OPTIONS: { value: string; label: string }[] = [
 function parseStagesFromSearchParams(params: URLSearchParams): string[] {
   const multi = params.get("stages");
   if (multi) {
-    return multi.split(",").map((s) => s.trim()).filter(Boolean);
+    return multi
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
   }
   const single = params.get("stage");
   if (single && single !== "all") return [single];
@@ -139,7 +142,10 @@ function parseStagesFromSearchParams(params: URLSearchParams): string[] {
 function parseRoutesFromSearchParams(params: URLSearchParams): string[] {
   const multi = params.get("routes");
   if (multi) {
-    return multi.split(",").map((s) => s.trim()).filter(Boolean);
+    return multi
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
   }
   const single = params.get("route");
   if (single && single !== "all") return [single];
@@ -198,14 +204,13 @@ export default function LLPipeline() {
   const [searchTerm, setSearchTerm] = useState(
     () => searchParams.get("q") ?? "",
   );
-  const [selectedId, setSelectedId] = useState<string | null>(
-    () => searchParams.get("id"),
+  const [selectedId, setSelectedId] = useState<string | null>(() =>
+    searchParams.get("id"),
   );
-  const [dateField, setDateField] = useState<"created_at" | "updated_at">(
-    () =>
-      searchParams.get("dateField") === "created_at"
-        ? "created_at"
-        : "updated_at",
+  const [dateField, setDateField] = useState<"created_at" | "updated_at">(() =>
+    searchParams.get("dateField") === "created_at"
+      ? "created_at"
+      : "updated_at",
   );
   const [dateFrom, setDateFrom] = useState(
     () => searchParams.get("from") ?? "",
@@ -253,9 +258,7 @@ export default function LLPipeline() {
 
   const togglePhase = (phase: LLPhaseKey) => {
     setSelectedPhases((prev) =>
-      prev.includes(phase)
-        ? prev.filter((p) => p !== phase)
-        : [...prev, phase],
+      prev.includes(phase) ? prev.filter((p) => p !== phase) : [...prev, phase],
     );
     resetListPage();
   };
@@ -289,8 +292,7 @@ export default function LLPipeline() {
     resetListPage();
   };
 
-  const dateRangeInverted =
-    !!dateFrom && !!dateTo && dateFrom > dateTo;
+  const dateRangeInverted = !!dateFrom && !!dateTo && dateFrom > dateTo;
 
   const hasListFilters =
     selectedPhases.length > 0 ||
@@ -411,8 +413,7 @@ export default function LLPipeline() {
     pageApplication,
   );
   const selected = pageApplication ?? selectedApplication ?? null;
-  const selectedHiddenFromList =
-    !!selectedId && !!selected && !pageApplication;
+  const selectedHiddenFromList = !!selectedId && !!selected && !pageApplication;
 
   // A status change/deletion may remove the last row of the last page.
   useEffect(() => {
@@ -685,9 +686,7 @@ export default function LLPipeline() {
                       {stage.label}
                     </span>
                     <span className="ml-auto tabular-nums text-muted-foreground">
-                      {stageCountsLoading
-                        ? "…"
-                        : (stageCounts[stage.key] ?? 0)}
+                      {stageCountsLoading ? "…" : (stageCounts[stage.key] ?? 0)}
                     </span>
                   </label>
                 ))}
@@ -717,9 +716,7 @@ export default function LLPipeline() {
             {visibleStageFilters.length} in scope
           </Badge>
           <span className="text-xs text-slate-500">
-            {pipeline.data && !isSearchPending
-              ? totalRecords
-              : "…"}{" "}
+            {pipeline.data && !isSearchPending ? totalRecords : "…"}{" "}
             applications · {phaseScopeLabel}
             {selectedStages.length > 0 && (
               <span className="ml-1 font-medium text-slate-700">
@@ -929,9 +926,7 @@ export default function LLPipeline() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() =>
-                  setListPage((p) => Math.min(totalPages, p + 1))
-                }
+                onClick={() => setListPage((p) => Math.min(totalPages, p + 1))}
                 disabled={
                   !pipeline.data ||
                   listPage >= totalPages ||

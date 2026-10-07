@@ -107,7 +107,12 @@ function Preferences() {
 
   // Only show "No enrolled course" for non-new flows
   // For new schedules (type=new), learners might not have enrollment yet
-  if (!enrollment && enrolledCourse && enrolledCourse.length === 0 && type !== "new") {
+  if (
+    !enrollment &&
+    enrolledCourse &&
+    enrolledCourse.length === 0 &&
+    type !== "new"
+  ) {
     return <div>No enrolled course</div>;
   }
 

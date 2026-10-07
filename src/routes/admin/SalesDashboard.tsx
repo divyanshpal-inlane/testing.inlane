@@ -2452,7 +2452,9 @@ export default function SalesDashboard() {
       const timeLabel = `${minutesToTime(minute)}–${minutesToTime(minute + (config?.gridMinutes ?? 30))}`;
 
       const unavail = (instr?.unavailability ?? null) as
-        unknown[] | null | undefined;
+        | unknown[]
+        | null
+        | undefined;
       const weekday = dateToWeekdayLower(date);
       const blockedByUnavail =
         unavail != null && isTimeUnavailable(unavail, date, weekday, minute);
