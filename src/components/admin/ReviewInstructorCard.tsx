@@ -45,25 +45,28 @@ export function ReviewInstructorCard({
   const navigate = useNavigate();
   const stageMeta = getReviewStageMeta(instructor.stage);
   const statusMeta = getReviewStatusMeta(instructor.status);
-  
+
   // Determine if this is a stage 1 or stage 2 instructor
-  const isStage1 = instructor.stage === "documents" || instructor.stage === "stage1_documents";
-  const isStage2 = instructor.stage === "pedal_videos" || instructor.stage === "stage2_pedal_video";
+  const isStage1 =
+    instructor.stage === "documents" || instructor.stage === "stage1_documents";
+  const isStage2 =
+    instructor.stage === "pedal_videos" ||
+    instructor.stage === "stage2_pedal_video";
 
   // Format the applied date using waiting_days from backend
   // If waiting_days is available, use it; otherwise fallback to date calculation
   let appliedDate = "";
   if (instructor.waiting_days !== undefined) {
-    appliedDate = instructor.waiting_days === 0 
-      ? "Today" 
-      : `${instructor.waiting_days}d ago`;
+    appliedDate =
+      instructor.waiting_days === 0
+        ? "Today"
+        : `${instructor.waiting_days}d ago`;
   } else {
     try {
       const parsedDate = parseISO(instructor.applied_at);
-      appliedDate = formatDistanceToNow(parsedDate, { addSuffix: true }).replace(
-        "about ",
-        "",
-      );
+      appliedDate = formatDistanceToNow(parsedDate, {
+        addSuffix: true,
+      }).replace("about ", "");
     } catch (e) {
       appliedDate = "Recently";
     }
@@ -72,22 +75,26 @@ export function ReviewInstructorCard({
   // Calculate progress percentage from real API data
   const getProgressData = () => {
     // Handle backend stage names (documents, pedal_videos) and frontend names (stage1_documents, stage2_pedal_video)
-    const isDocumentsStage = instructor.stage === "documents" || instructor.stage === "stage1_documents";
-    const isPedalVideoStage = instructor.stage === "pedal_videos" || instructor.stage === "stage2_pedal_video";
+    const isDocumentsStage =
+      instructor.stage === "documents" ||
+      instructor.stage === "stage1_documents";
+    const isPedalVideoStage =
+      instructor.stage === "pedal_videos" ||
+      instructor.stage === "stage2_pedal_video";
 
     if (isDocumentsStage) {
       // Backend rule: Instructor must upload ALL 5 documents at once
       // So progress is either 0/5 (nothing uploaded) or 5/5 (all uploaded)
-      
+
       const total = instructor.documents?.total || 5;
       const approved = instructor.documents?.approved || 0;
       const rejected = instructor.documents?.rejected || 0;
       const pending = instructor.documents?.pending || 0;
-      
+
       // If ANY documents exist, it means all 5 have been uploaded
-      const hasUploadedDocs = (approved + rejected + pending) > 0;
+      const hasUploadedDocs = approved + rejected + pending > 0;
       const uploaded = hasUploadedDocs ? total : 0;
-      
+
       // Percentage: Either 0% (nothing) or 100% (all uploaded)
       const percentage = hasUploadedDocs ? 100 : 0;
 
@@ -113,7 +120,7 @@ export function ReviewInstructorCard({
 
   const progressData = getProgressData();
   const barColor = getProgressBarColor(progressData.percentage);
-  
+
   // Use actual status from API instead of deriving from percentage
   // API returns: "pending", "active", or "rejected"
   // These are mapped by getReviewStatusMeta to display labels
@@ -185,19 +192,26 @@ export function ReviewInstructorCard({
 
         {/* Status Text - Centered - Using actual API status */}
         <div className="flex justify-center pt-3">
-          <span className={cn("text-xs font-medium", getReviewStatusMeta(displayStatus).badge_class)}>
+          <span
+            className={cn(
+              "text-xs font-medium",
+              getReviewStatusMeta(displayStatus).badge_class,
+            )}
+          >
             {getReviewStatusMeta(displayStatus).label}
           </span>
         </div>
 
         {/* Action Button - With more spacing and rounded corners */}
         <div className="flex flex-1 items-end pt-3">
-          <Button 
+          <Button
             onClick={() => {
               // Route based on stage - both lead to instructor-approval but page detects stage
-              navigate(`/admin/instructor-approval/${instructor.instructor_id}?stage=${isStage1 ? "stage1_documents" : "stage2_pedal_video"}`);
+              navigate(
+                `/admin/instructor-approval/${instructor.id || instructor.instructor_id}?stage=${isStage1 ? "stage1_documents" : "stage2_pedal_video"}`,
+              );
             }}
-            className="w-full rounded-full bg-primary text-primary-foreground py-2 font-semibold transition-colors hover:bg-primary/90"
+            className="w-full rounded-full bg-primary py-2 font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
           >
             Review application
           </Button>

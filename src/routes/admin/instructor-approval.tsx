@@ -1,11 +1,11 @@
-﻿"use client";
+"use client";
 "use client";
 import { useState, useRef, useEffect } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ChevronLeft, ZoomIn, ZoomOut, Expand, Check, X, Play, Pause, ChevronDown, Upload, AlertCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
-  generateMockApprovalData,
+  useFetchInstructorDocuments,
   getDocumentDisplayName,
   REJECTION_REASONS,
   PEDAL_VIDEO_REJECTION_REASONS,
@@ -33,50 +33,26 @@ export default function InstructorApprovalPage(): JSX.Element {
   const { id } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
   
-  // Get instructor by ID from mock data
-  const allInstructors = generateMockApprovalData();
-  
   // Determine stage from URL query parameter (passed from Review card)
   const stageParam = searchParams.get("stage");
   const isStage2Param = stageParam === "stage2_pedal_video";
+  const stage = isStage2Param ? "pedal_videos" : "documents";
   
-  // Find instructor by ID, or filter by stage if ID doesn't match
-  let instructor = allInstructors.find(instr => instr.instructor_id === id);
+  // Fetch real instructor data from backend API
+  const { data: instructor, isLoading, error } = useFetchInstructorDocuments(id, stage);
   
-  // If exact ID not found, try to find by stage from the stageParam
-  if (!instructor) {
-    // Filter by stage and get first matching instructor
-    if (isStage2Param) {
-      instructor = allInstructors.find(instr => instr.stage === "stage2_pedal_video");
-    } else {
-      instructor = allInstructors.find(instr => instr.stage === "stage1_documents");
-    }
-  }
-  
-  // Fallback to first instructor if still not found
-  if (!instructor) {
-    instructor = allInstructors[0];
-  }
-  
-  const isStage2 = isStage2Param || instructor.stage === "stage2_pedal_video";
-  
+  // ✅ ALL HOOKS MUST BE DEFINED BEFORE ANY CONDITIONAL RETURNS
   // Document states
-  const [selectedDocumentId, setSelectedDocumentId] = useState<string>(
-    instructor.documents[0]?.id || ""
-  );
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string>("");
   const [selectedSide, setSelectedSide] = useState<DocumentSide>("front");
   const [zoomLevel, setZoomLevel] = useState(100);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [documentStatuses, setDocumentStatuses] = useState<
-    Record<string, ApprovalStatus>
-  >(Object.fromEntries(instructor.documents.map((doc) => [doc.id, doc.status])));
+  const [documentStatuses, setDocumentStatuses] = useState<Record<string, ApprovalStatus>>({});
   
   // Video states
   const [videoViewMode, setVideoViewMode] = useState<VideoViewMode>("front");
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
-  const [videoStatuses, setVideoStatuses] = useState<Record<string, ApprovalStatus>>(
-    Object.fromEntries((instructor.videos || []).map((video) => [video.id, video.status]))
-  );
+  const [videoStatuses, setVideoStatuses] = useState<Record<string, ApprovalStatus>>({});
   const [actualVideoDuration, setActualVideoDuration] = useState<string>("");
   const videoRef = useRef<HTMLVideoElement>(null);
 
@@ -97,7 +73,8 @@ export default function InstructorApprovalPage(): JSX.Element {
   );
   const [videoRejectionMessage, setVideoRejectionMessage] = useState<string>("");
   const [isVideoReasonDropdownOpen, setIsVideoReasonDropdownOpen] = useState(false);
-  // Document Reupload modal states
+  
+  // Document Reupload modal states - MUST BE BEFORE EARLY RETURNS!
   const [isReuploadModalOpen, setIsReuploadModalOpen] = useState(false);
   const [reuploadDocumentId, setReuploadDocumentId] = useState<string>("");
   const [reuploadFrontFile, setReuploadFrontFile] = useState<File | null>(null);
@@ -109,26 +86,24 @@ export default function InstructorApprovalPage(): JSX.Element {
   const [isReuploadLoading, setIsReuploadLoading] = useState(false);
   // Track reuploaded documents so they show both front and back buttons
   const [reuploadedDocsWithBothSides, setReuploadedDocsWithBothSides] = useState<Set<string>>(new Set());
-
-
-
-  const currentDocument = instructor.documents.find(
-    (doc) => doc.id === selectedDocumentId
-  );
-
-  const approvedCount = Object.values(documentStatuses).filter(
-    (s) => s === "approved"
-  ).length;
-
-  let appliedDate = "Recently";
-  try {
-    appliedDate = formatDistanceToNow(parseISO(instructor.applied_at), {
-      addSuffix: true,
-    });
-  } catch (e) {}
-
+  
+  // All Refs - MUST BE BEFORE EARLY RETURNS!
   const reuploadFrontFileInputRef = useRef<HTMLInputElement>(null);
   const reuploadBackFileInputRef = useRef<HTMLInputElement>(null);
+  
+  // All useEffect hooks - MUST BE BEFORE EARLY RETURNS!
+  // Initialize states when instructor data loads
+  useEffect(() => {
+    if (instructor) {
+      setSelectedDocumentId(instructor.documents[0]?.id || "");
+      setDocumentStatuses(
+        Object.fromEntries(instructor.documents.map((doc) => [doc.id, doc.status]))
+      );
+      setVideoStatuses(
+        Object.fromEntries((instructor.videos || []).map((video) => [video.id, video.status]))
+      );
+    }
+  }, [instructor]);
 
   // Update video duration when metadata loads
   useEffect(() => {
@@ -148,6 +123,76 @@ export default function InstructorApprovalPage(): JSX.Element {
       video.removeEventListener("loadedmetadata", handleLoadedMetadata);
     };
   }, []);
+  
+  // ✅ NOW we can have conditional returns AFTER all hooks
+  // Show loading state
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-center">
+          <div className="h-8 w-8 border-4 border-gray-200 border-t-blue-600 rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading instructor data...</p>
+        </div>
+      </div>
+    );
+  }
+  
+  // Show error state
+  if (error) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-center">
+          <p className="text-red-600 font-semibold mb-4">Error loading instructor data</p>
+          <p className="text-gray-600 mb-6">{error instanceof Error ? error.message : 'Unknown error occurred'}</p>
+          <button
+            onClick={() => navigate(-1)}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+          >
+            Go Back
+          </button>
+        </div>
+      </div>
+    );
+  }
+  
+  // Show no data state
+  if (!instructor) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-center">
+          <p className="text-gray-600 mb-6">No instructor data found</p>
+          <button
+            onClick={() => navigate(-1)}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+          >
+            Go Back
+          </button>
+        </div>
+      </div>
+    );
+  }
+  
+  const isStage2 = isStage2Param || instructor.stage === "stage2_pedal_video";
+
+
+
+  const currentDocument = instructor.documents.find(
+    (doc) => doc.id === selectedDocumentId
+  );
+
+  // Get the current side image from the document
+  const currentDocumentSide = currentDocument ? currentDocument.sides[selectedSide] : undefined;
+
+  const approvedCount = Object.values(documentStatuses).filter(
+    (s) => s === "approved"
+  ).length;
+
+  let appliedDate = "Recently";
+  try {
+    appliedDate = formatDistanceToNow(parseISO(instructor.applied_at), {
+      addSuffix: true,
+    });
+  } catch (e) {}
 
   const handleApproveDocument = (docId: string) => {
     setDocumentStatuses((prev) => ({ ...prev, [docId]: "approved" }));
@@ -469,7 +514,7 @@ export default function InstructorApprovalPage(): JSX.Element {
                 className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-gray-300 bg-white text-xs font-bold"
                 style={{ color: "#9CA3AF" }}
               >
-                ✓
+                ?
               </div>
               <span className="text-xs font-medium text-gray-400">Matchable</span>
             </div>
@@ -540,33 +585,35 @@ export default function InstructorApprovalPage(): JSX.Element {
                       </div>
 
                       <div className="flex-1 flex items-center justify-center p-4 overflow-hidden bg-gray-100">
-                        <svg width="280" height="180" viewBox="0 0 280 180" className="drop-shadow-lg">
-                          {/* PAN Card Background */}
-                          <rect width="280" height="180" fill="#E8D4B8" rx="4"/>
-                          
-                          {/* Header - Orange Bar */}
-                          <rect width="280" height="30" fill="#FF6600" rx="4"/>
-                          <text x="10" y="22" fontSize="12" fontWeight="bold" fill="white">PAN CARD</text>
-                          
-                          {/* Main Content */}
-                          <text x="15" y="55" fontSize="11" fill="#333333" fontWeight="bold">Permanent Account Number</text>
-                          
-                          {/* PAN Number */}
-                          <rect x="15" y="65" width="250" height="25" fill="white" stroke="#ccc" strokeWidth="1"/>
-                          <text x="25" y="85" fontSize="16" fontWeight="bold" fill="#000" letterSpacing="2">ABCDE1234F</text>
-                          
-                          {/* Name Section */}
-                          <text x="15" y="110" fontSize="10" fill="#666666">Name:</text>
-                          <text x="15" y="125" fontSize="12" fontWeight="bold" fill="#333333">John Doe</text>
-                          
-                          {/* Date Section */}
-                          <text x="150" y="110" fontSize="10" fill="#666666">Date:</text>
-                          <text x="150" y="125" fontSize="12" fontWeight="bold" fill="#333333">15/06/2020</text>
-                          
-                          {/* Footer */}
-                          <rect x="15" y="140" width="250" height="20" fill="#f0f0f0" stroke="#ddd" strokeWidth="0.5"/>
-                          <text x="20" y="155" fontSize="9" fill="#999999">Issued by: Income Tax Department</text>
-                        </svg>
+                        {currentDocumentSide && currentDocumentSide.url ? (
+                          <img
+                            src={currentDocumentSide.url}
+                            alt={`${getDocumentDisplayName(currentDocument.type)} - ${selectedSide}`}
+                            className="max-w-full max-h-full object-contain drop-shadow-lg"
+                            onLoad={() => {
+                              console.log(
+                                `[IMAGE] ? Successfully loaded ${selectedSide} for ${getDocumentDisplayName(currentDocument.type)}\n` +
+                                `URL: ${currentDocumentSide.url}`
+                              );
+                            }}
+                            onError={(e) => {
+                              console.error(
+                                `[IMAGE] ? Failed to load ${selectedSide} for ${getDocumentDisplayName(currentDocument.type)}\n` +
+                                `URL: ${currentDocumentSide.url}`,
+                                e
+                              );
+                            }}
+                          />
+                        ) : (
+                          <div className="text-center text-gray-500 space-y-2">
+                            <p className="text-sm font-medium">No document image available</p>
+                            {currentDocument && (
+                              <p className="text-xs text-gray-400">
+                                Available sides: {Object.keys(currentDocument.sides || {}).join(", ") || "None"}
+                              </p>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -620,33 +667,7 @@ export default function InstructorApprovalPage(): JSX.Element {
                            </div>
 
                            <div className="flex-1 flex items-center justify-center p-4 overflow-hidden bg-gray-100">
-                              <svg width="380" height="240" viewBox="0 0 280 180" className="drop-shadow-lg">
-                                {/* PAN Card Background */}
-                                <rect width="280" height="180" fill="#E8D4B8" rx="4"/>
-                                
-                                {/* Header - Orange Bar */}
-                                <rect width="280" height="30" fill="#FF6600" rx="4"/>
-                                <text x="10" y="22" fontSize="12" fontWeight="bold" fill="white">PAN CARD</text>
-                                
-                                {/* Main Content */}
-                                <text x="15" y="55" fontSize="11" fill="#333333" fontWeight="bold">Permanent Account Number</text>
-                                
-                                {/* PAN Number */}
-                                <rect x="15" y="65" width="250" height="25" fill="white" stroke="#ccc" strokeWidth="1"/>
-                                <text x="25" y="85" fontSize="16" fontWeight="bold" fill="#000" letterSpacing="2">ABCDE1234F</text>
-                                
-                                {/* Name Section */}
-                                <text x="15" y="110" fontSize="10" fill="#666666">Name:</text>
-                                <text x="15" y="125" fontSize="12" fontWeight="bold" fill="#333333">John Doe</text>
-                                
-                                {/* Date Section */}
-                                <text x="150" y="110" fontSize="10" fill="#666666">Date:</text>
-                                <text x="150" y="125" fontSize="12" fontWeight="bold" fill="#333333">15/06/2020</text>
-                                
-                                {/* Footer */}
-                                <rect x="15" y="140" width="250" height="20" fill="#f0f0f0" stroke="#ddd" strokeWidth="0.5"/>
-                                <text x="20" y="155" fontSize="9" fill="#999999">Issued by: Income Tax Department</text>
-                              </svg>
+                              {currentDocumentSide && currentDocumentSide.url ? (<img src={currentDocumentSide.url} alt={`${getDocumentDisplayName(currentDocument?.type || "pan_card")} - ${selectedSide}`} className="max-w-full max-h-full object-contain drop-shadow-lg" onLoad={() => {console.log(`[IMAGE] ? Successfully loaded fullscreen ${selectedSide} for ${getDocumentDisplayName(currentDocument?.type || "pan_card")}`);}} onError={(e) => {console.error(`[IMAGE] ? Failed to load fullscreen ${selectedSide}`, e);}} />) : (<div className="text-center text-gray-500 space-y-2"><p className="text-sm font-medium">No document image available</p></div>)}
                            </div>
                          </div>
                        </div>
@@ -751,7 +772,7 @@ export default function InstructorApprovalPage(): JSX.Element {
                             </div>
                           ) : status === "approved" ? (
                             <div className="px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap flex items-center gap-2" style={{backgroundColor: '#DDF8EF', color: '#00CE84'}}>
-                              <span>●</span>
+                              <span>?</span>
                               <span>Approved</span>
                             </div>
                           ) : status === "rejected" ? (
@@ -769,7 +790,7 @@ export default function InstructorApprovalPage(): JSX.Element {
                               </button>
                               {/* Rejected badge */}
                               <div className="px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap flex items-center gap-2" style={{backgroundColor: '#FDECEC', color: '#EF4444'}}>
-                                <span>●</span>
+                                <span>?</span>
                                 <span>Rejected</span>
                               </div>
                             </div>
@@ -842,7 +863,7 @@ export default function InstructorApprovalPage(): JSX.Element {
             </div>
 
             {/* Separator */}
-            <span className="text-gray-400">•</span>
+            <span className="text-gray-400">�</span>
 
             {/* Stage 2 - Active */}
             <div className="flex items-center gap-2">
@@ -853,7 +874,7 @@ export default function InstructorApprovalPage(): JSX.Element {
             </div>
 
             {/* Separator */}
-            <span className="text-gray-400">•</span>
+            <span className="text-gray-400">�</span>
 
             {/* Stage 3 - Future */}
             <div className="flex items-center gap-2">
@@ -968,7 +989,7 @@ export default function InstructorApprovalPage(): JSX.Element {
                 <ul className="space-y-2">
                   {instructor.verificationChecklist.map((item) => (
                     <li key={item.id} className="flex gap-2 text-sm text-gray-700">
-                      <span className="text-green-500 font-bold flex-shrink-0">✓</span>
+                      <span className="text-green-500 font-bold flex-shrink-0">?</span>
                       <span>{item.text}</span>
                     </li>
                   ))}
@@ -979,7 +1000,7 @@ export default function InstructorApprovalPage(): JSX.Element {
               <div className="px-4 py-3 border-t border-gray-200 bg-gray-50">
                 <p className="font-semibold text-gray-900 text-sm mb-1">Pedal installation video</p>
                 <p className="text-xs text-gray-500">
-                  uploaded {formatDistanceToNow(parseISO(instructor.videos[0].uploadedAt), { addSuffix: true })} • {instructor.videos[0].angles} angles
+                  uploaded {formatDistanceToNow(parseISO(instructor.videos[0].uploadedAt), { addSuffix: true })} � {instructor.videos[0].angles} angles
                 </p>
               </div>
 
@@ -1026,7 +1047,7 @@ export default function InstructorApprovalPage(): JSX.Element {
             {/* Header */}
             <div className="flex items-start justify-between mb-4">
               <h2 className="text-lg font-bold text-gray-900">
-                Reject · {currentDocument ? getDocumentDisplayName(currentDocument.type) : "Document"}
+                Reject � {currentDocument ? getDocumentDisplayName(currentDocument.type) : "Document"}
               </h2>
               <button
                 onClick={() => setIsRejectionModalOpen(false)}
@@ -1148,7 +1169,7 @@ export default function InstructorApprovalPage(): JSX.Element {
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden" onClick={(e) => e.stopPropagation()}>
             {/* Modal Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-              <h2 className="text-lg font-bold text-gray-900">Request re-upload · Pedal video</h2>
+              <h2 className="text-lg font-bold text-gray-900">Request re-upload � Pedal video</h2>
               <button
                 onClick={() => setIsVideoRejectionModalOpen(false)}
                 className="text-gray-400 hover:text-gray-600 transition-colors"
@@ -1509,6 +1530,8 @@ export default function InstructorApprovalPage(): JSX.Element {
     </>
   );
 }
+
+
 
 
 

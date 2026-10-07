@@ -3,6 +3,8 @@
  * Handles document review and instructor approval workflow
  */
 
+import { useQuery } from "@tanstack/react-query";
+
 export type DocumentType = "pan_card" | "aadhar" | "vehicle_rc" | "insurance" | "puc_certificate";
 export type DocumentSide = "front" | "back";
 export type ApprovalStatus = "pending" | "approved" | "rejected";
@@ -588,3 +590,308 @@ export const getStatusText = (status: ApprovalStatus): string => {
       return "Pending";
   }
 };
+
+// ============= API INTEGRATION =============
+
+const BACKEND_API = import.meta.env.VITE_BACKEND_API || "/go-api";
+
+interface ApiDocumentSide {
+  side: "front" | "back";
+  file_url: string;
+  uploaded_at: string;
+}
+
+interface ApiDocumentDetail {
+  id: string;
+  type: string;
+  label: string;
+  document_number?: string;
+  sides: ApiDocumentSide[];
+  verification_status: "pending" | "verified" | "rejected";
+  reason_code?: string;
+  reason_message?: string;
+  reviewed_by?: string;
+  reviewed_at?: string;
+}
+
+interface ApiVideoDetail {
+  id: string;
+  title: string;
+  duration?: string;
+  uploaded_at: string;
+  angles?: number;
+  file_url: string;
+  verification_status: "pending" | "verified" | "rejected";
+  reason_code?: string;
+  reason_message?: string;
+  reviewed_by?: string;
+  reviewed_at?: string;
+}
+
+interface ApiFetchDocumentsResponse {
+  success: boolean;
+  instructor: {
+    id: string;
+    name: string;
+    phone: string;
+    email: string;
+    role: string;
+    status: string;
+    stage: string;
+    applied_at: string;
+  };
+  documents?: {
+    total: number;
+    approved: number;
+    rejected: number;
+    pending: number;
+    all_mandatory_approved: boolean;
+    can_mark_active: boolean;
+  };
+  document_details?: ApiDocumentDetail[];
+  videos?: {
+    total: number;
+    approved: number;
+    rejected: number;
+    pending: number;
+  };
+  video_details?: ApiVideoDetail[];
+  verification_checklist?: Array<{
+    id: string;
+    text: string;
+    verified: boolean;
+  }>;
+  metadata: {
+    request_id: string;
+    timestamp: string;
+  };
+}
+
+const mapDocumentType = (apiType: string): DocumentType => {
+  const typeMap: Record<string, DocumentType> = {
+    pan: "pan_card",
+    aadhaar: "aadhar",
+    rc: "vehicle_rc",
+    vehicle_insurance: "insurance",
+    puc: "puc_certificate",
+  };
+  return typeMap[apiType] || "pan_card";
+};
+
+const mapVerificationStatus = (apiStatus: string): ApprovalStatus => {
+  switch (apiStatus) {
+    case "verified":
+      return "approved";
+    case "rejected":
+      return "rejected";
+    case "pending":
+    default:
+      return "pending";
+  }
+};
+
+const getInitialsHelper = (name: string): string => {
+  return name
+    .split(" ")
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
+};
+
+const getAvatarColorHelper = (name: string): string => {
+  const colors = [
+    "#3b82f6",
+    "#ec4899",
+    "#f59e0b",
+    "#10b981",
+    "#8b5cf6",
+    "#06b6d4",
+  ];
+  const hash = name.split("").reduce((acc, char) => {
+    return acc + char.charCodeAt(0);
+  }, 0);
+  return colors[hash % colors.length];
+};
+
+const transformApiDocumentToUI = (apiDoc: ApiDocumentDetail): DocumentReview => {
+  const sides: Record<string, DocumentFile | undefined> = {};
+
+  // Log raw API document for debugging
+  console.log(`[TRANSFORM] Processing document: ${apiDoc.id} (${apiDoc.type})`, {
+    sidesCount: apiDoc.sides?.length || 0,
+    sidesData: apiDoc.sides,
+    label: apiDoc.label,
+  });
+
+  // Track if we detect duplicate URLs (backend bug)
+  const urlMap: Record<string, string> = {};
+
+  apiDoc.sides?.forEach((side) => {
+    const sideKey = side.side as DocumentSide;
+    if (sideKey === "front" || sideKey === "back") {
+      const fileUrl = side.file_url;
+      
+      // Check if this URL was already assigned to a different side
+      if (urlMap.front === fileUrl && sideKey === "back") {
+        console.warn(
+          `[TRANSFORM] ⚠️ DUPLICATE URL DETECTED for ${apiDoc.label} (${apiDoc.id}):\n` +
+          `Front URL: ${urlMap.front}\n` +
+          `Back URL: ${fileUrl}\n` +
+          `Both sides have the SAME URL - This is a backend issue!`
+        );
+      }
+      
+      urlMap[sideKey] = fileUrl;
+      
+      sides[sideKey] = {
+        id: `${apiDoc.id}-${sideKey}`,
+        type: mapDocumentType(apiDoc.type),
+        side: sideKey,
+        url: fileUrl,
+        uploadedAt: side.uploaded_at,
+      };
+      console.log(`[TRANSFORM] ✅ Added ${sideKey} side with URL: ${fileUrl}`);
+    }
+  });
+
+  console.log(`[TRANSFORM] Final sides for ${apiDoc.id}:`, { 
+    sidesCount: Object.keys(sides).length, 
+    sides: Object.keys(sides),
+    hasFront: !!sides.front,
+    hasBack: !!sides.back,
+    frontUrl: sides.front?.url?.substring(0, 80) + "...",
+    backUrl: sides.back?.url?.substring(0, 80) + "...",
+  });
+
+  return {
+    id: apiDoc.id,
+    type: mapDocumentType(apiDoc.type),
+    number: apiDoc.document_number || "",
+    pages: apiDoc.sides?.length || 0,
+    status: mapVerificationStatus(apiDoc.verification_status),
+    sides,
+    rejectionReason: apiDoc.reason_code,
+    rejectionMessage: apiDoc.reason_message,
+    rejectedAt: apiDoc.reason_code ? apiDoc.reviewed_at : undefined,
+  };
+};
+
+const transformApiVideoToUI = (apiVideo: ApiVideoDetail): PedalVideo => {
+  return {
+    id: apiVideo.id,
+    title: apiVideo.title,
+    duration: apiVideo.duration || "0:00",
+    uploadedAt: apiVideo.uploaded_at,
+    angles: apiVideo.angles || 0,
+    url: apiVideo.file_url,
+    status: mapVerificationStatus(apiVideo.verification_status),
+    rejectionReason: apiVideo.reason_code,
+    rejectionMessage: apiVideo.reason_message,
+    rejectedAt: apiVideo.reason_code ? apiVideo.reviewed_at : undefined,
+  };
+};
+
+/**
+ * Fetch instructor documents/videos from real backend API
+ * Calls: GET /admin/instructors/{id}/documents?stage={stage}
+ */
+export const useFetchInstructorDocuments = (
+  instructorId: string | undefined,
+  stage: string = "documents"
+) => {
+  return useQuery({
+    queryKey: ["instructor-documents", instructorId, stage],
+    queryFn: async () => {
+      if (!instructorId) {
+        throw new Error("Instructor ID is required");
+      }
+
+      const goAccessToken = localStorage.getItem("go_access_token");
+      if (!goAccessToken) {
+        throw new Error("No authentication token. Please login again.");
+      }
+
+      console.log(
+        `[APPROVAL API] Fetching documents for instructor ${instructorId} with stage=${stage}`
+      );
+
+      const url = `${BACKEND_API}/admin/instructors/${instructorId}/documents?stage=${stage}`;
+
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${goAccessToken}`,
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`API Error: ${response.status} ${response.statusText}`);
+      }
+
+      const apiData: ApiFetchDocumentsResponse = await response.json();
+
+      if (!apiData.success) {
+        throw new Error("API returned success: false");
+      }
+
+      const isVideosStage = stage === "pedal_videos";
+
+      // For videos stage, the API returns them as document_details with type: "pedal_videos"
+      let videosData: PedalVideo[] = [];
+      if (isVideosStage && apiData.document_details) {
+        videosData = apiData.document_details.map(apiDoc => {
+          const videoUrl = apiDoc.sides?.[0]?.file_url || "";
+          console.log(
+            `[VIDEO-TRANSFORM] Processing video: ${apiDoc.id} (${apiDoc.label})\n` +
+            `URL: ${videoUrl}`
+          );
+          return {
+            id: apiDoc.id,
+            title: apiDoc.label || "Pedal Video",
+            duration: "0:00",
+            uploadedAt: apiDoc.sides?.[0]?.uploaded_at || apiDoc.reviewed_at || apiData.instructor.applied_at,
+            angles: 1,
+            url: videoUrl,
+            status: mapVerificationStatus(apiDoc.verification_status),
+            rejectionReason: apiDoc.reason_code,
+            rejectionMessage: apiDoc.reason_message,
+            rejectedAt: apiDoc.reason_code ? apiDoc.reviewed_at : undefined,
+          };
+        });
+      }
+
+      console.log(
+        `[APPROVAL API] ✅ Fetched ${isVideosStage ? videosData.length : apiData.document_details?.length || 0} items`
+      );
+      console.log("[APPROVAL API] Response:", apiData);
+      if (isVideosStage) {
+        console.log("[APPROVAL API] Videos transformed:", videosData);
+      }
+
+      const transformed: InstructorApprovalDetail = {
+        id: apiData.instructor.id,
+        instructor_id: apiData.instructor.id,
+        name: apiData.instructor.name,
+        phone: apiData.instructor.phone,
+        initials: getInitialsHelper(apiData.instructor.name),
+        avatar_bg_color: getAvatarColorHelper(apiData.instructor.name),
+        applied_at: apiData.instructor.applied_at,
+        stage: isVideosStage ? "stage2_pedal_video" : "stage1_documents",
+        documents: isVideosStage ? [] : (apiData.document_details || []).map(transformApiDocumentToUI),
+        videos: isVideosStage ? videosData : undefined,
+        verificationChecklist: isVideosStage ? apiData.verification_checklist : undefined,
+        lastVideoUploadedAt: isVideosStage ? (videosData?.[0]?.uploadedAt || apiData.instructor.applied_at) : undefined,
+        approvedCount: isVideosStage ? (apiData.documents?.approved || 0) : (apiData.documents?.approved || 0),
+        totalCount: isVideosStage ? (apiData.documents?.total || 0) : (apiData.documents?.total || 0),
+      };
+
+      return transformed;
+    },
+    enabled: !!instructorId,
+    staleTime: 5 * 60 * 1000,
+  });
+};
+
+
