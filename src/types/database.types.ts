@@ -1312,7 +1312,7 @@ export type Database = {
         };
         Returns: Json;
       };
-            get_earnings_instructors: {
+      get_earnings_instructors: {
         Args: { p_search?: string };
         Returns: {
           id_instructor: string;
@@ -1344,24 +1344,24 @@ export type Database = {
       get_car_lead_areas: {
         Args: Record<PropertyKey, never>;
         Returns: { area: string }[];
-       };
+      };
       get_leave_requests_paginated: {
         Args: { p_status: string; p_offset: number; p_limit: number };
         Returns: Database["public"]["Tables"]["instructor_leave_request"]["Row"][];
       };
       get_tentative_customers_paginated: {
         Args: { p_start_date: string; p_search?: string; p_page?: number };
-                Returns: Json;
+        Returns: Json;
       };
-get_daily_notification_schedules: {
-  Args: {
-    schedule_date: string;
-    recipient_tab?: string;
-    search_term?: string;
-    page_number?: number;
-  };
-  Returns: Json;
-};
+      get_daily_notification_schedules: {
+        Args: {
+          schedule_date: string;
+          recipient_tab?: string;
+          search_term?: string;
+          page_number?: number;
+        };
+        Returns: Json;
+      };
 
       get_instructors_by_performance: {
         Args: {

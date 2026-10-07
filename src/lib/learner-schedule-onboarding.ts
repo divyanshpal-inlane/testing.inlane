@@ -30,15 +30,15 @@ export function nextLearnerScheduleSetupRoute(
 ): string | null {
   // Existing/finished courses must not be sent through first-time setup again.
   if (hasScheduledLessons) return null;
-  
+
   // If learner has completed setup (has preferences), no further steps needed
   if (hasPreferences) return null;
-  
+
   // Demo learners skip details/questions and go straight to preferences
   if (isDemo) {
     return "/createSchedule/preferences?type=new";
   }
-  
+
   // For first-time setup (no preferences yet):
   // ALWAYS start from step 1 (details page) regardless of what data exists.
   // This ensures the learner goes through all 4 steps properly:

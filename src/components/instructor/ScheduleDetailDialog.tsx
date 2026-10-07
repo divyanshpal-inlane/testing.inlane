@@ -2,7 +2,6 @@ import { Calendar, Clock, ExternalLinkIcon, User } from "lucide-react";
 
 import { MaskedCallButton } from "@/components/MaskedCallButton";
 import { Button } from "@/components/ui/button";
-import { useUser } from "@/context/auth-context";
 import {
   Dialog,
   DialogContent,
@@ -11,6 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useUser } from "@/context/auth-context";
 
 interface ScheduleDetailDialogProps {
   open: boolean;

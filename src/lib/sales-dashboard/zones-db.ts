@@ -337,7 +337,7 @@ function rethrowZoneWriteError(
     throw new Error(
       canDegradeWrite(isRough)
         ? `Missing instructor_service_zones.is_rough (apply ` +
-            `supabase/migrations/20261001_100000_add_rough_polygon_flag.sql): ${error}`
+          `supabase/migrations/20261001_100000_add_rough_polygon_flag.sql): ${error}`
         : MISSING_ROUGH_COLUMN_MESSAGE,
     );
   }

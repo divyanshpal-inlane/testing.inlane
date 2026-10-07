@@ -125,7 +125,8 @@ async function enrichFees(rows: any[]): Promise<NoShowFee[]> {
       lessonNumber: lesson?.number ?? null,
       // The pending section must review the matching pending appeal, even if
       // this fee also has an older, already-reviewed appeal.
-      appeal: first<NoShowAppeal>(r.pending_appeal) ?? appealByFee.get(r.id) ?? null,
+      appeal:
+        first<NoShowAppeal>(r.pending_appeal) ?? appealByFee.get(r.id) ?? null,
     };
   });
 }
