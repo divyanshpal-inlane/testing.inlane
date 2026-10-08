@@ -2,13 +2,18 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { ChevronLeft, ZoomIn, ZoomOut, Expand, Check, X, Play, Pause, ChevronDown, Upload, AlertCircle } from "lucide-react";
+import { ChevronLeft, ZoomIn, ZoomOut, Expand, Check, X, Play, Pause, ChevronDown, Upload, AlertCircle, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   useFetchInstructorDocuments,
   getDocumentDisplayName,
   REJECTION_REASONS,
   PEDAL_VIDEO_REJECTION_REASONS,
+  verifyDocument,
+  verifyVideo,
+  rejectDocument,
+  rejectVideo,
+  approveStage1Documents,
   type DocumentType,
   type DocumentSide,
   type ApprovalStatus,
@@ -86,6 +91,7 @@ export default function InstructorApprovalPage(): JSX.Element {
   const [isReuploadLoading, setIsReuploadLoading] = useState(false);
   // Track reuploaded documents so they show both front and back buttons
   const [reuploadedDocsWithBothSides, setReuploadedDocsWithBothSides] = useState<Set<string>>(new Set());
+
   
   // All Refs - MUST BE BEFORE EARLY RETURNS!
   const reuploadFrontFileInputRef = useRef<HTMLInputElement>(null);
@@ -194,8 +200,21 @@ export default function InstructorApprovalPage(): JSX.Element {
     });
   } catch (e) {}
 
-  const handleApproveDocument = (docId: string) => {
-    setDocumentStatuses((prev) => ({ ...prev, [docId]: "approved" }));
+  const handleApproveDocument = async (docId: string) => {
+    if (!id) return;
+    
+    try {
+      console.log(`[UI] Admin approving document ${docId}`);
+      const response = await verifyDocument(id, docId);
+      console.log("[UI] Document verified successfully:", response);
+      
+      setDocumentStatuses((prev) => ({ ...prev, [docId]: "approved" }));
+      alert(`✅ Document approved and verified!`);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "Failed to approve document";
+      console.error("[UI] Error approving document:", errorMsg);
+      alert(`❌ Error: ${errorMsg}`);
+    }
   };
 
   // Reupload handlers
@@ -363,30 +382,34 @@ export default function InstructorApprovalPage(): JSX.Element {
     setIsRejectionModalOpen(true);
   };
 
-  const handleConfirmRejectDocument = (
+  const handleConfirmRejectDocument = async (
     docId: string,
     reason: string,
     message: string,
     backendTag: string
   ) => {
-    // Update document status to rejected
-    setDocumentStatuses((prev) => ({ ...prev, [docId]: "rejected" }));
-    
-    // Store rejection details (this will be sent to backend API later)
-    console.log("Document Rejection:", {
-      documentId: docId,
-      reason: reason,
-      backendTag: backendTag,
-      message: message,
-      timestamp: new Date().toISOString(),
-    });
+    if (!id) return;
 
-    // Close modal and reset states
-    setIsRejectionModalOpen(false);
-    setRejectionDocumentId("");
-    setSelectedRejectionReason(REJECTION_REASONS[0].id);
-    setRejectionMessage("");
-    setIsReasonDropdownOpen(false);
+    try {
+      console.log("[UI] Admin rejecting document:", { docId, reason, message });
+      const response = await rejectDocument(id, docId, reason, message);
+      console.log("[UI] Document rejected successfully:", response);
+
+      // Update document status to rejected
+      setDocumentStatuses((prev) => ({ ...prev, [docId]: "rejected" }));
+      alert(`✅ Document rejected! Instructor will be notified to re-upload.`);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "Failed to reject document";
+      console.error("[UI] Error rejecting document:", errorMsg);
+      alert(`❌ Error: ${errorMsg}`);
+    } finally {
+      // Close modal and reset states
+      setIsRejectionModalOpen(false);
+      setRejectionDocumentId("");
+      setSelectedRejectionReason(REJECTION_REASONS[0].id);
+      setRejectionMessage("");
+      setIsReasonDropdownOpen(false);
+    }
   };
 
   const handleRejectVideo = (videoId: string) => {
@@ -394,35 +417,106 @@ export default function InstructorApprovalPage(): JSX.Element {
     setIsVideoRejectionModalOpen(true);
   };
 
-  const handleConfirmRejectVideo = (
+  const handleConfirmRejectVideo = async (
     videoId: string,
     reason: string,
     message: string,
     backendTag: string
   ) => {
-    // Update video status to rejected
-    setVideoStatuses((prev) => ({ ...prev, [videoId]: "rejected" }));
-    
-    // Store rejection details (this will be sent to backend API later)
-    console.log("Video Rejection:", {
-      videoId: videoId,
-      reason: reason,
-      backendTag: backendTag,
-      message: message,
-      timestamp: new Date().toISOString(),
-    });
+    if (!id) return;
 
-    // Close modal and reset states
-    setIsVideoRejectionModalOpen(false);
-    setRejectionVideoId("");
-    setSelectedVideoRejectionReason(PEDAL_VIDEO_REJECTION_REASONS[0].id);
-    setVideoRejectionMessage("");
-    setIsVideoReasonDropdownOpen(false);
+    try {
+      console.log("[UI] Admin rejecting video:", { videoId, reason, message });
+      const response = await rejectVideo(id, videoId, reason, message);
+      console.log("[UI] Video rejected successfully:", response);
+
+      // Update video status to rejected
+      setVideoStatuses((prev) => ({ ...prev, [videoId]: "rejected" }));
+      alert(`✅ Video rejected! Instructor will be notified to re-upload.`);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "Failed to reject video";
+      console.error("[UI] Error rejecting video:", errorMsg);
+      alert(`❌ Error: ${errorMsg}`);
+    } finally {
+      // Close modal and reset states
+      setIsVideoRejectionModalOpen(false);
+      setRejectionVideoId("");
+      setSelectedVideoRejectionReason(PEDAL_VIDEO_REJECTION_REASONS[0].id);
+      setVideoRejectionMessage("");
+      setIsVideoReasonDropdownOpen(false);
+    }
   };
 
-  const handleApproveVideo = (videoId: string) => {
-    setVideoStatuses((prev) => ({ ...prev, [videoId]: "approved" }));
+  const handleApproveVideo = async (videoId: string) => {
+    if (!id) return;
+
+    try {
+      console.log(`[UI] Admin approving video ${videoId}`);
+      const response = await verifyVideo(id, videoId);
+      console.log("[UI] Video verified successfully:", response);
+
+      setVideoStatuses((prev) => ({ ...prev, [videoId]: "approved" }));
+      alert(`✅ Video approved and verified!`);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "Failed to approve video";
+      console.error("[UI] Error approving video:", errorMsg);
+      alert(`❌ Error: ${errorMsg}`);
+    }
   };
+
+  const handleApproveStage1 = async () => {
+    if (!id) return;
+
+    try {
+      console.log(`[UI] Admin approving all Stage 1 documents for instructor ${id}`);
+      const response = await approveStage1Documents(id);
+      console.log("[UI] Stage 1 documents approved successfully:", response);
+
+      // Update all document statuses to approved
+      const updatedStatuses: Record<string, ApprovalStatus> = {};
+      instructor.documents.forEach((doc) => {
+        updatedStatuses[doc.id] = "approved";
+      });
+      setDocumentStatuses(updatedStatuses);
+
+      alert(`✅ All Stage 1 documents approved! Instructor marked as active for Stage 2.`);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "Failed to approve Stage 1 documents";
+      console.error("[UI] Error approving Stage 1 documents:", errorMsg);
+      alert(`❌ Error: ${errorMsg}`);
+    }
+  };
+
+  // Loading state
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="h-8 w-8 animate-spin text-green-500" />
+          <p className="text-gray-600 font-medium">Loading instructor details...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Error state
+  if (error || !instructor) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3 text-center max-w-md">
+          <AlertCircle className="h-8 w-8 text-red-500" />
+          <p className="text-gray-900 font-semibold">Failed to load instructor data</p>
+          <p className="text-sm text-gray-600">{error?.message || "Please try again later"}</p>
+          <button
+            onClick={() => navigate("/admin/instructors?tab=review")}
+            className="mt-4 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+          >
+            Back to Instructors
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <>
@@ -815,7 +909,7 @@ export default function InstructorApprovalPage(): JSX.Element {
               )}
 
               <button
-                onClick={() => console.log("Stage 1 approved")}
+                onClick={handleApproveStage1}
                 disabled={approvedCount !== instructor.totalCount}
                 className="w-full font-semibold py-2.5 px-4 rounded-lg transition-all text-sm text-white"
                 style={{
@@ -832,7 +926,7 @@ export default function InstructorApprovalPage(): JSX.Element {
         </>
         )}
 
-        {isStage2 && instructor.videos && instructor.verificationChecklist && (
+        {isStage2 && instructor.videos && (
         <>
         {/* Stage 2 - Pedal Video Review */}
         <div className="mb-8 flex items-center justify-between">
@@ -925,11 +1019,7 @@ export default function InstructorApprovalPage(): JSX.Element {
                   onEnded={() => setIsVideoPlaying(false)}
                 >
                   <source
-                    src="https://www.w3schools.com/html/mov_bbb.mp4"
-                    type="video/mp4"
-                  />
-                  <source
-                    src="https://commondatastorage.googleapis.com/gtv-videos-library/sample/BigBuckBunny.mp4"
+                    src={instructor.videos?.[0]?.url || ""}
                     type="video/mp4"
                   />
                   Your browser does not support the video tag.
@@ -1028,9 +1118,9 @@ export default function InstructorApprovalPage(): JSX.Element {
 
               {/* CTA Button */}
               <button
-                onClick={() => console.log("Stage 2 approved")}
-                className="w-full font-semibold py-2.5 px-4 rounded-lg transition-all text-sm text-white"
-                style={{ backgroundColor: "#00CE84" }}
+                 onClick={() => console.log("Stage 2 approved")}
+                 className="w-full font-semibold py-2.5 px-4 rounded-lg transition-all text-sm text-white"
+                 style={{ backgroundColor: "#00CE84" }}
               >
                 Approve Stage 2 - Enable Matching
               </button>

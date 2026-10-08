@@ -777,6 +777,211 @@ const transformApiDocumentToUI = (apiDoc: ApiDocumentDetail): DocumentReview => 
   };
 };
 
+/**
+ * ============= VERIFY/APPROVE DOCUMENT API =============
+ * Approve/verify a single document for an instructor
+ */
+export async function verifyDocument(instructorId: string, documentId: string): Promise<any> {
+  const goAccessToken = localStorage.getItem("go_access_token");
+  if (!goAccessToken) {
+    throw new Error("No authentication token. Please login again.");
+  }
+
+  console.log(`[VERIFY_DOC_API] Verifying document ${documentId} for instructor ${instructorId}`);
+
+  const url = `${BACKEND_API}/admin/instructors/${instructorId}/documents/${documentId}/verify`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${goAccessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({}),
+  });
+
+  if (!response.ok) {
+    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+  }
+
+  const apiData = await response.json();
+
+  if (!apiData.success) {
+    throw new Error(apiData.message || "Failed to verify document");
+  }
+
+  console.log(`[VERIFY_DOC_API] ✅ Document ${documentId} verified successfully`);
+  console.log("[VERIFY_DOC_API] Response:", apiData);
+
+  return apiData;
+}
+
+/**
+ * ============= VERIFY/APPROVE VIDEO API =============
+ * Approve/verify a single video for an instructor
+ */
+export async function verifyVideo(instructorId: string, documentId: string): Promise<any> {
+  const goAccessToken = localStorage.getItem("go_access_token");
+  if (!goAccessToken) {
+    throw new Error("No authentication token. Please login again.");
+  }
+
+  console.log(`[VERIFY_VIDEO_API] Verifying video ${documentId} for instructor ${instructorId}`);
+
+  const url = `${BACKEND_API}/admin/instructors/${instructorId}/documents/${documentId}/verify`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${goAccessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({}),
+  });
+
+  if (!response.ok) {
+    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+  }
+
+  const apiData = await response.json();
+
+  if (!apiData.success) {
+    throw new Error(apiData.message || "Failed to verify video");
+  }
+
+  console.log(`[VERIFY_VIDEO_API] ✅ Video ${documentId} verified successfully`);
+  console.log("[VERIFY_VIDEO_API] Response:", apiData);
+
+  return apiData;
+}
+
+/**
+ * ============= REJECT DOCUMENT API =============
+ * Reject a single document and ask instructor to re-upload
+ */
+export async function rejectDocument(instructorId: string, documentId: string, reason: string, message: string): Promise<any> {
+  const goAccessToken = localStorage.getItem("go_access_token");
+  if (!goAccessToken) {
+    throw new Error("No authentication token. Please login again.");
+  }
+
+  console.log(`[REJECT_DOC_API] Rejecting document ${documentId} for instructor ${instructorId}`);
+  console.log(`[REJECT_DOC_API] Reason: ${reason}, Message: ${message}`);
+
+  const url = `${BACKEND_API}/admin/instructors/${instructorId}/documents/${documentId}/reject`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${goAccessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      reason_code: reason,
+      reason_message: message,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+  }
+
+  const apiData = await response.json();
+
+  if (!apiData.success) {
+    throw new Error(apiData.message || "Failed to reject document");
+  }
+
+  console.log(`[REJECT_DOC_API] ✅ Document ${documentId} rejected successfully`);
+  console.log("[REJECT_DOC_API] Response:", apiData);
+
+  return apiData;
+}
+
+/**
+ * ============= REJECT VIDEO API =============
+ * Reject a single video and ask instructor to re-upload
+ */
+export async function rejectVideo(instructorId: string, videoId: string, reason: string, message: string): Promise<any> {
+  const goAccessToken = localStorage.getItem("go_access_token");
+  if (!goAccessToken) {
+    throw new Error("No authentication token. Please login again.");
+  }
+
+  console.log(`[REJECT_VIDEO_API] Rejecting video ${videoId} for instructor ${instructorId}`);
+  console.log(`[REJECT_VIDEO_API] Reason: ${reason}, Message: ${message}`);
+
+  const url = `${BACKEND_API}/admin/instructors/${instructorId}/documents/${videoId}/reject`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${goAccessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      reason_code: reason,
+      reason_message: message,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+  }
+
+  const apiData = await response.json();
+
+  if (!apiData.success) {
+    throw new Error(apiData.message || "Failed to reject video");
+  }
+
+  console.log(`[REJECT_VIDEO_API] ✅ Video ${videoId} rejected successfully`);
+  console.log("[REJECT_VIDEO_API] Response:", apiData);
+
+  return apiData;
+}
+
+/**
+ * ============= APPROVE STAGE 1 DOCUMENTS API =============
+ * Approve all documents in Stage 1 and mark instructor as active
+ * This is called when admin clicks "Approve Stage 1 - Mark Active" button
+ * After all documents are approved, this enables the instructor for Stage 2
+ * POST /v1/admin/instructors/{id}/documents/approve
+ */
+export async function approveStage1Documents(instructorId: string): Promise<any> {
+  const goAccessToken = localStorage.getItem("go_access_token");
+  if (!goAccessToken) {
+    throw new Error("No authentication token. Please login again.");
+  }
+
+  console.log(`[APPROVE_STAGE1_API] Approving all Stage 1 documents for instructor ${instructorId}`);
+
+  const url = `${BACKEND_API}/admin/instructors/${instructorId}/documents/approve`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${goAccessToken}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+  }
+
+  const apiData = await response.json();
+
+  if (!apiData.success) {
+    throw new Error(apiData.message || "Failed to approve Stage 1 documents");
+  }
+
+  console.log(`[APPROVE_STAGE1_API] ✅ Stage 1 documents approved successfully for instructor ${instructorId}`);
+  console.log("[APPROVE_STAGE1_API] Response:", apiData);
+
+  return apiData;
+}
+
 const transformApiVideoToUI = (apiVideo: ApiVideoDetail): PedalVideo => {
   return {
     id: apiVideo.id,
@@ -870,6 +1075,13 @@ export const useFetchInstructorDocuments = (
         console.log("[APPROVAL API] Videos transformed:", videosData);
       }
 
+      // Default verification checklist for Stage 2 (backend doesn't provide this)
+      const defaultVerificationChecklist: VerificationItem[] = [
+        { id: "check_1", text: "Clutch & brake pedals installed on the passenger side", verified: true },
+        { id: "check_2", text: "Mounting firm – no play in the linkage", verified: true },
+        { id: "check_3", text: "Video shows all pedal angles (top, side, bottom)", verified: true },
+      ];
+
       const transformed: InstructorApprovalDetail = {
         id: apiData.instructor.id,
         instructor_id: apiData.instructor.id,
@@ -881,7 +1093,7 @@ export const useFetchInstructorDocuments = (
         stage: isVideosStage ? "stage2_pedal_video" : "stage1_documents",
         documents: isVideosStage ? [] : (apiData.document_details || []).map(transformApiDocumentToUI),
         videos: isVideosStage ? videosData : undefined,
-        verificationChecklist: isVideosStage ? apiData.verification_checklist : undefined,
+        verificationChecklist: isVideosStage ? defaultVerificationChecklist : undefined,
         lastVideoUploadedAt: isVideosStage ? (videosData?.[0]?.uploadedAt || apiData.instructor.applied_at) : undefined,
         approvedCount: isVideosStage ? (apiData.documents?.approved || 0) : (apiData.documents?.approved || 0),
         totalCount: isVideosStage ? (apiData.documents?.total || 0) : (apiData.documents?.total || 0),
