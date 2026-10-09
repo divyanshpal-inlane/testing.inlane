@@ -228,13 +228,18 @@ export default function Home() {
   const homeExperience = learnerHomeExperience(selectedCaseType);
   
   // IMPORTANT: If learner has an LL application that's approved but doesn't have 
-  // an ll_number yet, they should stay in the LL flow regardless of LL_received flag.
-  // This handles cases where LL_received was set prematurely (before ll_number was issued).
+  // an ll_number yet, they should stay in the LL flow UNLESS they have completed
+  // setup (preferences set) or have scheduled lessons. This handles cases where 
+  // LL_received was set prematurely (before ll_number was issued).
   // Check this FIRST before other routing logic.
   const hasLLApplicationInProgress = 
     myLLApplication?.application && 
     !myLLApplication?.application?.ll_number &&
-    learner?.LL_application_approved;
+    learner?.LL_application_approved &&
+    // Don't show LL flow if they've already set preferences OR have scheduled lessons OR have an upcoming lesson
+    (schedulePreferences?.length ?? 0) === 0 &&
+    !(Array.isArray(scheduledLessons) && scheduledLessons.length > 0) &&
+    !LessonData?.upcomingLesson;
   
   if (hasLLApplicationInProgress) {
     return (
@@ -269,9 +274,12 @@ export default function Home() {
 
   // RTO-only stays in the licence journey. Combined learners can start class
   // setup once their LL is received instead of being trapped in the RTO home.
+  // FIX: Don't show RTO LL flow if learner has scheduled lessons or upcoming lesson
+  const shouldShowRTOLLFlow = shouldRenderLLFlow && !LessonData?.upcomingLesson;
+  
   if (
     homeExperience === "rto" &&
-    (shouldRenderLLFlow || (returnedFromSetup && !!nextSetupRoute))
+    (shouldShowRTOLLFlow || (returnedFromSetup && !!nextSetupRoute))
   ) {
     return (
       <div className="flex min-h-screen flex-col">
