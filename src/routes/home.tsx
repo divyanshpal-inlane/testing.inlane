@@ -63,6 +63,7 @@ import {
   shouldRenderLearnerLLFlow,
 } from "@/lib/learner-service";
 import { supabase } from "@/lib/supabaseClient";
+import { useMyLLApplication } from "@/queries/llCustomer";
 // useUpdateScheduleStatus removed — lesson status changes are handled by instructor OTP flow only
 import {
   useLearner,
@@ -122,6 +123,10 @@ export default function Home() {
     isFetching: isServiceEnrollmentFetching,
     isLoading: isServiceEnrollmentLoading,
   } = useLearnerServiceEnrollment({ learnerId: learner?.id });
+  const {
+    data: myLLApplication,
+    isLoading: isLLApplicationLoading,
+  } = useMyLLApplication(learner?.id);
 
   const [showPolicyModal, setShowPolicyModal] = useState(false);
   const { data: scheduleRequests, isLoading: scheduleRequestsLoading } =
@@ -196,7 +201,8 @@ export default function Home() {
     isServiceEnrollmentLoading ||
     isServiceEnrollmentFetching ||
     preferencesLoading ||
-    scheduledLessonsLoading
+    scheduledLessonsLoading ||
+    isLLApplicationLoading
   ) {
     return <div>Loading...</div>;
   }
@@ -220,6 +226,30 @@ export default function Home() {
 
   const selectedCaseType = serviceEnrollment?.case_type;
   const homeExperience = learnerHomeExperience(selectedCaseType);
+  
+  // IMPORTANT: If learner has an LL application that's approved but doesn't have 
+  // an ll_number yet, they should stay in the LL flow regardless of LL_received flag.
+  // This handles cases where LL_received was set prematurely (before ll_number was issued).
+  // Check this FIRST before other routing logic.
+  const hasLLApplicationInProgress = 
+    myLLApplication?.application && 
+    !myLLApplication?.application?.ll_number &&
+    learner?.LL_application_approved;
+  
+  if (hasLLApplicationInProgress) {
+    return (
+      <div className="flex min-h-screen flex-col">
+        <LearnerHomeHeader learnerName={learner?.name} />
+        <main
+          className="scrollbar-none flex h-[calc(100vh-50px)] flex-col overflow-y-auto p-4 pb-20"
+          style={{ scrollbarWidth: "none" }}
+        >
+          <LLFlow />
+        </main>
+      </div>
+    );
+  }
+  
   const shouldRenderLLFlow =
     shouldRenderLearnerLLFlow(selectedCaseType, learner?.LL_received, isDemo) &&
     !(selectedCaseType === "lessons_with_rto" && learner?.LL_received);
@@ -340,7 +370,9 @@ export default function Home() {
   // during payment must never bypass pickup, licence upload and availability.
   // Always show "Continue setup" button instead of auto-redirecting, so learners
   // can see their home page first and choose when to start the setup flow.
-  if (!shouldRenderLLFlow && nextSetupRoute) {
+  // Note: hasLLApplicationInProgress is checked earlier to prevent showing this
+  // when LL is approved but number not yet issued.
+  if (!shouldRenderLLFlow && nextSetupRoute && !hasLLApplicationInProgress) {
     return (
       <div className="flex min-h-screen flex-col">
         <LearnerHomeHeader learnerName={learner?.name} />

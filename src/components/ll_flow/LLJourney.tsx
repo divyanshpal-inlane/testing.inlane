@@ -602,9 +602,14 @@ export default function LLJourney() {
   const setPreferences = () => {
     if (isUpdatingLearner) return;
 
+    // When LL is approved, allow learners to set preferences for classes
+    // But only mark LL_received as true if the LL number is actually issued
+    // This way they can start class setup while waiting for LL number
+    const llNumberIssued = !!application?.ll_number;
+
     updateLearner(
       {
-        LL_received: true,
+        LL_received: llNumberIssued,
         LL_result: true,
         LL_application_approved: true,
         LL_team_appointment_booked: true,
