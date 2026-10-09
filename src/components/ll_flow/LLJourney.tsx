@@ -615,7 +615,13 @@ export default function LLJourney() {
         LL_team_appointment_booked: true,
       },
       {
-        onSuccess: () => navigate("/createSchedule/preferences?type=new"),
+        // Navigate to first step of schedule setup (details/location page)
+        // This ensures learner goes through all 4 steps:
+        // Step 1: /createSchedule/details (pickup location)
+        // Step 2: /createSchedule/onboardingQuestions (start date)
+        // Step 3: /createSchedule/uploadLL (licence upload)
+        // Step 4: /createSchedule/preferences (time slots)
+        onSuccess: () => navigate("/createSchedule/details"),
         onError: () => {
           toast.error("Unable to open your preferences. Please try again.");
         },
