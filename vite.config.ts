@@ -21,6 +21,14 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/go-api/, ""),
       },
+      // Proxy /go-api/api/* → http://localhost:8080/api/* for reupload endpoint
+      // The reupload route is /api/v1/instructor/... (different from others which use /v1/admin/instructors/...)
+      // Must be declared BEFORE the generic /go-api rule so Vite matches it first
+      "/go-api/api": {
+        target: "http://localhost:8080",
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/go-api/, ""),
+      },
       // Proxy /go-api/* → http://localhost:8080/v1/* during local dev.
       // This avoids browser CORS errors when calling the Go service.
       // In production, VITE_BACKEND_API is set to the real Go service base URL

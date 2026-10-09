@@ -994,6 +994,44 @@ export async function approveStage1Documents(instructorId: string): Promise<any>
   return apiData;
 }
 
+export async function reuploadDocument(
+  instructorId: string,
+  documentId: string,
+  frontFile: File,
+  backFile: File
+): Promise<any> {
+  const goAccessToken = localStorage.getItem('go_access_token');
+  if (!goAccessToken) {
+    throw new Error('No authentication token. Please login again.');
+  }
+
+  const formData = new FormData();
+  formData.append('front', frontFile);
+  formData.append('back', backFile);
+
+  const url = `${BACKEND_API}/api/v1/instructor/${instructorId}/documents/${documentId}/reupload`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${goAccessToken}`,
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+  }
+
+  const apiData = await response.json();
+
+  if (!apiData.success) {
+    throw new Error(apiData.message || 'Failed to reupload document');
+  }
+
+  return apiData;
+}
+
 const transformApiVideoToUI = (apiVideo: ApiVideoDetail): PedalVideo => {
   return {
     id: apiVideo.id,

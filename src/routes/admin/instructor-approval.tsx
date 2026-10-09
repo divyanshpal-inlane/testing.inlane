@@ -14,6 +14,7 @@ import {
   rejectDocument,
   rejectVideo,
   approveStage1Documents,
+  reuploadDocument,
   type DocumentType,
   type DocumentSide,
   type ApprovalStatus,
@@ -317,23 +318,13 @@ export default function InstructorApprovalPage(): JSX.Element {
 
   const handleConfirmReupload = async () => {
     if (!reuploadFrontFile || !reuploadBackFile) return;
+    if (!id) return;
 
     setIsReuploadLoading(true);
 
-    // TODO: Replace with actual API call
-    // const formData = new FormData();
-    // formData.append("frontFile", reuploadFrontFile);
-    // formData.append("backFile", reuploadBackFile);
-    // const response = await fetch(
-    //   `/api/instructor-approval/${instructor.instructor_id}/document/${reuploadDocumentId}/reupload`,
-    //   {
-    //     method: "POST",
-    //     body: formData,
-    //   }
-    // );
+    try {
+      await reuploadDocument(id, reuploadDocumentId, reuploadFrontFile, reuploadBackFile);
 
-    // Simulate API call
-    setTimeout(() => {
       // Update document status to pending for re-review
       setDocumentStatuses((prev) => ({
         ...prev,
@@ -368,7 +359,12 @@ export default function InstructorApprovalPage(): JSX.Element {
       }
 
       setIsReuploadLoading(false);
-    }, 1000);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "Failed to reupload document";
+      console.error("Reupload error:", errorMsg);
+      alert(`Error: ${errorMsg}`);
+      setIsReuploadLoading(false);
+    }
   };
 
   const handleReuploadModalClose = () => {
