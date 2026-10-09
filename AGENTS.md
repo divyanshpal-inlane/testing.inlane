@@ -100,6 +100,7 @@ Key functions: `create-razorpay-order`, `verify-razorpay-payment`, `process-paym
     - Unmount abort guard: closing the dialog mid-flight unwinds everything.
     - Previously: auth failure carried on (inverse orphan: Instructor with no auth); zone failure warned only (half-written set); phone column empty on email fallback; no unmount guard.
     - Rollback is all-or-nothing: one `unwind()` helper deletes in reverse order (zone via instructor FK cascade → Instructor → auth user).
+    - **Orphan self-healing (2026-10-07)**: even with unwind, an onboarding run can still die hard between the auth insert and the Instructor insert (crash/browser kill), leaving an orphan `auth.users` row that then blocks re-onboarding with "An auth account already exists for this phone/email". The wizard now auto-cleans it: `findExistingAuthUser` also returns `user_role` (from `user_metadata`), and if the matching account is an `instructor`-role identity with no `Instructor` row under that phone (last-10-digit match), the wizard calls `deleteUser` and continues with a fresh account. Any other role (learner/admin/…) keeps the hard-stop. On the testing build this delete goes through the `admin-instructor-auth` edge function, whose `delete_user` now also permits an _instructor orphan_ (identity's phone has no `Instructor` row, checked server-side) beyond the 30-min rollback window — so old orphans are cleanable, not just the just-created rollback case. Production PR needs the same two edits (they're in `OnboardingWizard.tsx` against `origin/main`; see the ASCII diff generated during the change).
 11. **LocationSearch lazy-loaded**: Separate chunk (~7kB); manual lat/lng inputs work via `Input.insertText` in automation (React 19 value tracker defeats programmatic `.value` sets).
 12. **`instructor_service_zones` polygons are the _only_ area source**: the Sales Availability location search loads polygons from Postgres via `src/lib/sales-dashboard/zones-db.ts` (module cache + in-flight dedupe, `invalidateDbZoneCache()` on zone write) and matches by `instructor_id`, not by name. `SalesDashboard.locMatch` ray-casts each polygon with `pointInPolygon()` and returns `via: "polygon" | "none"`. **Decided 2026-09-29: polygon-only, no proximity fallback** — the 3 km centroid fallback (`matchLocation`, `PROXIMITY_RADIUS_KM`) is intentionally dead; the dotted 3 km ring + its legend were deleted from `LocationSearch.tsx` because they told the user a proximity search happened when it never does. `public/instructors.kml` is **backfill input only**. `Instructor.areas`/`radius` are legacy and only read as a fallback in `availability.ts` (shared with out-of-repo edge functions — do not strip). See "Instructor Service-Area Polygons".
 13. **Google Maps: one script, no legacy Loader**: `src/utils/googleMaps.ts` injects the Maps script itself and resolves by polling for real constructors. Do **not** reintroduce `@googlemaps/js-api-loader`'s `Loader` — its v1 `__onCallback` never fires on the `v=weekly` bootstrap, so it re-injects forever (we measured 18 script tags, "loaded multiple times", `Loader.provide not called by module 'poly'`). Also note `window.google.maps` exists as an _empty_ namespace before classes attach, so readiness must check `typeof gm.Map === "function"`. Components needing extra classes pass them: `loadMaps(["Polygon", "Circle"])`.
@@ -118,17 +119,36 @@ Key functions: `create-razorpay-order`, `verify-razorpay-payment`, `process-paym
 - Startup fetches only `app_settings` (key=`booking_flow`) + light instructor index — **no Schedule queries on load**
 - Geospatial filtering via **Postgres polygons** (`instructor_service_zones`) — ray-casting against each instructor's ring, resolved by `instructor_id`. This is the live read path; `public/instructors.kml` is backfill input only
 - On-break instructors excluded by default but appear with real slots if matched by location
-- Config in `app_settings` table: `booking_days_ahead`, `view_days_ahead`, `slotStart`, `slotEnd`, `gridMinutes`, `instructor_gap_minutes`, `excluded_schedule_statuses`
+- Config in `app_settings` table: `booking_days_ahead`, `view_days_ahead`, `slotStart`, `slotEnd`, `gridMinutes`, `instructor_gap_minutes`, `excluded_schedule_statuses`. `config.ts` **fails closed**: if the `booking_flow` row is missing/incomplete it throws (`Couldn't load availability: booking_flow configuration is missing or incomplete in app_settings (enabled:false).`) rather than using hardcoded fallbacks
+- Roster is persisted per signed-in account: `localStorage` keys `lane-sales-dashboard-roster:v2:<owner>` (legacy `lane-sales-dashboard-roster` / `lane-sales-dashboard-search` are deleted on load). Only instructor **IDs** persist — the search text deliberately does not
 
 ### Tentative Slot Booking Feature (Production)
 
 **Workflow**: Hover → slot info popup; **single click on ANY slot** → the **left** `.slot-panel` (FREE → `TentativeBookingModal` with form; BOOKED/TENTATIVE/PAUSED → `.slot-panel-detail` with that slot's badge, detail lines and Override/Delete). No double-click anywhere. Form fields: customer name, phone, sales agent, payment status, address, course. On submit: creates `Schedule{isTentative:true, status:'hold', tentative_details:{...}}` → toast 1.5s → grid reloads.
 
-**Component prop chain**: `SalesDashboard.handleSlotSelect` (useCallback) → `AvailabilityGrid.onSelect` → `InstructorRowGroup.onSelect` → `SlotCell.onSelect` / `MiniTimeRow.onSelect` → `SlotCell.onSelect` (the `<td>`'s `onClick`). Handler validates via `validateOneHourBlock()` (O(1) Map lookup) before opening the form.
+**Component prop chain**: `SalesDashboard.handleSlotSelect` (useCallback) → `AvailabilityGrid.onSelect` → `InstructorRowGroup.onSelect` → `SlotCell.onSelect` (the roster grid `<td>`'s `onClick`) or `WeekTimetable.onSelect` (the expanded timetable cell's `onClick`). Handler validates via `validateOneHourBlock()` (O(1) Map lookup) before opening the form.
 
 **Modal**: `src/components/admin/sales-dashboard/TentativeBookingModal.tsx` — renders only when open; uses existing `normalizePhone()`, phone masking respects `view_unmasked_phone_numbers` permission. No new API/edge function — direct Supabase insert.
 
 **Dual free grids** (buffer fix): `freeGrid` (60-min class starts for booking engine) + `displayGrid` (30-min slots for display). `useSalesData.ts` builds both; dashboard uses `displayGrid` for cells, totals, popovers. Buffer popover shows "Buffer for Booked/Completed class".
+
+### Expanded weekly timetable (reference replica — 2026-10-09)
+
+The row "Schedule" expansion is no longer the transposed month `<table className="mini">`. It is now `WeekTimetable` in `SalesDashboard.tsx`: a **pixel-for-pixel copy** of Instructor Management's "View Schedule" grid (`InstructorSchedulePage` in `src/routes/admin/instructors.tsx`) — 7 consecutive day columns × 18 hourly rows (05:00–23:00), same Tailwind classes, `TT_PURPLE_DARK`/`TT_BLOCK` palette, `text-[8px]/[9px]/[10px]` typography, `border-slate-50` cell borders, `hover:bg-slate-200`, dashed hour midline, and `getScheduleColors()`-equivalent block classes.
+
+- Week derivation: `weekDates = windowDates.slice(indexOf(panelAnchor), +7)` — anchored on `panelAnchor` (a day, not a month) and clamped to the loaded window. `windowDates` is the full past+future range; the roster grid's `dates` stays forward-only.
+- **Deliberate additions/changes vs the reference**: (a) availability shading in the empty halves — a non-free 30-min half gets a slate tint (`ttHalfFill`, `#c0c0c1`) so a taken slot is visible even without a drawn class; free reads white (the reference's own "empty = bookable" language). (b) The reference's synced `overflow-y-auto` scroll containers are dropped — rows are content-driven (`minmax(44px, 1fr)` with no fixed height), so the grid has no internal vertical scroll (product requirement: one external page scroll). (c) The legend (Booked/Tentative/Ongoing/Done (OTP)/Done (manual)/Paused/Payment Due) **moved out of the expanded panel into the top toolbar** (`.topbar-legend`, inside `.controls`, above `.controls-row`) so it is visible without expanding a row; `.controls` is now a right-aligned column. Chip typography (9px uppercase slate-500) lives on `.tt-legend-item` itself, since the old `.detail-legend` wrapper is gone. `.detail-legend` must not be reintroduced.
+- Lesson blocks are positioned exactly like the reference: `top = (startMinute - hour*60)/60`, `height = (endMinute - startMinute)/60`, `left = idx*10%`, `width 90%`, `minHeight 24px`, `overflow-visible` so a class bleeds into the next hour. `ttBlockClass(kind, statusLabel)` maps `SlotInfo.kind`/`statusLabel` → the reference's exact indentured classes.
+- **Rolling 7-day panel nav + past dates (2026-10-09).** The expanded panel header is now Instructor Management's `<< < Today > >>` control (lucide `ChevronsLeft`/`ChevronLeft`/`ChevronRight`/`ChevronsRight` + a `Today` button; classes `.detail-month-btn`/`.detail-today-btn`/`.detail-month-label`, nav grid `28px 28px auto 28px 28px auto`). It **replaced** the old month `<label>` + day-strip nav; the label is `formatPanelRange()` of the 7 shown days. State: `panelAnchorInput` (clamped by `panelMinAnchor`/`panelMaxAnchor`), `weekDates = windowDates.slice(indexOf(panelAnchor), +7)`, handlers `panelPrevWeek`/`panelNextWeek`/`panelPrevDay`/`panelNextDay`/`panelToday`. `useSalesData.ts` now exposes `data.dates` (forward-only, unchanged for the main grid) **and** `data.windowDates` (full past+future window, built from the 1st of the current month through `view_days_ahead`); `forwardDatesRef` slices off the future-only part for `dates`. The main roster grid's month/day nav is untouched.
+- **Columns fit the visible panel (2026-10-09).** The 7 day-columns must fill the panel's visible width, not the much wider roster table. `.detail` is `position: sticky; left: 0; width/max-width: var(--gc-viewport-w, 100%); overflow: hidden`, and a `useLayoutEffect` sets `--gc-viewport-w` from `gridWrapRef.current.clientWidth` (kept fresh with a `ResizeObserver`). `WeekTimetable` is `grid-cols-7` so the columns fill that width; the roster grid keeps its own horizontal scroll.
+- Playwright coupling changed: `.detail-row .mini` → `.detail-row .week-timetable` (`tests/playwright/sales-dashboard.spec.ts:547`). The Schedule-toggle `aria-label`/`aria-expanded` contract is unchanged.
+- The old `MiniTimeRow`/`MiniTimeRowProps` and `miniFreeCounts`/`NO_FREE_COUNTS` are removed. `SlotCell`'s `expandedCalendar` prop and its `mini-schedule-card` branch are now dead (never passed `true`) but left in place; the `.mini`/`.mini-schedule-*` CSS is correspondingly dead (`.swatch` is **still live** — the adding-slot legend at `SalesDashboard.tsx:3886-3901` uses it).
+
+**No page jump when opening a booking (2026-10-09).** Clicking a blank slot used to shift the whole page vertically ~3 times. Root cause: `pendingSlots` → `lockedInstructorId` flips **synchronously**, so `gridRows` collapses to the one instructor in paint #1 (page shrinks). The auto-expand `useEffect` only _then_ runs, via `useTransition`, committing a short `detail-loading` placeholder (paint #2) and finally the tall timetable (paint #3). Fixes, all in `SalesDashboard.tsx`, keep the collapse + expansion in **one** commit and restore scroll: (a) `expandedForRender` `useMemo` derives the locked instructor as expanded, so the row renders expanded in the same render as the collapse (the `expanded` set is still written by the effect, so cancelling leaves the row open — the Playwright "hides the other rows" spec depends on this); (b) `InstructorRowGroupInner` shows the `detail-loading` placeholder only when `isExpandPending && !isExpanded`, so the auto-open path never flashes it; (c) `handleSlotSelect` captures `window.scrollY` into `preserveScrollRef` on a fresh booking and a dependency-less `useLayoutEffect` re-applies it (clamped to the new max) **before paint**. Do not reorder these: dropping (a), re-gating the placeholder on `isExpandPending` alone, or moving the scroll capture out of the click handler each reintroduce the visible jump.
+
+### Main grid colour theme
+
+The roster grid is themed to match the Schedule panel. Open ("free") cells are **white** (`--gc-slot-free-fill: #ffffff`, `--gc-slot-free-hover: #e2e8f0`), exactly like the timetable's empty cells — the reference has no green free state. Busy/plain non-free cells use a slate band (`--gc-band-bg: #c0c0c1`, was `#cbd5e1`, `#e2e8f0`, then `#f1f5f9` — slate-100 was too close to white to tell a taken slot from an open one at a glance; `#c0c0c1` is the exact reference tone, #030508 at 25% over white); grid lines moved to the slate family (`--gc-grid-line: #e2e8f0`, `--gc-grid-line-strong: #cbd5e1`) and `--gc-hover` to slate-200. Tentative/Booked are the reference's **exact** hexes (previously softened to amber-200/indigo-200): tentative `#fbbf24`/hover `#f59e0b`/border `#d97706`/text `#451a03`; booked `#6366f1`/hover `#4f46e5`/border `#4338ca`/text `#ffffff`. `.cell-half` (free but not bookable as a full hour) now hatches with the slate free-hover token so it stays visible on white. Structure is untouched. The free fill/hover and the tentative/booked tokens are **not** overridden in the dark block (so dark mode also shows white-free + saturated reference blocks, matching the always-light timetable); dark mode keeps its own grid-line/band/hover values.
 
 ### Implementation Details (Slot Booking + Tentative Blocks)
 
@@ -153,10 +173,11 @@ Key functions: `create-razorpay-order`, `verify-razorpay-payment`, `process-paym
 **Slot Interaction**:
 
 - Hover: `SlotCell` shows `slot-pop` with `resolveInfo()` details (free/booked/unavailable/buffer)
-- **Single click** (replaced double-click on 2026-10-05): `handleSlotSelect` always stores the slot in `selectedSlot`, and only when `free` validates the 1-hour block and opens `TentativeBookingModal` in the **left** `.slot-panel`. A taken slot renders `.slot-panel-detail` (badge + the same `info.detail` lines + Override/Delete) instead. `onSelect` replaces the old `onDoubleClick` prop all the way down (`AvailabilityGrid` → `InstructorRowGroup` / `MiniTimeRow` → `SlotCell`).
+- **Single click** (replaced double-click on 2026-10-05): `handleSlotSelect` always stores the slot in `selectedSlot`, and only when `free` validates the 1-hour block and opens `TentativeBookingModal` in the **left** `.slot-panel`. A taken slot renders `.slot-panel-detail` (badge + the same `info.detail` lines + Override/Delete) instead. `onSelect` replaces the old `onDoubleClick` prop all the way down (`AvailabilityGrid` → `InstructorRowGroup` → `SlotCell` for the roster grid, and `InstructorRowGroup` → `WeekTimetable` for the expanded weekly timetable).
 - `TentativeBookingModal` gained `variant?: "modal" | "panel"`. Panel mode strips the centred-dialog shell with **compound** selectors `.modal-backdrop.modal-panel-host` / `.modal.modal-panel` — a plain `.modal-panel` loses to `.modal-backdrop`/`.modal`, which are defined _later_ in the same stylesheet, and the form silently reverts to a 680px centred card over the calendar.
 - Cells are click targets but still hover-driven for the popover: `.cell` already carries `cursor: pointer`.
 - **The hover popover hides the customer's address; the side panel keeps it.** `resolveInfo` pushes it as `Area: <address>` into the shared `info.detail` array, and the popover filters that one line out by prefix (`ADDRESS_DETAIL_PREFIX` in `SalesDashboard.tsx`, which both push sites also template from so the two cannot drift). The panel renders the unfiltered `detail`. Rationale: a full Google-Places address is the longest string in a detail line, so in a popover sized to the grid it became a tall ragged block covering neighbouring instructors; the panel is a reading surface, the popover is a glance. **Do not** "simplify" this by dropping the address from `detail` — that deletes it from the panel too.
+- **The side panel renders an Instructor-Management-style card for a taken slot.** `SlotInfo.card?: SlotCardRow[]` (`{ label, value }`) is built by `buildSlotCard()` and, when present, renders above the panel's remaining lines — the popover always keeps using `detail`. Rows: Time (12-hour, via `minutesTo12Hour` in `validation.ts`, `hh:mm AM/PM`), Instructor, `Learner: <name> (Class <lessonNumber>)`, Phone, Location, Course, Description, Lead, Payment. A real booked/completed class shows literal `N/A` for description/lead/payment (matching Instructor Management's non-tentative card); a tentative hold fills them from `rawTentativeDetails` (`leadName`, `description`, its `payment_status`). **The card adds info, it does not replace it**: any panel lines the card doesn't already cover are kept as `SlotInfo.panelDetail?: string[]` and rendered in a second `.slot-panel-detail-list` below the card (e.g. a tentative hold's override/creator notes; the pending-payment "on hold until payment completes" note). Nothing the panel used to show is removed. `BlockDetail` gained `learnerPhone`; the `Learner` lookup in `useSalesData.ts` now selects `id, name, area, phone, pick_up_location` and `area` prefers the full `pick_up_location`. The popover still reads only `detail`. `dt`/`dd` rows are a flex two-column layout in `.slot-panel-detail-row`.
 
 ### Two traps in the left panel (both hit 2026-10-05)
 
@@ -165,12 +186,33 @@ Key functions: `create-razorpay-order`, `verify-razorpay-payment`, `process-paym
 
 **Tentative Booking Modal** (`src/components/admin/sales-dashboard/TentativeBookingModal.tsx`):
 
-- Form fields: customer name, phone (normalized), sales agent, payment status (unpaid/half_paid/full_paid), address, course
+- Renders **no `<form>`** (a `<div>`, `:643-645`); submit is `<button onClick={handleSubmit}>` — see the nested-form note in the E2E-flake section
+- Form fields: customer name, phone (normalized), sales agent (read-only, locked to the signed-in account), payment status (unpaid/half_paid/full_paid), address (Google Places autocomplete), course
 - Courses: demo, 4/5/6/10/15/20-class courses
 - On submit: inserts into `Schedule` table with `isTentative=true`, `status='hold'`, `tentative_details` JSON
 - `learner_id`, `course_id`, `lesson_id` set to `null` (sales creates hold only, Operations confirms later)
 - Uses `normalizePhone()` from `validation.ts`
 - TanStack Query `useMutation` for insert, auto-closes on success, triggers dashboard `reload()`
+- Only **New Customer** — the reuse/picker/follow-up modes were removed (pinned by the Playwright suite)
+- `AddressAutocomplete.tsx`: lazily `importLibrary("places")` (the bootstrap does not request `places`, so `google.maps.places` is undefined until then); degrades to a plain input if no key/offline; forwards `id` so the `<label htmlFor="customerAddress">` resolves; `preventDefault()`s Enter
+
+**Multi-class batch + one-instructor lock** (`SalesDashboard.tsx`):
+
+- A batch is a `pendingSlots[]` list of `SlotPick`s; `lockedInstructorId` is derived from the batch, not stored. Opening a booking opens that instructor's **Schedule** view (`expandRow`) and hides every other roster row (`gridRows` filters to the locked id, `:3116-3118`). Cancel restores the full roster — the lock is derived, so it is never sticky
+- Clicking a slot for a **different** instructor while a batch is open is refused with `locked_instructor` (`:2277`)
+- `⚡ Bulk Add` (`generateBulkSlots` / `screenBulkSlot` in `src/lib/sales-dashboard/bulkSlots.ts`): `single` | `daily` (same time on the NEXT N days) | `hourly` (same day, NEXT N hours); count capped at **15**; mirrors Instructor Management's `AddTentativeSchedule.handleApplyBulkSchedules`. `screenBulkSlot` is the pure validity + in-batch-overlap check; the caller layers the DB `checkInstructorAvailability` on top. The Bulk Add overlay is **portalled to `document.body`** (see the sticky-panel trap above)
+
+**Override vs Delete (fail-closed)** — `SalesDashboard.tsx:2957-3039`:
+
+- **Override** is offered only for `status='hold'` **and** unpaid; it calls the `override_tentative_slot` RPC (`sql/override_tentative_slot.sql`), which hard-requires `v_old.status = 'hold'` server-side. Offering it for a `status:'booked'` unpaid tentative row (Instructor-Management format) would fail server-side, so it is not shown
+- **Delete** is gated to the **creator**: `tentative_details.sales_agent` must equal the signed-in account's name (trimmed, case-insensitive). A row with **no** recorded `sales_agent` is **not** deletable — it fails **closed** (an earlier version treated unknown creator as "anyone may delete", which let any account delete another module's real customer hold). Delete is a plain row delete, not status-gated; the confirm dialog is in-app (`role="alertdialog"`), not native `window.confirm`
+- `resolveInfo()` classifies a row as tentative when `isTentative` is true regardless of `status`, so Instructor-Management rows (`status:"booked"` + `isTentative:true` + `tentative_details.paid_info`) render as yellow **Tentative**, not purple Booked, and `paymentStatus` reads both `payment_status` and `paid_info`
+
+**`src/lib/sales-dashboard/` pure libs** (no React/Supabase unless noted):
+
+- `conflict.ts` — `classifySlotConflict()` returns `free | direct | buffer`; a `buffer` conflict is waivable by `bufferWaivedForCustomer()` **only** when every conflicting block is a Sales-created tentative hold (`status==='hold' && isTentative`) whose phone matches the customer being booked. A real booking/payment-pending slot on the same phone never waives. Tested by `tests/backend-suite.mjs` C2/C3
+- `workingHours.ts` — `inferInstructorWorkingHours()` is a **display-only** heuristic that reverse-engineers a personal daily window from bracket entries in `Instructor.unavailability` (e.g. blocks 00:00-06:00 + 18:00-23:59 ⇒ "06:00-18:00"). It calls the same `unavailabilityIntervalsForDate()` the engine uses, requires stability ~2 years out (`STABILITY_PROBE_DAYS=728`) so one-off leave isn't mistaken for standing hours, and clamps to the global `booking_flow` window. Never changes availability math
+- `maps.ts` — `loadMapsApi()` delegates to `googleMapsLoader.loadMaps()` (never injects its own script); `geocodeText()` uses `gm.importLibrary("geocoding")` and prefers a specific-place result (`establishment`/`point_of_interest`/`premise`/`subpremise`) over `results[0]`; `centerFor()` falls back to Bengaluru
 
 **Existing Tentative Schedule Reuse**:
 
@@ -412,11 +454,17 @@ was itself nested inside the onboarding/instructor `<form>` on the admin pages,
 so the browser dispatched the submit to both ancestors (the same hazard already
 documented under "Instructor Service-Area Polygons").
 
-**The fix** keeps the modal's own `<form>` for Enter-to-submit, but stops the
-implicit submission from reaching an outer form: a `submit` handler calls
-`preventDefault()` and submits programmatically via an explicit
-`onClick` path, so exactly one insert is issued per click regardless of how many
-`<form>` ancestors exist.
+**The fix (superseded): the modal no longer renders a `<form>` at all.** The
+booking body was changed to a plain `<div>` (`TentativeBookingModal.tsx:643-645`,
+comment: "Use div instead of `<form>` to avoid nested-form double-submit … a
+native `<form onSubmit>` would be nested and fire twice") and the submit control
+is `<button onClick={handleSubmit}>` with no `type="submit"`, so there is no
+implicit form submission left to duplicate regardless of how many `<form>`
+ancestors exist. An earlier iteration did keep the modal's `<form>` and
+`preventDefault()`ed a `submit` handler — do **not** restore that shape; the
+`<div>` is the deliberate end state. Enter-to-submit within the fields is
+handled per-input (`AddressAutocomplete` and the address search box both
+`preventDefault()` Enter) rather than by a form.
 
 Also note `clearSeededDay()` must run **before** `searchAndAdd()`: adding the
 instructor is what triggers the grid's `Schedule` fetch for the date, so a wipe
@@ -425,6 +473,56 @@ database no longer has, and the modal then refuses the slot client-side
 (`"Class 1 (…) is already booked. Remove or change it and try again."`). That
 second message is a **third** rejection path and `fillAndSubmitTentative()` now
 matches all three (success / `23P01` / client-side re-validation).
+
+## Sales Dashboard scaling hardening (2026-10-07)
+
+Measured on the live DB (`scripts/load-test-sales-dashboard.mjs`, read-only
+replica of the exact query shapes): **50 concurrent cold-start dashboards pass
+today with 0 errors** — worst realistic case (50 users × 30 instructors,
+400-day window, 2-page chunks) at p99 ≤ 1.23 s per phase and ~2 s wall for all 50. Verified in **both** identity modes: `--auth` replays the app's exact
+Supabase phone login (`+91..`/`91..`/bare) and runs every request through that
+user's JWT + RLS (real per-user overhead — wall ~5.7–6.0 s, keyset
+`schedule_window` p99 1788 ms vs current 2000 ms, still 0 errors); the default
+service-role mode isolates the pure SQL/PostgREST cost. Postgres is not the
+bottleneck at the current 28,364-row `Schedule`. The real 50-user risks were the
+ones fixed here:
+
+1. **`[object Object]` error text + permanent match failure** (the "RT Nagar"
+   report): a mount-time `Promise.all([fetchDbZones(), companyIds,
+loadInstructorIndex()])` rejection set `dbZones=null`, so **every** location
+   search returned no matches (not just RT Nagar — its centroid is inside
+   `Syed Rizwanuddin`'s polygon) and showed `[object Object]` because PostgREST
+   errors are plain objects, not `instanceof Error`. Fixes: shared
+   `errorToMessage()` (`src/lib/sales-dashboard/validation.ts`, unwraps
+   `{message, code}`/`{data, error}` and threads the PostgREST `code` e.g.
+   23P01) applied at every stringify site (`SalesDashboard.tsx`, `useSalesData.ts:551/671/687`),
+   plus a **Retry** button in `LocationSearch` (`onRetryZones`) that re-runs
+   the mount fetch by bumping `zonesRetryKey` — the zone module cache only
+   installs on success, so a re-run is always a fresh query.
+2. **Realtime thundering herd**: with N dashboards open, one Schedule write
+   made every dashboard re-fetch the full 400-day window, and a bulk-add
+   burst fired the re-fetch per event. The `useSalesData` realtime handler now
+   coalesces events into a `Set` and refreshes each touched instructor **once**
+   per `REALTIME_DEBOUNCE_MS` (400 ms) burst. Direct post-booking
+   `refreshInstructors()` calls stay immediate.
+3. **Schedule window pagination**: switched from `order(id).range(offset,…)`
+   (OFFSET, re-scans skipped rows on page 2+) to **keyset**
+   (`id > lastId … limit`), validating identical result sets against the live
+   data. Only ~2 pages deep today; strictly better as the window grows.
+4. **Missing index**: the dashboard query
+   (`instructor_id IN + date BETWEEN + status NOT IN + ORDER BY id`) has no
+   matching index — the GiST `schedule_no_overlap_new_rows` is partial
+   (`id > 19065`) and unusable. Migration
+   `20261007_000000_add_schedule_dashboard_window_index.sql`
+   (`(instructor_id, date, id)`) was **applied manually 2026-10-07** (SQL editor);
+   the pre-index load-test numbers in the bullet above are the baseline to compare
+   against on a re-run.
+
+Run the load test with `node scripts/load-test-sales-dashboard.mjs --users 50
+[--strategy both]`; `--strategy current|keyset` isolates one pagination mode.
+Add `--auth` to run under the Playwright user's real JWT + RLS (reads
+`tests/playwright-credentials.local.json`, logs in exactly like
+`auth-context.tsx` does).
 
 ## Performance Baselines
 
@@ -480,7 +578,7 @@ Why: `OnboardingWizard.tsx` used to call `supabaseAdmin.auth.admin.*` from the b
 - `OnboardingWizard.tsx` (testing/local only): imports `supabaseAdmin` + `findAuthUser` from the proxy and `findExistingAuthUser` calls `findAuthUser`. Production keeps the original `@/context/auth-context` import and the `listUsers` loop. Both edits carry the marker below.
 - **Marker**: every testing-only edit has `TESTING ONLY / REMOVE BEFORE PRODUCTION PR`, so the existing `grep -r "REMOVE BEFORE PRODUCTION"` check also finds it.
 - **Still on the admin key (fails on testing)**: `changePassword` in `auth-context.tsx` (`updateUserById`). Not part of onboarding; left alone.
-- **Deploy (manual, live project, additive)**: `supabase functions deploy admin-instructor-auth`. Then push to `testing`. The function is harmless to production (nothing there calls it) but it is deployed to the shared project.
+- **Deploy (manual, live project, additive)**: `supabase functions deploy admin-instructor-auth`. Then push to `testing`. The function is harmless to production (nothing there calls it) but it is deployed to the shared project. **Deployed 2026-10-08** — onboarding on the testing site routes admin-auth calls through it; if the testing onboarding ever shows `Failed to send a request to the Edge Function`, check the function is still deployed (`curl -X POST https://csnzgfzxnscumvjefpon.functions.supabase.co/admin-instructor-auth` should NOT return `404 NOT_FOUND`) and redeploy with `--project-ref csnzgfzxnscumvjefpon`.
 - Verified before handing over: `deno check`, and a 24-case Deno harness against a fake Supabase (anon-only and non-admin rejected; caller-supplied role ignored; old, non-instructor and malformed ids refused; only phone fields forwarded; key never in a response). The harness lives outside the repo; a real end-to-end run needs the function deployed.
 
 **Local git hooks (never part of a PR)**: `.git/hooks/pre-commit`, `pre-push` and `guard.mjs`. They are not versioned, so on a fresh clone they must be recreated.
