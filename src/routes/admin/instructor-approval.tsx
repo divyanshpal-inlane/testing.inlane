@@ -139,6 +139,15 @@ export default function InstructorApprovalPage(): JSX.Element {
       console.log(`[REJECTION_MODAL] Auto-filled message for reason: ${selectedReason.label}`);
     }
   }, [selectedRejectionReason]);
+
+  // Auto-fill video rejection message based on selected reason
+  useEffect(() => {
+    const selectedReason = PEDAL_VIDEO_REJECTION_REASONS.find((r) => r.id === selectedVideoRejectionReason);
+    if (selectedReason) {
+      setVideoRejectionMessage(selectedReason.suggestedMessage);
+      console.log(`[VIDEO_REJECTION_MODAL] Auto-filled message for reason: ${selectedReason.label}`);
+    }
+  }, [selectedVideoRejectionReason]);
   
   // ? NOW we can have conditional returns AFTER all hooks
   // Show loading state
@@ -424,24 +433,25 @@ export default function InstructorApprovalPage(): JSX.Element {
 
   const handleConfirmRejectVideo = async (
     videoId: string,
-    reason: string,
-    message: string,
-    backendTag: string
+    reasonCode: string,
+    message: string
   ) => {
     if (!id) return;
 
     try {
-      console.log("[UI] Admin rejecting video:", { videoId, reason, message });
-      const response = await rejectVideo(id, videoId, reason, message);
+      console.log("[UI] Admin rejecting video:", { videoId, reasonCode, message });
+      
+      // Use the message as provided, or empty string if not provided
+      const response = await rejectVideo(id, videoId, reasonCode, message);
       console.log("[UI] Video rejected successfully:", response);
 
       // Update video status to rejected
       setVideoStatuses((prev) => ({ ...prev, [videoId]: "rejected" }));
-      alert(`? Video rejected! Instructor will be notified to re-upload.`);
+      alert(`✓ Video rejected! Instructor will be notified to re-upload.`);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to reject video";
       console.error("[UI] Error rejecting video:", errorMsg);
-      alert(`? Error: ${errorMsg}`);
+      alert(`✗ Error: ${errorMsg}`);
     } finally {
       // Close modal and reset states
       setIsVideoRejectionModalOpen(false);
@@ -1408,9 +1418,8 @@ export default function InstructorApprovalPage(): JSX.Element {
                     if (reason && rejectionVideoId) {
                       handleConfirmRejectVideo(
                         rejectionVideoId,
-                        reason.label,
-                        videoRejectionMessage,
-                        reason.backendTag
+                        reason.backendTag,
+                        videoRejectionMessage
                       );
                     }
                   }}

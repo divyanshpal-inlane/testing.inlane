@@ -135,7 +135,7 @@ export const PEDAL_VIDEO_REJECTION_REASONS: RejectionReason[] = [
   {
     id: "footage_too_dark",
     label: "Footage too dark",
-    backendTag: "too_dark",
+    backendTag: "footage_too_dark",
     suggestedMessage: "The footage is too dark to see the pedal mechanism clearly. Please re-record in better lighting conditions.",
   },
   {
@@ -157,7 +157,7 @@ export const PEDAL_VIDEO_REJECTION_REASONS: RejectionReason[] = [
     suggestedMessage: "One or more required camera angles are missing. Please re-record showing all required views.",
   },
   {
-    id: "other_video",
+    id: "other",
     label: "Other",
     backendTag: "other",
     suggestedMessage: "Please add a note below explaining the rejection reason.",
@@ -913,17 +913,20 @@ export async function rejectDocument(instructorId: string, documentId: string, r
 /**
  * ============= REJECT VIDEO API =============
  * Reject a single video and ask instructor to re-upload
+ * Endpoint: POST /admin/instructors/{id}/pedal-videos/{video_id}/reject
+ * (Vite proxy rewrites /go-api/* to /go-api/v1/*)
+ * Request body: { reason_code, message }
  */
-export async function rejectVideo(instructorId: string, videoId: string, reason: string, message: string): Promise<any> {
+export async function rejectVideo(instructorId: string, videoId: string, reasonCode: string, message: string): Promise<any> {
   const goAccessToken = localStorage.getItem("go_access_token");
   if (!goAccessToken) {
     throw new Error("No authentication token. Please login again.");
   }
 
   console.log(`[REJECT_VIDEO_API] Rejecting video ${videoId} for instructor ${instructorId}`);
-  console.log(`[REJECT_VIDEO_API] Reason: ${reason}, Message: ${message}`);
+  console.log(`[REJECT_VIDEO_API] Reason Code: ${reasonCode}, Message: ${message}`);
 
-  const url = `${BACKEND_API}/admin/instructors/${instructorId}/documents/${videoId}/reject`;
+  const url = `${BACKEND_API}/admin/instructors/${instructorId}/pedal-videos/${videoId}/reject`;
 
   const response = await fetch(url, {
     method: "POST",
@@ -932,7 +935,7 @@ export async function rejectVideo(instructorId: string, videoId: string, reason:
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      reason_code: reason,
+      reason_code: reasonCode,
       message: message,
     }),
   });
