@@ -20,6 +20,8 @@ interface LocationSearchProps {
   >;
   onLocate: (lat: number, lng: number, label: string) => void;
   onClear: () => void;
+  /** Re-run the zones/roster mount fetch after a failure (see notes below). */
+  onRetryZones?: () => void;
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
   theme?: "light" | "dark";
@@ -103,6 +105,7 @@ export default function LocationSearch({
   zoneInfo,
   onLocate,
   onClear,
+  onRetryZones,
   collapsed = false,
   onToggleCollapsed,
   theme = "light",
@@ -514,7 +517,16 @@ export default function LocationSearch({
 
           {zonesError && (
             <p className="loc-status error">
-              Couldn&apos;t load instructor zones: {zonesError}
+              Couldn&apos;t load instructor zones: {zonesError}.
+              {onRetryZones && (
+                <button
+                  type="button"
+                  className="loc-btn loc-retry"
+                  onClick={onRetryZones}
+                >
+                  Retry
+                </button>
+              )}
             </p>
           )}
           {!zonesError && status === "loading" && (

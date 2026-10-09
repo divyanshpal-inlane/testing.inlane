@@ -17,18 +17,22 @@
   color-scheme: light;
   --gc-bg: #ffffff;
   --gc-surface: #f4f4f5;
-  --gc-hover: #e4e4e7;
+  --gc-hover: #e2e8f0;
   --gc-detail: #fafafa;
   --gc-border: #e4e4e7;
   /* Dedicated grid-line tokens (scoped to the timeline grid only, not
-     --gc-border generally, which is used for buttons/inputs everywhere and
-     shouldn't get darker just for this). One step past --gc-border for the
-     regular 30-minute lines, another step past that for hour boundaries
-     and instructor-row separators, so the grid keeps a clear hierarchy
-     without any single line becoming heavy. */
-  --gc-grid-line: #d4d4d8;
-  --gc-grid-line-strong: #a1a1aa;
-  --gc-band-bg: var(--gc-detail);
+     --gc-border generally, which is used for buttons/inputs everywhere).
+     Slate family, lightened to sit under the main grid the same way the
+     Schedule panel's timetable lines do. Still two steps so hour boundaries
+     and instructor-row separators keep a clear hierarchy without any single
+     line becoming heavy. */
+  --gc-grid-line: #e2e8f0;
+  --gc-grid-line-strong: #cbd5e1;
+  /* Busy/plain (non-free) cells: a slate tint, so they read as unavailable
+     now that open cells are white (matching the Schedule panel) rather than
+     green. Instructor Management's timetable greys an unavailable slot with
+     #030508 at 25% over white (~#c0c0c1), so this is the exact reference tone. */
+  --gc-band-bg: #c0c0c1;
   /* Shared height for every topbar control -- same in both themes, so only
      declared once here rather than repeated in the dark block below. */
   --gc-control-h: 32px;
@@ -59,25 +63,29 @@
   --gc-purple-fill: #6366f1;
   --gc-purple-hover: #4f46e5;
   --gc-purple-text: #ffffff;
-  /* Softer calendar-only fills. The existing semantic tokens above remain
-     unchanged for dashboard controls, notices, and booking actions. */
-  --gc-slot-free-fill: #bbf7d0;
-  --gc-slot-free-hover: #86efac;
-  --gc-slot-free-border: #4ade80;
-  --gc-slot-free-text: #166534;
-  --gc-slot-tentative-fill: #fde68a;
-  --gc-slot-tentative-hover: #fcd34d;
-  --gc-slot-tentative-border: #fbbf24;
-  --gc-slot-tentative-text: #78350f;
-  --gc-slot-booked-fill: #c7d2fe;
-  --gc-slot-booked-hover: #a5b4fc;
-  --gc-slot-booked-border: #818cf8;
-  --gc-slot-booked-text: #312e81;
-  /* Keep paused and unavailable in their existing neutral/slate family,
-     balanced to the same medium-pastel range as the other slot states. */
-  --gc-paused-fill: #cbd5e1;
-  --gc-paused-border: #94a3b8;
-  --gc-unavailable-fill: #d4d4d8;
+  /* Calendar-only fills, themed to match the Schedule panel's timetable.
+     Tentative/Booked are the EXACT hexes from Instructor Management's
+     "View Schedule" (getScheduleColors()): tentative = border-amber-600
+     bg-amber-400; booked = border-indigo-700 bg-indigo-500 text-white.
+     Open ("free") cells are WHITE, exactly like the timetable's empty cells
+     (the reference has no green free state); busy/plain cells get the slate
+     band above. Paused/unavailable stay neutral. */
+  --gc-slot-free-fill: #ffffff;
+  --gc-slot-free-hover: #e2e8f0;
+  --gc-slot-free-border: #cbd5e1;
+  --gc-slot-free-text: #475569;
+  --gc-slot-tentative-fill: #fbbf24;
+  --gc-slot-tentative-hover: #f59e0b;
+  --gc-slot-tentative-border: #d97706;
+  --gc-slot-tentative-text: #451a03;
+  --gc-slot-booked-fill: #6366f1;
+  --gc-slot-booked-hover: #4f46e5;
+  --gc-slot-booked-border: #4338ca;
+  --gc-slot-booked-text: #ffffff;
+  /* Keep paused and unavailable in their existing neutral/slate family. */
+  --gc-paused-fill: #64748b;
+  --gc-paused-border: #475569;
+  --gc-unavailable-fill: #e2e8f0;
   --gc-shadow: 0 1px 3px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.06);
   --gc-pop-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(0, 0, 0, 0.06);
   --gc-suggest-shadow:
@@ -152,6 +160,7 @@
   position: sticky;
   /* Clears the sticky topbar (~96px incl. its gradient fade). */
   top: 96px;
+  z-index: 31;
   flex: none;
   width: 400px;
   max-width: 400px;
@@ -310,7 +319,15 @@
   overflow: hidden;
 }
 
+/* The card list plus the panel's kept "extra" lines (hold/override notes). */
+.slot-panel-detail-list + .slot-panel-detail-list {
+  margin-top: 10px;
+}
+
 .slot-panel-detail-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
   padding: 8px 12px;
   background: var(--gc-bg);
   font-size: 12.5px;
@@ -322,8 +339,22 @@
   border-top: 1px solid var(--gc-border);
 }
 
+/* Label column for the Instructor-Management-style card rows. The plain
+   `detail` rows render only a <dd>, so they are unaffected. */
+.slot-panel-detail-row dt {
+  flex: 0 0 72px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--gc-text-2);
+}
+
 .slot-panel-detail-row dd {
   margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .slot-panel-detail-actions {
@@ -534,12 +565,26 @@
 
 .controls {
   display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
 }
 
 .controls-row {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* Schedule status legend, moved out of the expanded panel into the toolbar
+   so it is visible without expanding a row. Laid out right-aligned to sit
+   above the filter/theme/reset/help controls. */
+.topbar-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 4px 12px;
 }
 
 .search {
@@ -780,9 +825,12 @@
 }
 
 .grid-wrap {
+  /* Content-height (no max-height): the outer page is the single vertical
+     scroll container, so the Main Grid never grows an internal vertical
+     scrollbar. `overflow: auto` is kept for horizontal timeline scrolling and
+     the sticky Instructor column. Do not reintroduce a max-height here. */
   overflow: auto;
   min-height: 55vh;
-  max-height: 74vh;
   border: 1px solid var(--gc-border);
   border-radius: 12px;
   background: var(--gc-bg);
@@ -996,6 +1044,33 @@
   font-size: 12px;
 }
 
+.row-error .instructor-cell {
+  color: var(--gc-text-2);
+}
+
+.row-error-msg {
+  color: var(--gc-red-text, #b91c1c);
+  font-size: 12px;
+  margin-right: 10px;
+}
+
+.row-error-retry {
+  height: 24px;
+  box-sizing: border-box;
+  padding: 0 10px;
+  border: 1px solid var(--gc-border);
+  background: var(--gc-red-bg, #fee2e2);
+  color: var(--gc-red-text, #b91c1c);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.row-error-retry:hover {
+  background: var(--gc-red-hover, #fecaca);
+}
+
 .reset-dash {
   height: var(--gc-control-h, 32px);
   box-sizing: border-box;
@@ -1171,22 +1246,24 @@
   word-break: break-word;
 }
 
-.slot-pop-override-btn {
+/* Edit an existing tentative booking. Placed above Delete, styled in the
+   neutral blue "informational" family rather than the destructive red. */
+.slot-pop-edit-btn {
   display: block;
   width: 100%;
-  margin-top: 8px;
+  margin-top: 6px;
   padding: 6px 10px;
-  border: 1px solid var(--gc-yellow-hover);
-  background: var(--gc-yellow-fill);
-  color: var(--gc-yellow-text);
+  border: 1px solid var(--gc-blue);
+  background: var(--gc-blue-bg);
+  color: var(--gc-blue);
   border-radius: 8px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
 }
 
-.slot-pop-override-btn:hover {
-  background: var(--gc-yellow-hover);
+.slot-pop-edit-btn:hover {
+  filter: brightness(0.95);
 }
 
 .slot-pop-delete-btn {
@@ -1215,13 +1292,15 @@
   background: var(--gc-slot-free-hover);
 }
 
+/* Free but not bookable as a full hour: hatch with the slate free-hover
+   token so it stays visible now that open cells are white. */
 .cell-half {
   background: linear-gradient(
     45deg,
-    var(--gc-slot-free-fill) 25%,
+    var(--gc-slot-free-hover) 25%,
     transparent 25%,
     transparent 75%,
-    var(--gc-slot-free-fill) 75%
+    var(--gc-slot-free-hover) 75%
   ) !important;
   background-size: 8px 8px;
 }
@@ -1229,10 +1308,10 @@
 .cell-half:hover {
   background: linear-gradient(
     45deg,
-    var(--gc-slot-free-hover) 25%,
+    var(--gc-grid-line-strong) 25%,
     transparent 25%,
     transparent 75%,
-    var(--gc-slot-free-hover) 75%
+    var(--gc-grid-line-strong) 75%
   ) !important;
   background-size: 8px 8px;
 }
@@ -1324,16 +1403,33 @@
   background-size: 8px 8px;
 }
 
+/* WeekTimetable: highlight pending (already-selected in batch) cells with
+   the same prominent blue as the main grid's .cell-pending. */
+.week-timetable-half-pending {
+  background: var(--gc-blue-bg);
+  box-shadow: inset 0 0 0 2px var(--gc-blue);
+}
+
 .detail-row td {
   padding: 0 !important;
   border-bottom: 1px solid var(--gc-border);
 }
 
 .detail {
-  overflow: auto;
+  /* Content-height (no max-height) so an expanded Schedule Panel grows the
+     page instead of scrolling internally. `overflow-anchor: none` keeps the
+     viewport steady across expand/collapse.
+     The 7 day-columns must fill the *visible* panel, not the whole (much
+     wider) roster table, so the width is pinned to the grid viewport via
+     --gc-viewport-w (set from .grid-wrap in SalesDashboard.tsx) and the panel
+     is stuck to the viewport's left edge so it stays in view while the roster
+     grid scrolls horizontally. */
+  position: sticky;
+  left: 0;
+  width: var(--gc-viewport-w, 100%);
+  max-width: var(--gc-viewport-w, 100%);
+  overflow: hidden;
   overflow-anchor: none;
-  scrollbar-gutter: stable;
-  max-height: 60vh;
   background: var(--gc-detail);
   border-top: 1px solid var(--gc-border);
 }
@@ -1397,7 +1493,7 @@
 
 .detail-month-nav {
   display: inline-grid;
-  grid-template-columns: 28px minmax(110px, auto) 28px;
+  grid-template-columns: 28px 28px auto 28px 28px auto;
   align-items: center;
   border: 1px solid var(--gc-border);
   border-radius: 8px;
@@ -1432,6 +1528,26 @@
   cursor: default;
 }
 
+.detail-today-btn {
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-left: 1px solid var(--gc-border);
+  border-right: 1px solid var(--gc-border);
+  background: transparent;
+  color: var(--gc-text);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.detail-today-btn:hover {
+  background: var(--gc-hover);
+}
+
 .detail-month-label {
   padding: 0 9px;
   border-right: 1px solid var(--gc-border);
@@ -1442,6 +1558,7 @@
   line-height: 28px;
   text-align: center;
   white-space: nowrap;
+  margin-left: 8px;
 }
 
 .detail-close {
@@ -1479,23 +1596,26 @@
   color: var(--gc-text-2);
 }
 
-.detail-legend {
-  position: sticky;
-  left: 0;
-  z-index: 3;
-  display: flex;
+/* Schedule status legend chip (reference: InstructorSchedulePage header).
+   Typography lives on the chip itself now that the legend sits in the toolbar
+   (.topbar-legend) instead of the old .detail-legend wrapper. */
+.tt-legend-item {
+  display: inline-flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 16px;
-  padding: 7px 14px;
-  border-bottom: 1px solid var(--gc-border);
-  background: var(--gc-bg);
-  color: var(--gc-text-2);
-  font-size: 11px;
+  gap: 5px;
+  color: #64748b;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.025em;
+  white-space: nowrap;
 }
 
-.detail-legend > span {
-  white-space: nowrap;
+/* Reference-exact Tailwind week grid. Keeps a stable wrapper so the detail
+   section can scroll horizontally on narrow screens; no vertical scroll of
+   its own — rows are content-driven. */
+.week-timetable {
+  min-width: 100%;
 }
 
 .detail-loading::before {

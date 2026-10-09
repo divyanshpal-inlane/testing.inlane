@@ -33,6 +33,10 @@ export interface SlotPick {
   date: string;
   startTime: string;
   endTime: string;
+  // Present only when this row already exists in the DB (edit mode): the
+  // Schedule row id it maps to. Absent for a freshly added class, which is
+  // inserted rather than updated on submit.
+  scheduleId?: number;
 }
 
 export interface CustomerFormValues {
@@ -90,13 +94,16 @@ interface TentativeBookingModalProps {
   validateSlot: (slot: SlotPick) => { ok: boolean; reason?: string };
   formData: CustomerFormValues;
   onFormDataChange: (data: CustomerFormValues) => void;
-  // Present only when this submission should replace an existing unpaid
-  // tentative slot rather than create fresh ones. blockId identifies the
-  // old Schedule row to release. Override is always exactly one slot —
-  // the "add another class" / multi-slot list UI is hidden in this mode.
-  overrideContext?: {
-    blockId: number;
-    tentativeDetails: Record<string, unknown> | null;
+  // Present when editing an existing tentative booking (the Edit action on a
+  // tentative slot's panel). The shared customer fields in `formData` are
+  // saved back onto EVERY row of the booking; each row's date/time comes from
+  // `slots`, matched to a Schedule row by `SlotPick.scheduleId`. Rows dropped
+  // from `slots` are deleted, rows added are inserted, the rest updated.
+  // `rowIds` is the original set of Schedule ids that formed the booking.
+  editContext?: {
+    batchId: string | null;
+    baseDetails: Record<string, unknown> | null;
+    rowIds: number[];
   } | null;
 }
 
@@ -151,7 +158,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
   validateSlot,
   formData,
   onFormDataChange,
-  overrideContext = null,
+  editContext = null,
 }) => {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [successMessage, setSuccessMessage] = useState("");
@@ -178,6 +185,13 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
   // overlap constraint at submit. `checked` is false until the check returns.
   const getSlotStatus = (index: number) => {
     const s = slots[index];
+    // An existing row of the booking being edited (scheduleId set) IS the
+    // instructor's busy block, so the availability check below will always
+    // report it as taken -- treating that as a conflict would light up every
+    // row of the booking and permanently disable Save. Nothing has changed
+    // about an existing row until Sales "Change slot"s it (which drops its
+    // scheduleId), so it is known-good and never a conflict here.
+    const isExisting = s.scheduleId != null;
     const avail = availabilityMap[`${s.date}-${s.startTime}`];
     const isDuplicate = slots.some(
       (o, j) => j < index && o.date === s.date && o.startTime === s.startTime,
@@ -189,14 +203,18 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
         reason: "Duplicate of an earlier class",
       };
     }
-    if (avail?.available === false) {
+    if (avail?.available === false && !isExisting) {
       return {
         conflict: true,
         checked: true,
         reason: avail.reason || "Not available",
       };
     }
-    return { conflict: false, checked: avail !== undefined, reason: "" };
+    return {
+      conflict: false,
+      checked: isExisting || avail !== undefined,
+      reason: "",
+    };
   };
   const hasAnyConflict = slots.some((_, i) => getSlotStatus(i).conflict);
 
@@ -330,36 +348,75 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
         payment_status: formData.paymentStatus,
         address: formData.customerAddress,
         course: formData.course,
+        // Groups every row written by one booking (a multi-class batch or a
+        // single slot) so a later Edit can find all the rows booked together
+        // without guessing from phone/name. Legacy rows created before this
+        // field existed have none -- the Edit lookup falls back to phone+name.
+        batch_id: crypto.randomUUID(),
         created_at: new Date().toISOString(),
       };
 
-      if (overrideContext) {
-        // An override must go to a paying learner — that's the entire
-        // point of taking the slot away from an unpaid hold. Checked here
-        // for a fast, clear message, and re-checked server-side too (see
-        // the RPC) since this must not be enforceable by the frontend
-        // alone.
-        if (formData.paymentStatus === "unpaid") {
-          throw new Error(
-            "An override must be Half Paid or Full Paid — the new learner is taking this slot because they're paying, unlike the unpaid hold being replaced.",
-          );
+      if (editContext) {
+        // Edit an existing tentative booking in place. The shared customer
+        // fields apply to every row; the per-row date/time comes from `slots`.
+        const batchId = editContext.batchId ?? crypto.randomUUID();
+        const editDetails: Record<string, unknown> = {
+          ...(editContext.baseDetails ?? {}),
+          name: formData.customerName,
+          phone: normalizedPhone,
+          sales_agent: formData.salesAgent,
+          payment_status: formData.paymentStatus,
+          address: formData.customerAddress,
+          course: formData.course,
+          batch_id: batchId,
+          updated_at: new Date().toISOString(),
+        };
+
+        // Rows that belonged to the booking but are no longer in `slots`
+        // were removed. Deleted FIRST so a class moved onto a time freed by
+        // one of them cannot collide with the row it replaced.
+        const removedIds = editContext.rowIds.filter(
+          (id) => !slots.some((s) => s.scheduleId === id),
+        );
+        for (const id of removedIds) {
+          const { error } = await sb.from("Schedule").delete().eq("id", id);
+          if (error) throw error;
         }
-        // Always exactly one slot in override mode, and always the SAME
-        // slot the old unpaid hold already occupies — the RPC derives the
-        // instructor/date/time from the old row itself, not from anything
-        // passed here, so there's no way for the client to redirect an
-        // override to a different slot. Server-side re-validation happens
-        // inside this function, not here — it re-checks (fresh, not
-        // trusting anything the client already believes) that the old
-        // slot still exists, is still unpaid, and that the payment status
-        // being submitted is actually half/full paid, then deletes the
-        // old row and inserts the new one atomically. See the
-        // override_tentative_slot SQL migration.
-        const { error } = await sb.rpc("override_tentative_slot", {
-          p_old_schedule_id: overrideContext.blockId,
-          p_new_tentative_details: tentativeDetails,
-        });
-        if (error) throw error;
+
+        // Changed classes: update the exact Schedule row each SlotPick maps to.
+        for (const s of slots) {
+          if (s.scheduleId == null) continue;
+          const { error } = await sb
+            .from("Schedule")
+            .update({
+              date: s.date,
+              start_time: s.startTime,
+              end_time: s.endTime,
+              tentative_details: editDetails,
+            })
+            .eq("id", s.scheduleId);
+          if (error) throw error;
+        }
+
+        // Added classes: no scheduleId -> brand new rows in the same booking.
+        const addedRows = slots
+          .filter((s) => s.scheduleId == null)
+          .map((s) => ({
+            instructor_id: s.instructorId,
+            date: s.date,
+            start_time: s.startTime,
+            end_time: s.endTime,
+            status: "hold",
+            isTentative: true,
+            tentative_details: editDetails,
+            learner_id: null,
+            course_id: null,
+            lesson_id: null,
+          }));
+        if (addedRows.length > 0) {
+          const { error } = await sb.from("Schedule").insert(addedRows);
+          if (error) throw error;
+        }
         return;
       }
 
@@ -403,8 +460,8 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
     },
     onSuccess: () => {
       setSuccessMessage(
-        overrideContext
-          ? "Slot handed to the new learner successfully!"
+        editContext
+          ? "Tentative booking updated successfully!"
           : slots.length > 1
             ? `${slots.length} tentative classes booked successfully!`
             : "Tentative slot booked successfully!",
@@ -510,8 +567,8 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
       >
         <div className="modal-header">
           <h2>
-            {overrideContext
-              ? "Override Tentative Slot"
+            {editContext
+              ? "Edit Tentative Booking"
               : "Create Tentative Slot Booking"}
           </h2>
           <button
@@ -542,18 +599,6 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
         <div className="space-y-4">
           {/* Selected Slots */}
           <div className="rounded-lg border border-border bg-muted p-3">
-            {overrideContext && (
-              <p className="mb-1 text-xs font-medium text-amber-600 dark:text-amber-400">
-                Replacing an unpaid tentative hold
-                {typeof overrideContext.tentativeDetails?.name === "string" &&
-                overrideContext.tentativeDetails.name
-                  ? ` (previously held for ${overrideContext.tentativeDetails.name})`
-                  : ""}{" "}
-                with a booking for a new, paying learner. Enter the new
-                learner&apos;s details below — Payment Status must be Half Paid
-                or Full Paid.
-              </p>
-            )}
             {/* Title + status pills share one wrappable row; the two actions
                 get their OWN full-width row below. They used to sit in the
                 same justify-between row as the title and the pills, which in
@@ -563,11 +608,11 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                 identically sized. */}
             <div className="mb-2 flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
               <span className="text-sm font-medium text-foreground">
-                {overrideContext
-                  ? "Slot Being Taken Over"
+                {editContext
+                  ? `Classes in this booking (${slots.length})`
                   : `Selected Slots (${slots.length})`}
               </span>
-              {!overrideContext && (
+              {
                 <div className="flex flex-wrap items-center gap-1.5">
                   {(() => {
                     const statuses = slots.map((_, i) => getSlotStatus(i));
@@ -594,9 +639,9 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                     );
                   })()}
                 </div>
-              )}
+              }
             </div>
-            {!overrideContext && (
+            {!editContext && (
               <div className="mb-2 grid grid-cols-2 gap-2">
                 <button
                   type="button"
@@ -643,7 +688,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                           >
                             Conflict
                           </span>
-                          {!overrideContext && onChangeSlot && (
+                          {onChangeSlot && (
                             <button
                               type="button"
                               className="whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 hover:bg-amber-200 dark:bg-amber-900 dark:text-amber-200 dark:hover:bg-amber-800"
@@ -656,12 +701,28 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                         </>
                       ) : (
                         status.checked && (
-                          <span className="inline-flex items-center whitespace-nowrap rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200">
-                            Free
-                          </span>
+                          <>
+                            <span className="inline-flex items-center whitespace-nowrap rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200">
+                              {s.scheduleId != null ? "Saved" : "Free"}
+                            </span>
+                            {/* Edit mode: every class's date/time is editable,
+                                so offer "Change time" even on a row that is not
+                                in conflict (its own hold is why the DB check
+                                would call it busy). */}
+                            {editContext && onChangeSlot && (
+                              <button
+                                type="button"
+                                className="whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 hover:bg-amber-200 dark:bg-amber-900 dark:text-amber-200 dark:hover:bg-amber-800"
+                                aria-label={`Change time for class ${i + 1}`}
+                                onClick={() => onChangeSlot(i)}
+                              >
+                                Change time
+                              </button>
+                            )}
+                          </>
                         )
                       )}
-                      {!overrideContext && slots.length > 1 && (
+                      {slots.length > 1 && (
                         <button
                           type="button"
                           className="flex-none rounded-full px-1.5 text-red-600 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900"
@@ -772,7 +833,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
               htmlFor="paymentStatus"
               className="block text-sm font-medium text-foreground"
             >
-              Payment Status {overrideContext && "*"}
+              Payment Status
             </label>
             <select
               id="paymentStatus"
@@ -785,22 +846,10 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
               }
               className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
-              {/* "Unpaid" isn't offered at all in override mode — a paying
-                  learner is the entire reason Sales can take this slot
-                  from an unpaid hold in the first place. Disallowed here
-                  as well as on submit (and again server-side) so there's
-                  no dead end where a valid-looking option turns into a
-                  rejection later. */}
-              {!overrideContext && <option value="unpaid">Unpaid</option>}
+              <option value="unpaid">Unpaid</option>
               <option value="half_paid">Half Paid</option>
               <option value="full_paid">Full Paid</option>
             </select>
-            {overrideContext && (
-              <p className="mt-1 text-xs text-muted-foreground">
-                Must be Half Paid or Full Paid to override an unpaid tentative
-                slot.
-              </p>
-            )}
           </div>
 
           {/* Address with Google Places Autocomplete */}
@@ -868,11 +917,11 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
               className="flex-1 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             >
               {createTentativeMutation.isPending
-                ? overrideContext
-                  ? "Overriding..."
+                ? editContext
+                  ? "Saving..."
                   : "Booking..."
-                : overrideContext
-                  ? "Confirm Override"
+                : editContext
+                  ? "Save Changes"
                   : slots.length > 1
                     ? `Create ${slots.length} Tentative Blocks`
                     : "Create Tentative Block"}

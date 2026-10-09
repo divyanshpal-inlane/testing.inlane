@@ -110,6 +110,13 @@ async function searchAndAdd(page: Page, name: string) {
   await search.fill(name);
   const row = page.locator(".suggest-row", { hasText: name }).first();
   await expect(row).toBeVisible({ timeout: 10_000 });
+  // The saved roster is restored asynchronously after a reload (~0.5s), so
+  // reading the class straight away can say "not added" for an instructor
+  // that is about to appear -- and clicking then would toggle it OFF. Give
+  // the restore a moment before deciding to click.
+  await expect(row)
+    .toHaveClass(/added/, { timeout: 2_000 })
+    .catch(() => undefined);
   if (!(await row.getAttribute("class"))?.includes("added")) {
     await row.locator(".suggest-main").click();
     await expect(row).toHaveClass(/added/, { timeout: 15_000 });

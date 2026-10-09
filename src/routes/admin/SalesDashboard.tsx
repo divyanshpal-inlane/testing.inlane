@@ -1,6 +1,12 @@
 import "@/components/admin/sales-dashboard/sales-dashboard.css";
 
-import { ArrowLeft, ChevronLeft, ChevronRight } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  Clock,
+} from "lucide-react";
 import type { CSSProperties, KeyboardEvent, RefObject } from "react";
 import {
   Fragment,
@@ -15,7 +21,6 @@ import {
   useState,
   useTransition,
 } from "react";
-import { useNavigate } from "react-router-dom";
 
 import type { LocateStatus } from "@/components/admin/sales-dashboard/LocationSearch";
 import type {
@@ -26,7 +31,6 @@ import {
   DEFAULT_CUSTOMER_FORM,
   TentativeBookingModal,
 } from "@/components/admin/sales-dashboard/TentativeBookingModal";
-import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import type {
   BlockDetail,
@@ -48,7 +52,10 @@ import {
 } from "@/lib/sales-dashboard/conflict";
 import { pointInPolygon } from "@/lib/sales-dashboard/kml";
 import {
+  addDaysISO,
   dateToWeekdayLower,
+  istTodayISO,
+  minutesTo12Hour,
   minutesToTime,
   timeToMinutes,
 } from "@/lib/sales-dashboard/validation";
@@ -89,6 +96,14 @@ const SLOT_KIND_LABELS: Record<SlotInfo["kind"], string> = {
 // popover is a glance rather than a reading surface.
 const ADDRESS_DETAIL_PREFIX = "Area: ";
 
+// Rich label/value rows the side panel renders for a taken slot, mirroring
+// Instructor Management's timetable card. Kept separate from `detail` (the
+// terse hover-popover lines) so the full card never bloats the hover glance.
+interface SlotCardRow {
+  label: string;
+  value: string;
+}
+
 interface SlotInfo {
   title: string;
   detail: string[];
@@ -109,24 +124,23 @@ interface SlotInfo {
     | "pending"
     | "pending-blocked"
     | "default";
-  // Set only for a non-buffer, unpaid tentative slot — the one case Sales
-  // is allowed to override. Carries what the override action needs
-  // without a second lookup.
-  override: {
-    blockId: number;
-    instrId: string;
-    date: string;
-    startMinute: number;
-    endMinute: number;
-    tentativeDetails: Record<string, unknown> | null;
-  } | null;
   // Set for any non-buffer tentative slot regardless of payment status --
-  // unlike override (unpaid only), a wrong entry can be deleted no matter
-  // who's already paid something toward it.
+  // a wrong entry can be deleted no matter who's already paid something
+  // toward it.
   deleteAction: {
     blockId: number;
     instrId: string;
     customerName: string;
+  } | null;
+  // Set for a tentative booking the signed-in agent created (same creator gate
+  // as deleteAction) — opens the booking form in edit mode, pre-loaded with
+  // every class booked together so shared customer fields and each class's
+  // date/time can be changed in one save. Optional: most SlotInfo results
+  // (free/busy/booked/paused/…) have nothing to edit.
+  editAction?: {
+    blockId: number;
+    instrId: string;
+    tentativeDetails: Record<string, unknown> | null;
   } | null;
   // Present only on the first visible grid cell of a real Schedule row.
   // This is display metadata; all slot state and interactions still come
@@ -139,6 +153,15 @@ interface SlotInfo {
     statusLabel: string;
     span: number;
   };
+  // Instructor-Management-style rows for the side panel (learner + class no.,
+  // 12-hour time, phone, address, description, lead, payment). When present the
+  // panel renders these instead of `detail`; the hover popover always uses
+  // `detail`.
+  card?: SlotCardRow[];
+  // Panel-only lines kept alongside `card` so nothing the panel used to show is
+  // lost when `card` takes over (e.g. a tentative hold's delete
+  // notes). The popover never reads this.
+  panelDetail?: string[];
 }
 
 type SortKey = "freeDesc" | "freeAsc" | "alpha";
@@ -250,6 +273,23 @@ function monthLabel(m: string): string {
   });
 }
 
+function formatPanelRange(days: string[]): string {
+  if (days.length === 0) return "";
+  const base: Intl.DateTimeFormatOptions = {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  };
+  const first = new Date(`${days[0]}T00:00:00Z`).toLocaleDateString(
+    "en-US",
+    base,
+  );
+  const last = new Date(
+    `${days[days.length - 1]}T00:00:00Z`,
+  ).toLocaleDateString("en-US", { ...base, year: "numeric" });
+  return `${first} - ${last}`;
+}
+
 function shortDate(iso: string): {
   weekday: string;
   date: string;
@@ -296,6 +336,13 @@ function showDetailTitle(
     .join(" · ");
 }
 
+// One instructor whose schedule fetch failed. Rendered as an in-grid row.
+export interface SalesErrorRow {
+  id: string;
+  name: string;
+  message: string;
+}
+
 interface GridProps {
   instructors: InstructorRow[];
   freeGrid: Map<string, Map<string, number[]>>;
@@ -305,9 +352,13 @@ interface GridProps {
   timeStarts: number[];
   dates: string[];
   selectedDate: string;
-  activeMonth: string;
-  canGoPreviousMonth: boolean;
-  canGoNextMonth: boolean;
+  // The rolling 7-day window the expanded Schedule timetable shows, plus its
+  // Instructor-Management-style navigation (<< < Today > >>) and the visible
+  // date-range label.
+  weekDates: string[];
+  panelRangeLabel: string;
+  canPanelPrev: boolean;
+  canPanelNext: boolean;
   gridMinutes: number;
   slotStart: string;
   slotEnd: string;
@@ -318,9 +369,17 @@ interface GridProps {
   selectedRows: Set<string>;
   rowColors: ReadonlyMap<string, string>;
   loadingRows: LightInstructor[];
+  // Instructors whose schedule fetch failed, shown as in-grid rows with a
+  // Retry so a load failure is visible instead of being swallowed into the
+  // "No instructors loaded yet" empty state.
+  errorRows: SalesErrorRow[];
+  onRetryLoad: (id: string) => void;
   onToggleExpand: (id: string) => void;
-  onPreviousMonth: () => void;
-  onNextMonth: () => void;
+  onPanelPrevWeek: () => void;
+  onPanelNextWeek: () => void;
+  onPanelPrevDay: () => void;
+  onPanelNextDay: () => void;
+  onPanelToday: () => void;
   onToggleSelectRow: (id: string) => void;
   onRemove?: (id: string) => void;
   onSelect?: (
@@ -330,8 +389,8 @@ interface GridProps {
     free: boolean,
     info: SlotInfo,
   ) => void;
-  onOverrideClick?: (override: NonNullable<SlotInfo["override"]>) => void;
   onDeleteTentative?: (action: NonNullable<SlotInfo["deleteAction"]>) => void;
+  onEditBooking?: (action: NonNullable<SlotInfo["editAction"]>) => void;
   resolveInfo: (
     instrId: string,
     date: string,
@@ -356,8 +415,8 @@ interface SlotCellProps {
     free: boolean,
     info: SlotInfo,
   ) => void;
-  onOverrideClick?: (override: NonNullable<SlotInfo["override"]>) => void;
   onDeleteTentative?: (action: NonNullable<SlotInfo["deleteAction"]>) => void;
+  onEditBooking?: (action: NonNullable<SlotInfo["editAction"]>) => void;
   resolveInfo: (
     instrId: string,
     date: string,
@@ -393,8 +452,8 @@ function SlotCellInner({
   canBook1Hour,
   expandedCalendar = false,
   onSelect,
-  onOverrideClick,
   onDeleteTentative,
+  onEditBooking,
   resolveInfo,
 }: SlotCellProps) {
   const [isHovered, setIsHovered] = useState(false);
@@ -557,18 +616,6 @@ function SlotCellInner({
                 {line}
               </div>
             ))}
-          {info.override && (
-            <button
-              type="button"
-              className="slot-pop-override-btn"
-              onClick={(e) => {
-                e.stopPropagation();
-                onOverrideClick?.(info.override!);
-              }}
-            >
-              Override Slot
-            </button>
-          )}
           {info.deleteAction && (
             <button
               type="button"
@@ -579,6 +626,18 @@ function SlotCellInner({
               }}
             >
               Delete Slot
+            </button>
+          )}
+          {info.editAction && (
+            <button
+              type="button"
+              className="slot-pop-edit-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                onEditBooking?.(info.editAction!);
+              }}
+            >
+              Edit Slot
             </button>
           )}
         </div>
@@ -593,14 +652,110 @@ function SlotCellInner({
 // instructors with expanded monthly schedules are open at once.
 const SlotCell = memo(SlotCellInner);
 
-interface MiniTimeRowProps {
+// ---------------------------------------------------------------------------
+// Expanded instructor timetable.
+//
+// A pixel-for-pixel reproduction of Instructor Management's "View Schedule"
+// timetable (InstructorSchedulePage in src/routes/admin/instructors.tsx):
+// 7 consecutive day columns x 18 hourly rows (SlotConfig 05:00-23:00), with
+// the same Tailwind classes, PALETTE hexes, borders, fonts and lesson-block
+// treatment, so the two timetables read as the same component.
+//
+// The one deliberate addition is availability shading in the empty halves.
+// This is a Sales booking surface, not a read-only schedule, so a cell the
+// engine reports busy is tinted even when it carries no class block. Lesson
+// blocks themselves use the reference's exact getScheduleColors() colours.
+// ---------------------------------------------------------------------------
+
+// Verbatim from instructors.tsx (InstructorSchedulePage's PALETTE).
+const TT_PURPLE_DARK = "#6257FF";
+const TT_BLOCK = "#030508";
+
+// Reference rows: SlotConfig.startHourOfDay (5) .. endHourOfDay (23).
+const TT_HOURS = Array.from({ length: 18 }, (_, i) => i + 5);
+
+// Mirrors InstructorSchedulePage's getScheduleColors() block classes exactly,
+// mapped through the SlotInfo states this dashboard produces.
+function ttBlockClass(kind: SlotInfo["kind"], statusLabel: string): string {
+  if (kind === "tentative") {
+    return "border-amber-600 bg-amber-400 text-amber-950";
+  }
+  if (kind === "paused") {
+    return statusLabel === "Payment due"
+      ? "border-red-700 bg-red-500 text-white"
+      : "border-slate-700 bg-slate-500 text-white";
+  }
+  if (kind === "booked") {
+    if (statusLabel === "Done (OTP)") {
+      return "border-emerald-700 bg-emerald-500 text-white";
+    }
+    if (statusLabel === "Done (manual)") {
+      return "border-orange-600 bg-orange-400 text-orange-950";
+    }
+    return "border-indigo-700 bg-indigo-500 text-white";
+  }
+  return "border-indigo-700 bg-indigo-500 text-white";
+}
+
+// Availability fill for one half of an hourly row. Free reads white (the
+// reference's own "empty is bookable" language); every busy state gets a light
+// neutral so a taken slot is never mistaken for an open one even when it has
+// no drawn class block (buffer zones, engine unavailability).
+function ttHalfFill(kind: SlotInfo["kind"], free: boolean): string {
+  if (free) return "transparent";
+  if (kind === "tentative") return "#fef3c7";
+  if (kind === "booked") return "#e0e7ff";
+  if (kind === "pending" || kind === "pending-blocked") return "#dbeafe";
+  // Busy/plain (unavailable) halves read the same grey as the main grid's
+  // band -- Instructor Management greys an unavailable slot with #030508 at
+  // 25% over white (~#c0c0c1), the reference tone, so it never blends into a
+  // white free half.
+  if (kind === "paused") return "#c0c0c1";
+  return "#c0c0c1";
+}
+
+// Builds the side panel's Instructor-Management-style card rows for a taken
+// slot. `description`, `lead` and `payment` default to "N/A" for a real class,
+// exactly like Instructor Management's timetable card; a tentative hold fills
+// them from its tentative_details.
+function buildSlotCard(row: {
+  startMinute: number;
+  endMinute: number;
+  instructor: string;
+  learner: string;
+  lessonNumber: number | null;
+  phone: string;
+  location: string;
+  course: string;
+  description: string;
+  lead: string;
+  payment: string;
+}): SlotCardRow[] {
+  const learnerWithClass =
+    row.learner && row.lessonNumber != null
+      ? `${row.learner} (Class ${row.lessonNumber})`
+      : row.learner;
+  return [
+    {
+      label: "Time",
+      value: `${minutesTo12Hour(row.startMinute)} — ${minutesTo12Hour(row.endMinute)}`,
+    },
+    { label: "Instructor", value: row.instructor || "N/A" },
+    { label: "Learner", value: learnerWithClass || "N/A" },
+    { label: "Phone", value: row.phone || "N/A" },
+    { label: "Location", value: row.location || "N/A" },
+    { label: "Course", value: row.course || "N/A" },
+    { label: "Description", value: row.description || "N/A" },
+    { label: "Lead", value: row.lead || "N/A" },
+    { label: "Payment", value: row.payment || "N/A" },
+  ];
+}
+
+interface WeekTimetableProps {
   instrId: string;
-  timeLabel: string;
-  timeIndex: number;
-  dates: string[];
-  timeStarts: number[];
-  gridMinutes: number;
-  freeGrid: Map<string, Map<string, number[]>>;
+  weekDates: string[];
+  selectedDate: string;
+  dayFree: Map<string, number[]> | undefined;
   onSelect?: (
     instrId: string,
     date: string,
@@ -608,8 +763,8 @@ interface MiniTimeRowProps {
     free: boolean,
     info: SlotInfo,
   ) => void;
-  onOverrideClick?: (override: NonNullable<SlotInfo["override"]>) => void;
   onDeleteTentative?: (action: NonNullable<SlotInfo["deleteAction"]>) => void;
+  onEditBooking?: (action: NonNullable<SlotInfo["editAction"]>) => void;
   resolveInfo: (
     instrId: string,
     date: string,
@@ -618,70 +773,227 @@ interface MiniTimeRowProps {
   ) => SlotInfo;
 }
 
-// One ROW per time slot, one COLUMN per date. This is the transpose of the
-// previous layout (a row per date, a column per 30-minute slot): dates now run
-// along the x axis and times down the y axis.
-//
-// Free-ness is read straight from `freeGrid` (date -> free minutes) per cell —
-// two map lookups plus a scan of at most one day's slots. No per-row Set is
-// built any more: a Set per date would now be rebuilt for every time row
-// (~30 dates x ~18 slots) instead of once per date.
-function MiniTimeRowInner({
+function WeekTimetable({
   instrId,
-  timeLabel,
-  timeIndex,
-  dates,
-  timeStarts,
-  gridMinutes,
-  freeGrid,
+  weekDates,
+  selectedDate,
+  dayFree,
   onSelect,
-  onOverrideClick,
-  onDeleteTentative,
   resolveInfo,
-}: MiniTimeRowProps) {
-  const minute = timeStarts[timeIndex];
-  // Still time-based shading, so the alternating bands now run horizontally
-  // across the date columns rather than vertically down the time columns.
-  const band = Math.floor(timeIndex / 2) % 2 === 1;
-  const dayFree = freeGrid.get(instrId);
+}: WeekTimetableProps) {
+  const [hoveredRow, setHoveredRow] = useState<number | null>(null);
+  const [hoveredCol, setHoveredCol] = useState<number | null>(null);
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const freeAt = (date: string, minute: number) =>
+    dayFree?.get(date)?.includes(minute) ?? false;
   return (
-    <tr className="mini-row">
-      <th scope="row" className="mini-gutter">
-        <span className="time-label">{timeLabel}</span>
-      </th>
-      {dates.map((d) => {
-        const free = dayFree?.get(d)?.includes(minute) ?? false;
-        const canBook1Hour =
-          free && validateOneHourBlock(instrId, d, minute, freeGrid);
-        return (
-          <SlotCell
-            key={d}
-            instrId={instrId}
-            date={d}
-            free={free}
-            band={band}
-            minute={minute}
-            timeLabel={`${timeLabel}–${minutesToTime(minute + gridMinutes)}`}
-            canBook1Hour={canBook1Hour}
-            expandedCalendar
-            onSelect={onSelect}
-            onOverrideClick={onOverrideClick}
-            onDeleteTentative={onDeleteTentative}
-            resolveInfo={resolveInfo}
-          />
-        );
-      })}
-    </tr>
+    <div className="week-timetable flex flex-row font-sans">
+      {/* TIME AXIS */}
+      <div className="z-20 flex w-14 shrink-0 flex-col border-r bg-slate-50">
+        <div className="h-10 border-b bg-white" />
+        <div
+          className="grid"
+          style={{
+            gridTemplateRows: `repeat(${TT_HOURS.length}, minmax(44px, 1fr))`,
+          }}
+        >
+          {TT_HOURS.map((h, idx) => {
+            const isHovered = hoveredRow === idx;
+            return (
+              <div
+                key={h}
+                className={cn(
+                  "flex items-start justify-end border-b border-slate-100 pr-2 pt-1 transition-colors",
+                  isHovered ? "bg-slate-500" : "bg-white",
+                )}
+              >
+                <span
+                  className={cn(
+                    "text-[9px] font-bold uppercase transition-colors",
+                    isHovered ? "text-white" : "text-slate-400",
+                  )}
+                >
+                  {`${String(h).padStart(2, "0")}:00`}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      {/* GRID */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* DAY HEADERS */}
+        <div className="grid shrink-0 grid-cols-7 border-b bg-white">
+          {weekDates.map((d, colIdx) => {
+            const dt = new Date(`${d}T00:00:00Z`);
+            const isToday = d === todayIso;
+            const isHovered = hoveredCol === colIdx;
+            return (
+              <div
+                key={d}
+                className="flex h-10 flex-col items-center justify-center border-r transition-colors last:border-0"
+                style={{ backgroundColor: isHovered ? TT_BLOCK : "#FFFFFF" }}
+              >
+                <span
+                  className="mb-0.5 text-[8px] font-bold uppercase transition-colors"
+                  style={{ color: isHovered ? "#F1F5F9" : "#94A3B8" }}
+                >
+                  {dt.toLocaleDateString("en-GB", {
+                    weekday: "short",
+                    timeZone: "UTC",
+                  })}
+                </span>
+                <div
+                  className="flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-black transition-all"
+                  style={{
+                    backgroundColor:
+                      isToday && !isHovered ? TT_PURPLE_DARK : "transparent",
+                    color:
+                      isHovered || (isToday && !isHovered)
+                        ? "#FFFFFF"
+                        : "#334155",
+                  }}
+                >
+                  {dt.toLocaleDateString("en-GB", {
+                    day: "numeric",
+                    timeZone: "UTC",
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {/* CELLS */}
+        <div
+          className="relative grid grid-cols-7"
+          style={{
+            gridTemplateRows: `repeat(${TT_HOURS.length}, minmax(44px, 1fr))`,
+          }}
+        >
+          {TT_HOURS.map((h, rowIdx) => (
+            <Fragment key={h}>
+              {weekDates.map((d, colIdx) => {
+                const h0 = h * 60;
+                const h1 = h0 + 30;
+                const free0 = freeAt(d, h0);
+                const free1 = freeAt(d, h1);
+                const info0 = resolveInfo(instrId, d, h0, free0);
+                const info1 = resolveInfo(instrId, d, h1, free1);
+                const blocks: {
+                  block: NonNullable<SlotInfo["scheduleBlock"]>;
+                  kind: SlotInfo["kind"];
+                  del: SlotInfo["deleteAction"];
+                  edit: SlotInfo["editAction"];
+                }[] = [];
+                if (info0.scheduleBlock) {
+                  blocks.push({
+                    block: info0.scheduleBlock,
+                    kind: info0.kind,
+                    del: info0.deleteAction,
+                    edit: info0.editAction,
+                  });
+                }
+                if (info1.scheduleBlock) {
+                  blocks.push({
+                    block: info1.scheduleBlock,
+                    kind: info1.kind,
+                    del: info1.deleteAction,
+                    edit: info1.editAction,
+                  });
+                }
+                const isSelected = d === selectedDate;
+                // Highlight only the 30-minute halves that are actually pending.
+                // A cell is a full hour, so outlining the whole cell for either
+                // half made a 15:30–16:30 class light up 15:00–17:00.
+                const pending0 = info0.kind === "pending";
+                const pending1 = info1.kind === "pending";
+                return (
+                  // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- grid cell; clicking selects the slot in the side panel, and the roster grid exposes keyboard-operable booking controls
+                  <div
+                    key={`${d}-${h}`}
+                    className={cn(
+                      "group relative cursor-pointer select-none border-b border-r border-slate-50 transition-colors",
+                      isSelected && "bg-indigo-50/40",
+                    )}
+                    onMouseEnter={() => {
+                      setHoveredRow(rowIdx);
+                      setHoveredCol(colIdx);
+                    }}
+                    onMouseLeave={() => {
+                      setHoveredRow(null);
+                      setHoveredCol(null);
+                    }}
+                    onClick={(e) => {
+                      // Determine which half of the cell was clicked (top = h0, bottom = h1)
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const clickY = e.clientY;
+                      const midY = rect.top + rect.height / 2;
+                      const isTopHalf = clickY < midY;
+                      const minute = isTopHalf ? h0 : h1;
+                      const free = isTopHalf ? free0 : free1;
+                      const info = isTopHalf ? info0 : info1;
+                      onSelect?.(instrId, d, minute, free, info);
+                    }}
+                  >
+                    <div
+                      className="absolute left-0 top-0 z-0 h-1/2 w-full"
+                      style={{ backgroundColor: ttHalfFill(info0.kind, free0) }}
+                    />
+                    <div
+                      className="absolute bottom-0 left-0 z-0 h-1/2 w-full"
+                      style={{ backgroundColor: ttHalfFill(info1.kind, free1) }}
+                    />
+                    {pending0 && (
+                      <div className="week-timetable-half-pending pointer-events-none absolute left-0 top-0 z-10 h-1/2 w-full" />
+                    )}
+                    {pending1 && (
+                      <div className="week-timetable-half-pending pointer-events-none absolute bottom-0 left-0 z-10 h-1/2 w-full" />
+                    )}
+                    <div className="pointer-events-none absolute left-0 top-1/2 z-0 w-full border-t border-dashed border-slate-100" />
+                    <div className="pointer-events-none absolute inset-0 z-20 overflow-visible p-0.5">
+                      {blocks.map((b, idx) => (
+                        <div
+                          key={`${b.block.customerName}-${b.block.startMinute}-${idx}`}
+                          className={cn(
+                            "pointer-events-auto absolute flex flex-col rounded-sm border-l-2 p-1 shadow-md transition-all",
+                            ttBlockClass(b.kind, b.block.statusLabel),
+                          )}
+                          style={{
+                            left: `${idx * 10}%`,
+                            width: "90%",
+                            top: `${((b.block.startMinute - h0) / 60) * 100}%`,
+                            height: `${((b.block.endMinute - b.block.startMinute) / 60) * 100}%`,
+                            zIndex: 50 + idx,
+                            minHeight: "24px",
+                          }}
+                        >
+                          <div className="mb-0.5 flex items-center gap-1 truncate pr-4 text-[8px] font-bold leading-none">
+                            <span>{b.block.customerName}</span>
+                            {b.block.lessonNumber != null && (
+                              <span className="shrink-0 rounded-[2px] bg-black/10 px-1 py-0.5 font-black opacity-80">
+                                ({b.block.lessonNumber})
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-0.5 text-[7px] font-medium opacity-90">
+                            <Clock className="h-1.5 w-1.5" />
+                            {minutesToTime(b.block.startMinute)}
+                            {" - "}
+                            {minutesToTime(b.block.endMinute)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </Fragment>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
-
-// Memoized so that, within one instructor's expanded monthly schedule, only
-// the time row whose popover state changed re-renders. Combined with
-// InstructorRowGroup below, this keeps slot interaction O(1).
-const MiniTimeRow = memo(MiniTimeRowInner);
-
-// Stable empty map so the collapsed case below allocates nothing per render.
-const NO_FREE_COUNTS: Map<string, number> = new Map();
 
 interface InstructorRowGroupProps {
   instr: InstructorRow;
@@ -698,16 +1010,20 @@ interface InstructorRowGroupProps {
   timeStarts: number[];
   dates: string[];
   selectedDate: string;
-  activeMonth: string;
-  canGoPreviousMonth: boolean;
-  canGoNextMonth: boolean;
+  weekDates: string[];
+  panelRangeLabel: string;
+  canPanelPrev: boolean;
+  canPanelNext: boolean;
   gridMinutes: number;
   slotStart: string;
   slotEnd: string;
   freeGrid: Map<string, Map<string, number[]>>;
   onToggleExpand: (id: string) => void;
-  onPreviousMonth: () => void;
-  onNextMonth: () => void;
+  onPanelPrevWeek: () => void;
+  onPanelNextWeek: () => void;
+  onPanelPrevDay: () => void;
+  onPanelNextDay: () => void;
+  onPanelToday: () => void;
   onToggleSelectRow: (id: string) => void;
   onRemove?: (id: string) => void;
   onSelect?: (
@@ -717,8 +1033,8 @@ interface InstructorRowGroupProps {
     free: boolean,
     info: SlotInfo,
   ) => void;
-  onOverrideClick?: (override: NonNullable<SlotInfo["override"]>) => void;
   onDeleteTentative?: (action: NonNullable<SlotInfo["deleteAction"]>) => void;
+  onEditBooking?: (action: NonNullable<SlotInfo["editAction"]>) => void;
   resolveInfo: (
     instrId: string,
     date: string,
@@ -740,19 +1056,23 @@ function InstructorRowGroupInner(props: InstructorRowGroupProps) {
     timeStarts,
     dates,
     selectedDate,
-    activeMonth,
-    canGoPreviousMonth,
-    canGoNextMonth,
+    weekDates,
+    panelRangeLabel,
+    canPanelPrev,
+    canPanelNext,
     onSelect,
-    onOverrideClick,
     onDeleteTentative,
+    onEditBooking,
     gridMinutes,
     slotStart,
     slotEnd,
     freeGrid,
     onToggleExpand,
-    onPreviousMonth,
-    onNextMonth,
+    onPanelPrevWeek,
+    onPanelNextWeek,
+    onPanelPrevDay,
+    onPanelNextDay,
+    onPanelToday,
     onToggleSelectRow,
     onRemove,
     resolveInfo,
@@ -763,16 +1083,6 @@ function InstructorRowGroupInner(props: InstructorRowGroupProps) {
     slotEnd,
     dates[0] ?? new Date().toISOString().slice(0, 10),
   );
-  // Per-date free counts for the transposed mini grid's date column headers.
-  // Skipped entirely while collapsed so an unexpanded row does no extra work
-  // (same reason the table itself is not rendered).
-  const miniFreeCounts = useMemo(() => {
-    if (!isExpanded) return NO_FREE_COUNTS;
-    const perInstructor = freeGrid.get(instr.id);
-    const counts = new Map<string, number>();
-    for (const d of dates) counts.set(d, perInstructor?.get(d)?.length ?? 0);
-    return counts;
-  }, [freeGrid, instr.id, dates, isExpanded]);
   const detailTitle = showDetailTitle(
     instr,
     windowTotal,
@@ -824,9 +1134,7 @@ function InstructorRowGroupInner(props: InstructorRowGroupProps) {
               <span className="expand-chev" aria-hidden="true">
                 {isExpanded ? "▲" : "▼"}
               </span>
-              <span className="expand-label">
-                {isExpanded ? "Hide schedule" : "Schedule"}
-              </span>
+              <span className="expand-label">Schedule</span>
             </button>
             <button
               type="button"
@@ -869,8 +1177,8 @@ function InstructorRowGroupInner(props: InstructorRowGroupProps) {
               timeLabel={`${t}–${minutesToTime(m + gridMinutes)}`}
               canBook1Hour={canBook1Hour}
               onSelect={onSelect}
-              onOverrideClick={onOverrideClick}
               onDeleteTentative={onDeleteTentative}
+              onEditBooking={onEditBooking}
               resolveInfo={resolveInfo}
             />
           );
@@ -886,125 +1194,93 @@ function InstructorRowGroupInner(props: InstructorRowGroupProps) {
                     ▲
                   </span>
                   {instr.name}
-                  <span className="detail-badge">monthly schedule</span>
+                  <span className="detail-badge">weekly timetable</span>
                 </span>
                 <span className="detail-sub">
-                  {dates.length} days · {windowTotal} free slots
+                  {weekDates.length} days · {windowTotal} free slots
                 </span>
                 <div
                   className="detail-month-nav"
-                  aria-label={`${instr.name} schedule month navigation`}
+                  aria-label={`${instr.name} schedule week navigation`}
                 >
                   <button
                     type="button"
                     className="detail-month-btn"
-                    onClick={onPreviousMonth}
-                    disabled={!canGoPreviousMonth}
-                    aria-label={`Show previous month in ${instr.name}'s expanded schedule`}
-                    title="Previous month"
+                    onClick={onPanelPrevWeek}
+                    disabled={!canPanelPrev}
+                    aria-label={`Show previous week in ${instr.name}'s expanded schedule`}
+                    title="Previous week"
                   >
-                    <ChevronLeft aria-hidden="true" />
+                    <ChevronsLeft aria-hidden="true" />
                   </button>
-                  <span className="detail-month-label">
-                    {monthLabel(activeMonth)}
-                  </span>
                   <button
                     type="button"
                     className="detail-month-btn"
-                    onClick={onNextMonth}
-                    disabled={!canGoNextMonth}
-                    aria-label={`Show next month in ${instr.name}'s expanded schedule`}
-                    title="Next month"
+                    onClick={onPanelPrevDay}
+                    disabled={!canPanelPrev}
+                    aria-label={`Show previous day in ${instr.name}'s expanded schedule`}
+                    title="Previous day"
+                  >
+                    <ChevronLeft aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    className="detail-today-btn"
+                    onClick={onPanelToday}
+                    title="Jump to today"
+                  >
+                    Today
+                  </button>
+                  <button
+                    type="button"
+                    className="detail-month-btn"
+                    onClick={onPanelNextDay}
+                    disabled={!canPanelNext}
+                    aria-label={`Show next day in ${instr.name}'s expanded schedule`}
+                    title="Next day"
                   >
                     <ChevronRight aria-hidden="true" />
                   </button>
+                  <button
+                    type="button"
+                    className="detail-month-btn"
+                    onClick={onPanelNextWeek}
+                    disabled={!canPanelNext}
+                    aria-label={`Show next week in ${instr.name}'s expanded schedule`}
+                    title="Next week"
+                  >
+                    <ChevronsRight aria-hidden="true" />
+                  </button>
+                  <span className="detail-month-label">{panelRangeLabel}</span>
                 </div>
                 {instr.areas.length > 0 && (
                   <span className="detail-areas">
                     Areas: {instr.areas.join(", ")}
                   </span>
                 )}
-                <button
-                  type="button"
-                  className="detail-close"
-                  onClick={() => onToggleExpand(instr.id)}
-                  aria-label={`Hide ${instr.name}'s expanded timetable`}
-                >
-                  Hide schedule ▲
-                </button>
               </div>
-              <div
-                className="detail-legend"
-                aria-label="Schedule status legend"
-              >
-                <span>
-                  <i className="swatch free" /> Free
-                </span>
-                <span>
-                  <i className="swatch booked" /> Booked
-                </span>
-                <span>
-                  <i className="swatch tentative" /> Tentative
-                </span>
-                <span>
-                  <i className="swatch paused" /> Paused
-                </span>
-                <span>
-                  <i className="swatch unavailable" /> Unavailable
-                </span>
-              </div>
-              {isExpandPending ? (
+              {isExpandPending && !isExpanded ? (
                 // Keep immediate feedback while React renders the selected
                 // month's rows. The transition is also used by collapse, so
-                // this remains deliberately separate from data loading.
+                // this remains deliberately separate from data loading. Skipped
+                // when the row is already expanded (the auto-open path): the
+                // lock derives it as expanded in the same paint as the roster
+                // collapse, so flashing "Loading…" here would itself be the
+                // page jump the user sees.
                 <div className="detail-loading" role="status">
-                  Loading {instr.name}&apos;s monthly schedule…
+                  Loading {instr.name}&apos;s weekly timetable…
                 </div>
               ) : (
-                <table className="mini">
-                  <thead>
-                    <tr>
-                      <th className="mini-gutter">
-                        <span className="time-label">Time</span>
-                      </th>
-                      {dates.map((d) => {
-                        const { weekday, day } = shortDate(d);
-                        const isCurrent = d === selectedDate;
-                        return (
-                          <th
-                            key={d}
-                            className={cn("mini-date", isCurrent && "current")}
-                            title={`${weekday} ${day}`}
-                          >
-                            <span className="mini-date-label">{weekday}</span>
-                            <span className="mini-date-num">{day}</span>
-                            <span className="mini-count">
-                              {miniFreeCounts.get(d) ?? 0} free
-                            </span>
-                          </th>
-                        );
-                      })}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {timeCols.map((t, ti) => (
-                      <MiniTimeRow
-                        key={t}
-                        instrId={instr.id}
-                        timeLabel={t}
-                        timeIndex={ti}
-                        dates={dates}
-                        timeStarts={timeStarts}
-                        gridMinutes={gridMinutes}
-                        freeGrid={freeGrid}
-                        onSelect={onSelect}
-                        onOverrideClick={onOverrideClick}
-                        onDeleteTentative={onDeleteTentative}
-                        resolveInfo={resolveInfo}
-                      />
-                    ))}
-                  </tbody>
-                </table>
+                <WeekTimetable
+                  instrId={instr.id}
+                  weekDates={weekDates}
+                  selectedDate={selectedDate}
+                  dayFree={freeGrid.get(instr.id)}
+                  onSelect={onSelect}
+                  onDeleteTentative={onDeleteTentative}
+                  onEditBooking={onEditBooking}
+                  resolveInfo={resolveInfo}
+                />
               )}
             </div>
           </td>
@@ -1033,9 +1309,10 @@ function AvailabilityGridInner(props: GridProps) {
     timeStarts,
     dates,
     selectedDate,
-    activeMonth,
-    canGoPreviousMonth,
-    canGoNextMonth,
+    weekDates,
+    panelRangeLabel,
+    canPanelPrev,
+    canPanelNext,
     gridMinutes,
     slotStart,
     slotEnd,
@@ -1044,14 +1321,19 @@ function AvailabilityGridInner(props: GridProps) {
     selectedRows,
     rowColors,
     loadingRows,
+    errorRows,
+    onRetryLoad,
     onToggleExpand,
-    onPreviousMonth,
-    onNextMonth,
+    onPanelPrevWeek,
+    onPanelNextWeek,
+    onPanelPrevDay,
+    onPanelNextDay,
+    onPanelToday,
     onToggleSelectRow,
     onRemove,
     onSelect,
-    onOverrideClick,
     onDeleteTentative,
+    onEditBooking,
     resolveInfo,
   } = props;
 
@@ -1084,19 +1366,23 @@ function AvailabilityGridInner(props: GridProps) {
             timeStarts={timeStarts}
             dates={dates}
             selectedDate={selectedDate}
-            activeMonth={activeMonth}
-            canGoPreviousMonth={canGoPreviousMonth}
-            canGoNextMonth={canGoNextMonth}
+            weekDates={weekDates}
+            panelRangeLabel={panelRangeLabel}
+            canPanelPrev={canPanelPrev}
+            canPanelNext={canPanelNext}
             gridMinutes={gridMinutes}
             freeGrid={freeGrid}
             onToggleExpand={onToggleExpand}
-            onPreviousMonth={onPreviousMonth}
-            onNextMonth={onNextMonth}
+            onPanelPrevWeek={onPanelPrevWeek}
+            onPanelNextWeek={onPanelNextWeek}
+            onPanelPrevDay={onPanelPrevDay}
+            onPanelNextDay={onPanelNextDay}
+            onPanelToday={onPanelToday}
             onToggleSelectRow={onToggleSelectRow}
             onRemove={onRemove}
             onSelect={onSelect}
-            onOverrideClick={onOverrideClick}
             onDeleteTentative={onDeleteTentative}
+            onEditBooking={onEditBooking}
             resolveInfo={resolveInfo}
           />
         ))}
@@ -1110,6 +1396,25 @@ function AvailabilityGridInner(props: GridProps) {
             </td>
           </tr>
         ))}
+        {errorRows.map((er) => (
+          <tr key={`err-${er.id}`} className="row row-error">
+            <td className="instructor-cell">
+              <div className="instructor-cell-inner">{er.name}</div>
+            </td>
+            <td colSpan={timeCols.length}>
+              <span className="row-error-msg">
+                Couldn&apos;t load schedule: {er.message}
+              </span>
+              <button
+                type="button"
+                className="row-error-retry"
+                onClick={() => onRetryLoad(er.id)}
+              >
+                Retry
+              </button>
+            </td>
+          </tr>
+        ))}
       </tbody>
     </table>
   );
@@ -1118,7 +1423,6 @@ function AvailabilityGridInner(props: GridProps) {
 const AvailabilityGrid = memo(AvailabilityGridInner);
 
 export default function SalesDashboard() {
-  const navigate = useNavigate();
   const {
     phase,
     errorMsg,
@@ -1162,6 +1466,10 @@ export default function SalesDashboard() {
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const [sort, setSort] = useState<SortKey>("freeDesc");
   const [selectedMonth, setSelectedMonth] = useState<string>("");
+  // Expanded Schedule panel is an independent rolling 7-day window over the
+  // full loaded range (past + future), navigated like Instructor Management's
+  // "View Schedule". This holds its anchor day (empty = today).
+  const [panelAnchorInput, setPanelAnchorInput] = useState<string>("");
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
   const [theme, setTheme] = useState<"light" | "dark">(initialTheme);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -1222,28 +1530,42 @@ export default function SalesDashboard() {
   useEffect(() => {
     if (!addingSlotMode) setReplacingSlotIndex(null);
   }, [addingSlotMode]);
-  // Set while an override is in progress. Unlike the multi-class flow,
-  // overriding never needs Sales to pick a slot on the grid — it always
-  // replaces the SAME slot the unpaid tentative hold already occupies,
-  // for a different (paying) learner. tentativeDetails here is the OLD
-  // customer's info, kept only for on-screen reference — the form itself
-  // starts blank, since this is a new learner, not the same one moving.
-  const [overrideContext, setOverrideContext] = useState<{
-    blockId: number;
-    tentativeDetails: Record<string, unknown> | null;
+  // Set while an existing tentative booking is being edited. Carries the
+  // shared identity of the booking (its batch id and original
+  // tentative_details) and every Schedule row id that was in it, so the modal
+  // can update the rows, insert added ones and delete removed ones in one go.
+  const [editContext, setEditContext] = useState<{
+    batchId: string | null;
+    baseDetails: Record<string, unknown> | null;
+    rowIds: number[];
   } | null>(null);
   // A tentative booking belongs to ONE instructor: once Sales has picked a
   // slot, every additional class in that same booking must be the same
   // instructor's, so the learner isn't handed between instructors
   // mid-enrollment. Derived from the batch rather than stored as its own
   // state, so it cannot outlive the batch - every path that ends a booking
-  // (cancel, successful submit, override) clears pendingSlots, and the lock
-  // disappears with it. An override is excluded because it never offers
-  // "+ Add another class" and is by definition a single-slot replacement.
+  // (cancel, successful submit) clears pendingSlots, and the lock
+  // disappears with it.
   const lockedInstructorId =
-    overrideContext || pendingSlots.length === 0
-      ? null
-      : pendingSlots[0].instructorId;
+    pendingSlots.length === 0 ? null : pendingSlots[0].instructorId;
+  // The booking's instructor row is opened by the auto-expand effect below,
+  // but that effect runs AFTER the paint that also collapses the roster to
+  // this one instructor. Rendering the collapse and the expansion in separate
+  // paints made the whole page visibly jump: the grid shrank (every other row
+  // removed), then grew again once the effect expanded the row (via a
+  // transition that first showed a short "Loading…" placeholder). Deriving the
+  // locked instructor as expanded here folds both into the SAME render, so the
+  // grid's height changes exactly once. The `expanded` set is still updated by
+  // the effect, so cancelling a booking leaves the row open (see the Playwright
+  // "hides the other rows" spec).
+  const expandedForRender = useMemo(() => {
+    if (!lockedInstructorId || expanded.has(lockedInstructorId)) {
+      return expanded;
+    }
+    const next = new Set(expanded);
+    next.add(lockedInstructorId);
+    return next;
+  }, [expanded, lockedInstructorId]);
   const [slotNotice, setSlotNotice] = useState<string | null>(null);
   const slotNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
@@ -1289,7 +1611,7 @@ export default function SalesDashboard() {
     setTentativeModalOpen(false);
     setPendingSlots([]);
     setCustomerFormData(DEFAULT_CUSTOMER_FORM(currentUserName));
-    setOverrideContext(null);
+    setEditContext(null);
     setAddingSlotMode(false);
     // Back to the panel's "select a slot" empty state rather than leaving a
     // stale slot's details on screen after its booking form is dismissed.
@@ -1297,8 +1619,8 @@ export default function SalesDashboard() {
   }, [currentUserName]);
 
   const handleTentativeSuccess = useCallback(() => {
-    const message = overrideContext
-      ? "✅ Slot handed to the new learner successfully."
+    const message = editContext
+      ? "✅ Tentative booking updated successfully."
       : pendingSlots.length > 1
         ? `✅ ${pendingSlots.length} tentative classes booked successfully.`
         : "✅ Tentative slot booked successfully.";
@@ -1313,15 +1635,15 @@ export default function SalesDashboard() {
     setTentativeModalOpen(false);
     setPendingSlots([]);
     setCustomerFormData(DEFAULT_CUSTOMER_FORM(currentUserName));
-    setOverrideContext(null);
+    setEditContext(null);
     setAddingSlotMode(false);
     refreshInstructors(affectedIds);
   }, [
     refreshInstructors,
-    showSuccessNotice,
-    overrideContext,
+    editContext,
     pendingSlots,
     currentUserName,
+    showSuccessNotice,
   ]);
 
   useEffect(() => {
@@ -1345,6 +1667,12 @@ export default function SalesDashboard() {
 
   const config = data?.config ?? null;
   const dates = useMemo(() => data?.dates ?? [], [data]);
+  // Full past+future window (the roster grid's `dates` above stays
+  // forward-only so the main month grid and its totals are unchanged).
+  const windowDates = useMemo(
+    () => (data?.windowDates?.length ? data.windowDates : dates),
+    [data, dates],
+  );
   const displayGrid = useMemo(
     () => data?.displayGrid ?? new Map<string, Map<string, number[]>>(),
     [data],
@@ -1373,6 +1701,47 @@ export default function SalesDashboard() {
     Math.max(0, visibleDates.length - 1),
   );
   const selectedDate = visibleDates[safeDateIndex] ?? null;
+
+  // Expanded Schedule panel: an independent rolling 7-day window over the full
+  // loaded range (past + future), navigated like Instructor Management's
+  // "View Schedule" (<< < Today > >>). The main roster grid's month nav/day
+  // strip above is untouched.
+  const today = useMemo(() => istTodayISO(), []);
+  const panelMinAnchor = windowDates[0] ?? today;
+  const panelMaxAnchor =
+    windowDates[Math.max(0, windowDates.length - 7)] ?? today;
+  const panelAnchor = useMemo(() => {
+    const raw = panelAnchorInput || today;
+    if (raw < panelMinAnchor) return panelMinAnchor;
+    if (raw > panelMaxAnchor) return panelMaxAnchor;
+    return raw;
+  }, [panelAnchorInput, today, panelMinAnchor, panelMaxAnchor]);
+  const weekDates = useMemo(() => {
+    const start = Math.max(0, windowDates.indexOf(panelAnchor));
+    return windowDates.slice(start, start + 7);
+  }, [windowDates, panelAnchor]);
+  const panelRangeLabel = useMemo(
+    () => formatPanelRange(weekDates),
+    [weekDates],
+  );
+  const canPanelPrev = panelAnchor > panelMinAnchor;
+  const canPanelNext = panelAnchor < panelMaxAnchor;
+  const shiftPanel = useCallback(
+    (deltaDays: number) => {
+      setPanelAnchorInput((current) => {
+        const shifted = addDaysISO(current || today, deltaDays);
+        if (shifted < panelMinAnchor) return panelMinAnchor;
+        if (shifted > panelMaxAnchor) return panelMaxAnchor;
+        return shifted;
+      });
+    },
+    [today, panelMinAnchor, panelMaxAnchor],
+  );
+  const panelPrevWeek = useCallback(() => shiftPanel(-7), [shiftPanel]);
+  const panelNextWeek = useCallback(() => shiftPanel(7), [shiftPanel]);
+  const panelPrevDay = useCallback(() => shiftPanel(-1), [shiftPanel]);
+  const panelNextDay = useCallback(() => shiftPanel(1), [shiftPanel]);
+  const panelToday = useCallback(() => setPanelAnchorInput(today), [today]);
   const goPrev = useCallback(() => {
     if (monthIdx > 0) {
       setSortAnchorDate((current) => current ?? selectedDate);
@@ -1409,9 +1778,7 @@ export default function SalesDashboard() {
   // miss if the grid is scrolled out of view or the user doesn't notice the
   // modal closed — scroll the grid into view and give it a visible
   // highlighted border for as long as picking mode is active, so it's
-  // unmistakable where to click next. (Override no longer needs this — it
-  // always reuses the same slot the unpaid hold already occupies, so the
-  // modal opens directly with no grid interaction required.)
+  // unmistakable where to click next.
   const gridWrapRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (addingSlotMode) {
@@ -1421,6 +1788,25 @@ export default function SalesDashboard() {
       });
     }
   }, [addingSlotMode]);
+
+  // The expanded timetable is a copy of Instructor Management's grid, whose 7
+  // day-columns fill the *visible panel*. The roster grid is far wider than the
+  // viewport (18 slot columns), so expose the viewport width as a CSS var and
+  // let .detail/.week-timetable size to it instead of the full table.
+  useLayoutEffect(() => {
+    const el = gridWrapRef.current;
+    if (!el) return;
+    const apply = () =>
+      el.style.setProperty("--gc-viewport-w", `${el.clientWidth}px`);
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    window.addEventListener("resize", apply);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", apply);
+    };
+  }, [config]);
 
   useEffect(() => {
     let active = true;
@@ -1541,6 +1927,27 @@ export default function SalesDashboard() {
   }, [isExpandTransitionPending]);
 
   const pendingExpandRowId = isExpandTransitionPending ? pendingExpandId : null;
+
+  // Opening a booking collapses the roster to the booked instructor and
+  // expands that instructor's timetable in one commit (see
+  // `expandedForRender`), so the grid's height changes exactly once. This ref
+  // carries the scroll offset captured by `handleSlotSelect` across that
+  // commit; the layout effect re-applies it BEFORE the browser paints, so the
+  // viewport never visibly jumps while the booking panel opens. The clamp
+  // guards the case where the page got shorter than the captured offset (the
+  // browser would otherwise force a scroll to its new maximum).
+  const preserveScrollRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const captured = preserveScrollRef.current;
+    if (captured === null) return;
+    preserveScrollRef.current = null;
+    const maxScroll = Math.max(
+      0,
+      document.documentElement.scrollHeight - window.innerHeight,
+    );
+    const target = Math.min(captured, maxScroll);
+    if (window.scrollY !== target) window.scrollTo(0, target);
+  });
 
   // Hides the modal (formData/pendingSlots stay exactly as they are — both
   // live in this component, not the modal) and arms "pick another slot" mode.
@@ -2241,7 +2648,12 @@ export default function SalesDashboard() {
 
       // Fresh booking — reset to a clean single-slot batch and blank
       // customer form. Auto-fill address from map search if available.
-      setOverrideContext(null);
+      // Capture the current scroll offset first: the roster collapses to this
+      // instructor and its schedule expands in the same commit below, and the
+      // layout effect keyed on `preserveScrollRef` restores this offset before
+      // paint so the page doesn't jump.
+      preserveScrollRef.current = window.scrollY;
+      setEditContext(null);
       setPendingSlots([newSlot]);
       setCustomerFormData(
         DEFAULT_CUSTOMER_FORM(currentUserName, locSearch?.label ?? ""),
@@ -2368,43 +2780,97 @@ export default function SalesDashboard() {
     [lockedInstructorId],
   );
 
-  // Override always replaces the SAME slot the unpaid tentative hold
-  // already occupies — for a different, paying learner. No grid picking
-  // needed: open the modal immediately for that exact instructor/date/time,
-  // with a blank form (this is a new learner, not the same one moving) and
-  // paymentStatus pre-set to "half_paid" as a sensible starting point,
-  // since the form won't accept "unpaid" in this mode (enforced in
-  // TentativeBookingModal, and again server-side in the RPC).
-  const handleOverrideClick = useCallback(
-    (override: NonNullable<SlotInfo["override"]>) => {
-      const instr = instructorsById.get(override.instrId);
-      setOverrideContext({
-        blockId: override.blockId,
-        tentativeDetails: override.tentativeDetails,
+  // Edit an existing tentative booking: reopen the booking form loaded with
+  // every class booked together, so the shared customer fields and each
+  // class's date/time can be corrected in a single save. The booking is found
+  // by batch_id when present (new bookings) and falls back to customer
+  // phone+name (bookings made before batch_id existed). Who may edit is
+  // decided in resolveInfo: the creator for any payment status, anyone for an
+  // unpaid slot.
+  const handleEditBooking = useCallback(
+    (action: NonNullable<SlotInfo["editAction"]>) => {
+      const td = action.tentativeDetails ?? {};
+      const batchId =
+        typeof td.batch_id === "string" && td.batch_id ? td.batch_id : null;
+      const phone = typeof td.phone === "string" ? td.phone : "";
+      const name = typeof td.name === "string" ? td.name : "";
+
+      const isTentativeHold = (b: BlockDetail) =>
+        b.isTentative && (b.status === "hold" || b.status === "booked");
+      const matchesBooking = (b: BlockDetail) => {
+        if (b.instructorId !== action.instrId) return false;
+        if (!isTentativeHold(b)) return false;
+        const bd = b.rawTentativeDetails ?? {};
+        const bBatch =
+          typeof bd.batch_id === "string" && bd.batch_id ? bd.batch_id : null;
+        // A request that carries a batch id only accepts rows with that same
+        // id. Only when NEITHER side has one (legacy rows) fall back to the
+        // customer identity.
+        if (batchId || bBatch) return bBatch === batchId;
+        const bPhone = typeof bd.phone === "string" ? bd.phone : "";
+        const bName = typeof bd.name === "string" ? bd.name : "";
+        return phone !== "" && bPhone === phone && bName === name;
+      };
+
+      const siblings = (data?.blocks ?? [])
+        .filter(matchesBooking)
+        .sort((a, b) =>
+          a.date === b.date
+            ? a.startMinute - b.startMinute
+            : a.date < b.date
+              ? -1
+              : 1,
+        );
+      // Guarantee the clicked row is present even if the batch/identity match
+      // somehow missed it (e.g. it was the only row and had no details).
+      if (!siblings.some((b) => b.id === action.blockId)) {
+        const clicked = (data?.blocks ?? []).find(
+          (b) => b.id === action.blockId,
+        );
+        if (clicked) siblings.unshift(clicked);
+      }
+
+      setEditContext({
+        batchId,
+        baseDetails: action.tentativeDetails,
+        rowIds: siblings.map((b) => b.id),
       });
-      setPendingSlots([
-        {
-          instructorId: override.instrId,
-          instructorName: instr?.name ?? "",
-          date: override.date,
-          startTime: minutesToTime(override.startMinute),
-          endTime: minutesToTime(override.endMinute),
-        },
-      ]);
+      setPendingSlots(
+        siblings.map((b) => ({
+          instructorId: b.instructorId,
+          instructorName: instructorsById.get(b.instructorId)?.name ?? "",
+          date: b.date,
+          startTime: minutesToTime(b.startMinute),
+          endTime: minutesToTime(b.endMinute),
+          scheduleId: b.id,
+        })),
+      );
       setCustomerFormData({
-        ...DEFAULT_CUSTOMER_FORM(currentUserName),
-        paymentStatus: "half_paid",
+        customerName: name,
+        customerPhone: phone,
+        // Keep the original creator: another agent editing an unpaid slot
+        // must not take over (or strip) the creator's ownership.
+        salesAgent:
+          typeof td.sales_agent === "string" && td.sales_agent.trim()
+            ? td.sales_agent
+            : currentUserName,
+        paymentStatus:
+          td.payment_status === "half_paid" || td.payment_status === "full_paid"
+            ? td.payment_status
+            : "unpaid",
+        customerAddress: typeof td.address === "string" ? td.address : "",
+        course: typeof td.course === "string" && td.course ? td.course : "demo",
       });
+      setSelectedSlot(null);
       setTentativeModalOpen(true);
     },
-    [instructorsById, currentUserName],
+    [currentUserName, data?.blocks, instructorsById],
   );
 
   // Lets Sales fix a wrong entry (e.g. a typo'd name/phone or a slot picked
   // by mistake) without needing Operations or Instructor Management —
-  // unlike override, this works regardless of payment status, since it's
-  // just removing a mistaken hold rather than handing the slot to someone
-  // else.
+  // this works regardless of payment status, since it's just removing a
+  // mistaken hold.
   // Opens the in-app confirm dialog below rather than the browser's native
   // window.confirm() -- unstyled, doesn't match the app, and (unlike this
   // dialog) can't be dismissed by clicking outside or be given a real
@@ -2452,9 +2918,7 @@ export default function SalesDashboard() {
       const timeLabel = `${minutesToTime(minute)}–${minutesToTime(minute + (config?.gridMinutes ?? 30))}`;
 
       const unavail = (instr?.unavailability ?? null) as
-        | unknown[]
-        | null
-        | undefined;
+        unknown[] | null | undefined;
       const weekday = dateToWeekdayLower(date);
       const blockedByUnavail =
         unavail != null && isTimeUnavailable(unavail, date, weekday, minute);
@@ -2506,7 +2970,6 @@ export default function SalesDashboard() {
             "Already added to this booking.",
           ],
           kind: "pending",
-          override: null,
           deleteAction: null,
         };
       }
@@ -2523,7 +2986,6 @@ export default function SalesDashboard() {
             title: "Overlaps a class already in this booking",
             detail: [timeLabel, `Instructor: ${name}`],
             kind: "pending-blocked",
-            override: null,
             deleteAction: null,
           };
         }
@@ -2534,7 +2996,6 @@ export default function SalesDashboard() {
           title: "Free",
           detail: [timeLabel, `Instructor: ${name}`],
           kind: "free",
-          override: null,
           deleteAction: null,
         };
       }
@@ -2620,7 +3081,14 @@ export default function SalesDashboard() {
           cover.status === "completed"
         ) {
           const detail = [blockTime, `Instructor: ${name}`];
-          if (cover.learnerName) detail.push(`Learner: ${cover.learnerName}`);
+          if (cover.learnerName)
+            detail.push(
+              `Learner: ${cover.learnerName}${
+                cover.lessonNumber != null
+                  ? ` (Class ${cover.lessonNumber})`
+                  : ""
+              }`,
+            );
           if (cover.area) detail.push(`${ADDRESS_DETAIL_PREFIX}${cover.area}`);
           if (cover.courseName) detail.push(`Course: ${cover.courseName}`);
           return {
@@ -2631,8 +3099,24 @@ export default function SalesDashboard() {
                 : "Completed class",
             detail,
             kind: isBuffer ? "default" : "booked",
-            override: null,
             deleteAction: null,
+            card: isBuffer
+              ? undefined
+              : buildSlotCard({
+                  startMinute: cover.startMinute,
+                  endMinute: cover.endMinute,
+                  instructor: name,
+                  learner: cover.learnerName,
+                  lessonNumber: cover.lessonNumber,
+                  phone: cover.learnerPhone,
+                  location: cover.area,
+                  course: cover.courseName,
+                  // Real classes carry no tentative-only fields — Instructor
+                  // Management shows these as N/A for a confirmed class.
+                  description: "",
+                  lead: "",
+                  payment: "",
+                }),
             scheduleBlock: scheduleBlock(
               cover.status === "booked"
                 ? "Booked"
@@ -2665,8 +3149,25 @@ export default function SalesDashboard() {
                     "Slot is on hold until payment completes.",
                   ],
               kind: isBuffer ? "default" : "booked",
-              override: null,
               deleteAction: null,
+              card: isBuffer
+                ? undefined
+                : buildSlotCard({
+                    startMinute: cover.startMinute,
+                    endMinute: cover.endMinute,
+                    instructor: name,
+                    learner: cover.learnerName,
+                    lessonNumber: cover.lessonNumber,
+                    phone: cover.learnerPhone,
+                    location: cover.area,
+                    course: cover.courseName,
+                    description: "",
+                    lead: "",
+                    payment: "Payment pending",
+                  }),
+              panelDetail: isBuffer
+                ? undefined
+                : ["Slot is on hold until payment completes."],
               scheduleBlock: scheduleBlock("Payment pending"),
             };
           }
@@ -2675,15 +3176,14 @@ export default function SalesDashboard() {
               title: "Buffer for Tentative slot",
               detail: [blockTime, `Instructor: ${name}`],
               kind: "default",
-              override: null,
               deleteAction: null,
             };
           }
           // The actual tentative slot itself (not its buffer). Payment
-          // status gates both the label and whether override is offered —
-          // default to "unpaid" only if the field is missing entirely
-          // (shouldn't happen for a real tentative row, but favors
-          // showing the override option over silently hiding it).
+          // status gates both the label and who may edit — default to
+          // "unpaid" only if the field is missing entirely (shouldn't happen
+          // for a real tentative row, but favors allowing the edit over
+          // silently hiding it).
           const paymentStatus = cover.paymentStatus ?? "unpaid";
           const isUnpaid = paymentStatus === "unpaid";
           // Same fields (and the same cover.learnerName/area/courseName
@@ -2698,15 +3198,6 @@ export default function SalesDashboard() {
             tentativeDetail.push(`${ADDRESS_DETAIL_PREFIX}${cover.area}`);
           if (cover.courseName)
             tentativeDetail.push(`Course: ${cover.courseName}`);
-          // Override is only offered for status:"hold" rows (Sales
-          // Dashboard's own tentative format) — the override_tentative_slot
-          // RPC hard-requires v_old.status = 'hold' server-side (see
-          // sql/override_tentative_slot.sql) and rejects anything else, so
-          // showing this button for an unpaid status:"booked" tentative
-          // row (Instructor Management's format) would offer an action
-          // that fails server-side. Deleting isn't restricted this way —
-          // it's a plain row delete, not gated by status.
-          const canOverride = isUnpaid && cover.status === "hold";
           // Only the sales agent who created a tentative hold can delete
           // it — matched against tentative_details.sales_agent, the same
           // field the "Sales Agent" form field is locked to (see
@@ -2726,34 +3217,59 @@ export default function SalesDashboard() {
           const canDelete =
             creatorName !== "" &&
             creatorName.toLowerCase() === currentUserName.trim().toLowerCase();
+          // The creator may edit their own tentative slot at any payment
+          // status; anyone may edit an unpaid one (e.g. to hand it to a
+          // learner who is now paying). Delete stays creator-only.
+          const canEdit = canDelete || isUnpaid;
           if (isUnpaid) {
-            tentativeDetail.push(
-              canOverride
-                ? "Unpaid — can be overridden with a new slot."
-                : "Unpaid.",
-            );
+            tentativeDetail.push("Unpaid — anyone can edit this booking.");
           }
           if (!canDelete) {
             tentativeDetail.push(
               creatorName
-                ? `Created by ${creatorName} — only they can delete this.`
-                : "No creator recorded for this slot — it can't be deleted from here.",
+                ? `Created by ${creatorName} — only they can delete${canEdit ? "" : " or edit"} this.`
+                : `No creator recorded for this slot — it can't be deleted${canEdit ? "" : " or edited"} from here.`,
             );
           }
+          // Keep the panel's existing hold notes (edit/creator) alongside
+          // the card, so nothing the panel showed before is lost.
+          const panelNotes = tentativeDetail.filter(
+            (line) =>
+              line !== blockTime &&
+              !line.startsWith("Instructor: ") &&
+              !line.startsWith("Learner: ") &&
+              !line.startsWith(ADDRESS_DETAIL_PREFIX) &&
+              !line.startsWith("Course: "),
+          );
           return {
             title: isUnpaid ? "🟡 Tentative (Unpaid)" : "Tentative",
             detail: tentativeDetail,
             kind: "tentative",
-            override: canOverride
-              ? {
-                  blockId: cover.id,
-                  instrId,
-                  date,
-                  startMinute: cover.startMinute,
-                  endMinute: cover.endMinute,
-                  tentativeDetails: cover.rawTentativeDetails,
-                }
-              : null,
+            panelDetail: panelNotes,
+            card: buildSlotCard({
+              startMinute: cover.startMinute,
+              endMinute: cover.endMinute,
+              instructor: name,
+              learner: cover.learnerName,
+              lessonNumber: cover.lessonNumber,
+              phone: cover.learnerPhone,
+              location: cover.area,
+              // Instructor Management's tentative card shows the hold's
+              // description (not a course) plus its lead and payment info.
+              course: "",
+              description: cover.courseName,
+              lead: cover.rawTentativeDetails?.leadName
+                ? String(cover.rawTentativeDetails.leadName)
+                : "",
+              payment:
+                paymentStatus === "full_paid"
+                  ? "Full paid"
+                  : paymentStatus === "half_paid"
+                    ? "Half paid"
+                    : paymentStatus === "unpaid"
+                      ? "Unpaid"
+                      : paymentStatus,
+            }),
             deleteAction: canDelete
               ? {
                   blockId: cover.id,
@@ -2763,6 +3279,14 @@ export default function SalesDashboard() {
                     cover.rawTentativeDetails.name
                       ? cover.rawTentativeDetails.name
                       : "this customer",
+                }
+              : null,
+            // Creator: any payment status. Anyone else: unpaid slots only.
+            editAction: canEdit
+              ? {
+                  blockId: cover.id,
+                  instrId,
+                  tentativeDetails: cover.rawTentativeDetails,
                 }
               : null,
             scheduleBlock: scheduleBlock("Tentative"),
@@ -2779,7 +3303,6 @@ export default function SalesDashboard() {
                   ...(cover.notes ? [`Reason: ${cover.notes}`] : []),
                 ],
             kind: isBuffer ? "default" : "paused",
-            override: null,
             deleteAction: null,
             scheduleBlock: scheduleBlock(
               cover.pauseReason.toLowerCase() === "payment"
@@ -2792,7 +3315,6 @@ export default function SalesDashboard() {
           title: cap(cover.status),
           detail: [blockTime, `Instructor: ${name}`],
           kind: "default",
-          override: null,
           deleteAction: null,
           scheduleBlock: scheduleBlock(cap(cover.status)),
         };
@@ -2809,7 +3331,6 @@ export default function SalesDashboard() {
               : ["Instructor marked this time unavailable."]),
           ],
           kind: "unavailable",
-          override: null,
           deleteAction: null,
         };
       }
@@ -2818,7 +3339,6 @@ export default function SalesDashboard() {
         title: "Busy",
         detail: [timeLabel, `Instructor: ${name}`],
         kind: "default",
-        override: null,
         deleteAction: null,
       };
     };
@@ -2878,6 +3398,36 @@ export default function SalesDashboard() {
       root.style.setProperty("--instr-col-width", `${widest + 1}px`);
     }
   }, [gridRows]);
+
+  // Instructors whose schedules are still being fetched. The empty state must
+  // wait for these: otherwise "No instructors loaded yet" renders underneath a
+  // "Loading schedule…" row while a newly added instructor is in flight.
+  const loadingRows = (data?.loading ?? []).filter(
+    (li) => !lockedInstructorId || li.id === lockedInstructorId,
+  );
+
+  // Instructors whose fetch failed. Rendered as in-grid rows (name + reason +
+  // Retry) so a failure is never masked by the "No instructors loaded yet"
+  // empty state, which is what used to happen because `data.errors` was
+  // written but never read by the UI.
+  const errorRows = useMemo<SalesErrorRow[]>(() => {
+    const errors = data?.errors ?? {};
+    const names = data?.names;
+    return Object.entries(errors)
+      .map(([id, message]) => ({
+        id,
+        name: names?.get(id) ?? "",
+        message,
+      }))
+      .filter((r) => !lockedInstructorId || r.id === lockedInstructorId);
+  }, [data, lockedInstructorId]);
+
+  const retryLoadInstructor = useCallback(
+    (id: string) => {
+      loadInstructors([id]);
+    },
+    [loadInstructors],
+  );
 
   const onSearchKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter" && searchResults.length > 0)
@@ -2947,17 +3497,6 @@ export default function SalesDashboard() {
         <header className="topbar">
           <h1 className="topbar-title">Instructor availability</h1>
           <div className="topbar-row">
-            <div className="brand">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => navigate("/admin")}
-              >
-                <ArrowLeft className="mr-2 h-4 w-4" />
-                Back
-              </Button>
-            </div>
-
             <div className="cal-nav">
               <button
                 type="button"
@@ -2981,6 +3520,39 @@ export default function SalesDashboard() {
             </div>
 
             <div className="controls">
+              <div
+                className="topbar-legend"
+                aria-label="Schedule status legend"
+              >
+                <span className="tt-legend-item">
+                  <span className="h-2 w-2 rounded-sm bg-indigo-500" />
+                  Booked
+                </span>
+                <span className="tt-legend-item">
+                  <span className="h-2 w-2 rounded-sm bg-amber-400" />
+                  Tentative
+                </span>
+                <span className="tt-legend-item">
+                  <span className="h-2 w-2 rounded-sm bg-blue-500" />
+                  Ongoing
+                </span>
+                <span className="tt-legend-item">
+                  <span className="h-2 w-2 rounded-sm bg-emerald-500" />
+                  Done (OTP)
+                </span>
+                <span className="tt-legend-item">
+                  <span className="h-2 w-2 rounded-sm bg-orange-400" />
+                  Done (manual)
+                </span>
+                <span className="tt-legend-item">
+                  <span className="h-2 w-2 rounded-sm bg-slate-500" />
+                  Paused
+                </span>
+                <span className="tt-legend-item">
+                  <span className="h-2 w-2 rounded-sm bg-red-500" />
+                  Payment Due
+                </span>
+              </div>
               <div className="controls-row">
                 <select
                   className="sort-select"
@@ -3111,7 +3683,7 @@ export default function SalesDashboard() {
                 validateSlot={validateSlotFresh}
                 formData={customerFormData}
                 onFormDataChange={setCustomerFormData}
-                overrideContext={overrideContext}
+                editContext={editContext}
               />
             ) : selectedSlot ? (
               <div className="slot-panel-detail">
@@ -3141,27 +3713,49 @@ export default function SalesDashboard() {
                   {minutesToTime(selectedSlot.minute)}&ndash;
                   {minutesToTime(selectedSlot.minute + 60)}
                 </p>
-                {selectedSlot.info.detail.length > 0 && (
-                  <dl className="slot-panel-detail-list">
-                    {selectedSlot.info.detail.map((line, i) => (
-                      <div className="slot-panel-detail-row" key={i}>
-                        <dd>{line}</dd>
-                      </div>
-                    ))}
-                  </dl>
+                {selectedSlot.info.card ? (
+                  <>
+                    <dl className="slot-panel-detail-list">
+                      {selectedSlot.info.card.map((row, i) => (
+                        <div className="slot-panel-detail-row" key={i}>
+                          <dt>{row.label}</dt>
+                          <dd>{row.value}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                    {(selectedSlot.info.panelDetail?.length ?? 0) > 0 && (
+                      <dl className="slot-panel-detail-list slot-panel-detail-extra">
+                        {selectedSlot.info.panelDetail!.map((line, i) => (
+                          <div className="slot-panel-detail-row" key={i}>
+                            <dd>{line}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    )}
+                  </>
+                ) : (
+                  selectedSlot.info.detail.length > 0 && (
+                    <dl className="slot-panel-detail-list">
+                      {selectedSlot.info.detail.map((line, i) => (
+                        <div className="slot-panel-detail-row" key={i}>
+                          <dd>{line}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  )
                 )}
-                {(selectedSlot.info.override ||
+                {(selectedSlot.info.editAction ||
                   selectedSlot.info.deleteAction) && (
                   <div className="slot-panel-detail-actions">
-                    {selectedSlot.info.override && (
+                    {selectedSlot.info.editAction && (
                       <button
                         type="button"
-                        className="slot-pop-override-btn"
+                        className="slot-pop-edit-btn"
                         onClick={() =>
-                          handleOverrideClick(selectedSlot.info.override!)
+                          handleEditBooking(selectedSlot.info.editAction!)
                         }
                       >
-                        Override Slot
+                        Edit Booking
                       </button>
                     )}
                     {selectedSlot.info.deleteAction && (
@@ -3341,48 +3935,63 @@ export default function SalesDashboard() {
                 timeStarts={timeStarts}
                 dates={visibleDates}
                 selectedDate={selectedDate}
-                activeMonth={activeMonth}
-                canGoPreviousMonth={monthIdx > 0}
-                canGoNextMonth={monthIdx < months.length - 1}
+                weekDates={weekDates}
+                panelRangeLabel={panelRangeLabel}
+                canPanelPrev={canPanelPrev}
+                canPanelNext={canPanelNext}
                 gridMinutes={config.gridMinutes}
                 slotStart={config.slotStart}
                 slotEnd={config.slotEnd}
-                expanded={expanded}
+                expanded={expandedForRender}
                 pendingExpandId={pendingExpandRowId}
                 selectedRows={selectedRows}
                 rowColors={rowColors}
-                loadingRows={(data?.loading ?? []).filter(
-                  (li) => !lockedInstructorId || li.id === lockedInstructorId,
-                )}
+                loadingRows={loadingRows}
+                errorRows={errorRows}
+                onRetryLoad={retryLoadInstructor}
                 onToggleExpand={toggleExpand}
-                onPreviousMonth={goPrev}
-                onNextMonth={goNext}
+                onPanelPrevWeek={panelPrevWeek}
+                onPanelNextWeek={panelNextWeek}
+                onPanelPrevDay={panelPrevDay}
+                onPanelNextDay={panelNextDay}
+                onPanelToday={panelToday}
                 onToggleSelectRow={toggleSelectRow}
                 onRemove={
                   inSelectionMode ? removeFromCompare : removeRosterInstructor
                 }
                 onSelect={handleSlotSelect}
-                onOverrideClick={handleOverrideClick}
                 onDeleteTentative={handleDeleteTentative}
+                onEditBooking={handleEditBooking}
                 resolveInfo={resolveInfo}
               />
-              {gridRows.length === 0 && lockedInstructorId && (
-                <p className="empty">
-                  {lockedInstructorName} is no longer on the grid. Cancel or
-                  complete the booking, then search for the instructor again.
-                </p>
-              )}
-              {gridRows.length === 0 && !lockedInstructorId && !locSearch && (
-                <p className="empty">
-                  No instructors loaded yet. Search by name above or use Search
-                  by location.
-                </p>
-              )}
-              {gridRows.length === 0 && !lockedInstructorId && locSearch && (
-                <p className="empty">
-                  No instructors match this location. Try another area.
-                </p>
-              )}
+              {gridRows.length === 0 &&
+                loadingRows.length === 0 &&
+                errorRows.length === 0 &&
+                lockedInstructorId && (
+                  <p className="empty">
+                    {lockedInstructorName} is no longer on the grid. Cancel or
+                    complete the booking, then search for the instructor again.
+                  </p>
+                )}
+              {gridRows.length === 0 &&
+                loadingRows.length === 0 &&
+                errorRows.length === 0 &&
+                !lockedInstructorId &&
+                !locSearch && (
+                  <p className="empty">
+                    No instructors loaded yet. Search by name above or use
+                    Search by location.
+                  </p>
+                )}
+              {gridRows.length === 0 &&
+                loadingRows.length === 0 &&
+                errorRows.length === 0 &&
+                !lockedInstructorId &&
+                locSearch && (
+                  <p className="empty">
+                    No instructors match this location. Try another area.
+                  </p>
+                )}
             </div>
 
             <footer className="legend">
@@ -3392,8 +4001,8 @@ export default function SalesDashboard() {
                 -minute travel gap)
               </span>
               <span>
-                <i className="swatch tentative" /> 🟡 Tentative (unpaid can be
-                overridden)
+                <i className="swatch tentative" /> 🟡 Tentative (unpaid slots
+                can be edited by anyone)
               </span>
               <span>
                 <i className="swatch booked" /> 🟣 Booked
@@ -3639,42 +4248,26 @@ export default function SalesDashboard() {
                   </div>
 
                   <div className="help-section">
-                    <h3>Override an unpaid tentative slot</h3>
+                    <h3>Edit a tentative booking</h3>
                     <ul>
                       <li>
-                        Hover a <strong>yellow</strong> slot. If its payment
-                        status is <strong>unpaid</strong>, the popover shows{" "}
-                        <strong>🟡 Tentative (Unpaid)</strong> with an{" "}
-                        <strong>Override Slot</strong> button.
+                        Click a <strong>yellow</strong> slot and choose{" "}
+                        <strong>Edit Booking</strong> to change the customer
+                        details, payment status or the classes in that booking.
                       </li>
                       <li>
-                        Half-paid and full-paid tentative slots show plainly as{" "}
-                        <strong>Tentative</strong> with no override option —
-                        once any payment has been collected, that slot is
-                        protected and can&apos;t be taken from this dashboard.
+                        The agent who created a tentative slot can edit it at
+                        any payment status.
                       </li>
                       <li>
-                        Clicking <strong>Override Slot</strong> opens the
-                        booking form immediately for that <strong>same</strong>{" "}
-                        slot — no need to pick a different time. This is for
-                        handing an unpaid hold to a new, paying learner, not
-                        moving the existing customer elsewhere.
+                        <strong>Anyone</strong> can edit an{" "}
+                        <strong>unpaid</strong> tentative slot — for example to
+                        hand it to a learner who is now paying. The original
+                        creator stays on record, and only they can delete it.
                       </li>
                       <li>
-                        Fill in the <strong>new</strong> learner&apos;s details.
-                        Payment Status only offers <strong>Half Paid</strong> or{" "}
-                        <strong>Full Paid</strong> — a new unpaid hold
-                        can&apos;t override an existing one, so
-                        &quot;Unpaid&quot; isn&apos;t an option here.
-                      </li>
-                      <li>
-                        Submitting releases the old unpaid hold and creates a
-                        new tentative slot (still tentative, never directly
-                        booked) for the new learner at the same time. This is
-                        re-checked on the server, not just here — if the old
-                        slot was paid or changed by someone else in the
-                        meantime, the override is rejected and the original
-                        booking stays exactly as it was.
+                        Paid slots created by someone else are protected: they
+                        can&apos;t be edited from here.
                       </li>
                     </ul>
                   </div>
