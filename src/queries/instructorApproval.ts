@@ -86,38 +86,45 @@ export interface RejectionReason {
   id: string;
   label: string;
   backendTag: string;
+  suggestedMessage: string;
 }
 
 export const REJECTION_REASONS: RejectionReason[] = [
   {
-    id: "legibility",
-    label: "Document not eligible",
-    backendTag: "eligible",
+    id: "illegible",
+    label: "Illegible",
+    backendTag: "illegible",
+    suggestedMessage: "The document is not clear enough. Please re-upload a clear photo showing all four corners.",
   },
   {
     id: "expired",
-    label: "Document expired",
+    label: "Expired",
     backendTag: "expired",
+    suggestedMessage: "This document has expired. Please provide a valid document with future expiry date.",
   },
   {
     id: "mismatch",
-    label: "Details do not match",
-    backendTag: "details_mismatch",
+    label: "Mismatch",
+    backendTag: "mismatch",
+    suggestedMessage: "Details on the document do not match the information provided. Please verify and re-upload.",
   },
   {
-    id: "wrong_document",
-    label: "Wrong document uploaded",
-    backendTag: "wrong_document",
+    id: "wrong_doc",
+    label: "Wrong_doc",
+    backendTag: "wrong_doc",
+    suggestedMessage: "The uploaded document does not match the required document type. Please upload the correct document.",
   },
   {
-    id: "missing",
-    label: "Front / back missing",
-    backendTag: "missing_side",
+    id: "side_missing",
+    label: "Side_missing",
+    backendTag: "side_missing",
+    suggestedMessage: "The front or back side of the document is missing. Please upload both sides.",
   },
   {
     id: "other",
-    label: "Other (add note)",
+    label: "Other",
     backendTag: "other",
+    suggestedMessage: "Please add a note below explaining the rejection reason.",
   },
 ];
 
@@ -129,26 +136,31 @@ export const PEDAL_VIDEO_REJECTION_REASONS: RejectionReason[] = [
     id: "footage_too_dark",
     label: "Footage too dark",
     backendTag: "too_dark",
+    suggestedMessage: "The footage is too dark to see the pedal mechanism clearly. Please re-record in better lighting conditions.",
   },
   {
     id: "pedal_not_visible",
     label: "Pedal/linkage not visible",
     backendTag: "pedal_not_visible",
+    suggestedMessage: "The pedal and linkage mechanism are not clearly visible in the video. Please adjust the camera angle and re-record.",
   },
   {
     id: "vehicle_mismatch",
     label: "Vehicle does not match RC",
     backendTag: "vehicle_mismatch",
+    suggestedMessage: "The vehicle in the video does not match the registration certificate provided. Please re-record with the correct vehicle.",
   },
   {
     id: "angle_missing",
     label: "Required angle missing",
     backendTag: "angle_missing",
+    suggestedMessage: "One or more required camera angles are missing. Please re-record showing all required views.",
   },
   {
     id: "other_video",
-    label: "Other (add note)",
+    label: "Other",
     backendTag: "other",
+    suggestedMessage: "Please add a note below explaining the rejection reason.",
   },
 ];
 
@@ -878,7 +890,7 @@ export async function rejectDocument(instructorId: string, documentId: string, r
     },
     body: JSON.stringify({
       reason_code: reason,
-      reason_message: message,
+      message: message,
     }),
   });
 
@@ -921,7 +933,7 @@ export async function rejectVideo(instructorId: string, videoId: string, reason:
     },
     body: JSON.stringify({
       reason_code: reason,
-      reason_message: message,
+      message: message,
     }),
   });
 

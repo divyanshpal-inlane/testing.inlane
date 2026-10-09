@@ -46,7 +46,7 @@ export default function InstructorApprovalPage(): JSX.Element {
   // Fetch real instructor data from backend API
   const { data: instructor, isLoading, error } = useFetchInstructorDocuments(id, stage);
   
-  // ✅ ALL HOOKS MUST BE DEFINED BEFORE ANY CONDITIONAL RETURNS
+  // ? ALL HOOKS MUST BE DEFINED BEFORE ANY CONDITIONAL RETURNS
   // Document states
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>("");
   const [selectedSide, setSelectedSide] = useState<DocumentSide>("front");
@@ -129,8 +129,17 @@ export default function InstructorApprovalPage(): JSX.Element {
       video.removeEventListener("loadedmetadata", handleLoadedMetadata);
     };
   }, []);
+
+  // Auto-fill rejection message based on selected reason
+  useEffect(() => {
+    const selectedReason = REJECTION_REASONS.find((r) => r.id === selectedRejectionReason);
+    if (selectedReason) {
+      setRejectionMessage(selectedReason.suggestedMessage);
+      console.log(`[REJECTION_MODAL] Auto-filled message for reason: ${selectedReason.label}`);
+    }
+  }, [selectedRejectionReason]);
   
-  // ✅ NOW we can have conditional returns AFTER all hooks
+  // ? NOW we can have conditional returns AFTER all hooks
   // Show loading state
   if (isLoading) {
     return (
@@ -209,11 +218,11 @@ export default function InstructorApprovalPage(): JSX.Element {
       console.log("[UI] Document verified successfully:", response);
       
       setDocumentStatuses((prev) => ({ ...prev, [docId]: "approved" }));
-      alert(`✅ Document approved and verified!`);
+      alert(`? Document approved and verified!`);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to approve document";
       console.error("[UI] Error approving document:", errorMsg);
-      alert(`❌ Error: ${errorMsg}`);
+      alert(`? Error: ${errorMsg}`);
     }
   };
 
@@ -391,17 +400,17 @@ export default function InstructorApprovalPage(): JSX.Element {
     if (!id) return;
 
     try {
-      console.log("[UI] Admin rejecting document:", { docId, reason, message });
-      const response = await rejectDocument(id, docId, reason, message);
-      console.log("[UI] Document rejected successfully:", response);
+      console.log("[REJECT_DOC] Rejecting document:", { docId, reason, message });
+      const response = await rejectDocument(id, docId, backendTag, message);
+      console.log("[REJECT_DOC] API Response: :", response);
 
       // Update document status to rejected
       setDocumentStatuses((prev) => ({ ...prev, [docId]: "rejected" }));
-      alert(`✅ Document rejected! Instructor will be notified to re-upload.`);
+      alert(`? Document rejected! Instructor will be notified to re-upload.`);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to reject document";
-      console.error("[UI] Error rejecting document:", errorMsg);
-      alert(`❌ Error: ${errorMsg}`);
+      console.error("[REJECT_DOC] Error:", errorMsg);
+      alert(`? Error: ${errorMsg}`);
     } finally {
       // Close modal and reset states
       setIsRejectionModalOpen(false);
@@ -432,11 +441,11 @@ export default function InstructorApprovalPage(): JSX.Element {
 
       // Update video status to rejected
       setVideoStatuses((prev) => ({ ...prev, [videoId]: "rejected" }));
-      alert(`✅ Video rejected! Instructor will be notified to re-upload.`);
+      alert(`? Video rejected! Instructor will be notified to re-upload.`);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to reject video";
       console.error("[UI] Error rejecting video:", errorMsg);
-      alert(`❌ Error: ${errorMsg}`);
+      alert(`? Error: ${errorMsg}`);
     } finally {
       // Close modal and reset states
       setIsVideoRejectionModalOpen(false);
@@ -456,11 +465,11 @@ export default function InstructorApprovalPage(): JSX.Element {
       console.log("[UI] Video verified successfully:", response);
 
       setVideoStatuses((prev) => ({ ...prev, [videoId]: "approved" }));
-      alert(`✅ Video approved and verified!`);
+      alert(`? Video approved and verified!`);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to approve video";
       console.error("[UI] Error approving video:", errorMsg);
-      alert(`❌ Error: ${errorMsg}`);
+      alert(`? Error: ${errorMsg}`);
     }
   };
 
@@ -479,11 +488,11 @@ export default function InstructorApprovalPage(): JSX.Element {
       });
       setDocumentStatuses(updatedStatuses);
 
-      alert(`✅ All Stage 1 documents approved! Instructor marked as active for Stage 2.`);
+      alert(`? All Stage 1 documents approved! Instructor marked as active for Stage 2.`);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to approve Stage 1 documents";
       console.error("[UI] Error approving Stage 1 documents:", errorMsg);
-      alert(`❌ Error: ${errorMsg}`);
+      alert(`? Error: ${errorMsg}`);
     }
   };
 
@@ -561,7 +570,7 @@ export default function InstructorApprovalPage(): JSX.Element {
                 {instructor.name}
               </h1>
               <p className="text-xs text-gray-500">
-                {instructor.phone} • applied {appliedDate}
+                {instructor.phone} . applied {appliedDate}
               </p>
             </div>
           </div>
@@ -866,7 +875,7 @@ export default function InstructorApprovalPage(): JSX.Element {
                             </div>
                           ) : status === "approved" ? (
                             <div className="px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap flex items-center gap-2" style={{backgroundColor: '#DDF8EF', color: '#00CE84'}}>
-                              <span>?</span>
+                              <span style={{fontSize: '30px', lineHeight: '1', marginTop: '-10px'}}>.</span>
                               <span>Approved</span>
                             </div>
                           ) : status === "rejected" ? (
@@ -884,7 +893,7 @@ export default function InstructorApprovalPage(): JSX.Element {
                               </button>
                               {/* Rejected badge */}
                               <div className="px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap flex items-center gap-2" style={{backgroundColor: '#FDECEC', color: '#EF4444'}}>
-                                <span>?</span>
+                                <span style={{fontSize: '30px', lineHeight: '1', marginTop: '-10px'}}>.</span>
                                 <span>Rejected</span>
                               </div>
                             </div>
@@ -941,7 +950,7 @@ export default function InstructorApprovalPage(): JSX.Element {
             <div>
               <h2 className="text-lg font-bold text-gray-900">{instructor.name}</h2>
               <p className="text-sm text-gray-600">
-                {instructor.phone} • video uploaded {formatDistanceToNow(parseISO(instructor.lastVideoUploadedAt || instructor.applied_at), { addSuffix: true })}
+                {instructor.phone} . video uploaded {formatDistanceToNow(parseISO(instructor.lastVideoUploadedAt || instructor.applied_at), { addSuffix: true })}
               </p>
             </div>
           </div>
@@ -957,7 +966,7 @@ export default function InstructorApprovalPage(): JSX.Element {
             </div>
 
             {/* Separator */}
-            <span className="text-gray-400">�</span>
+            <span className="text-gray-400">→</span>
 
             {/* Stage 2 - Active */}
             <div className="flex items-center gap-2">
@@ -968,7 +977,7 @@ export default function InstructorApprovalPage(): JSX.Element {
             </div>
 
             {/* Separator */}
-            <span className="text-gray-400">�</span>
+            <span className="text-gray-400">→</span>
 
             {/* Stage 3 - Future */}
             <div className="flex items-center gap-2">
@@ -1090,31 +1099,73 @@ export default function InstructorApprovalPage(): JSX.Element {
               <div className="px-4 py-3 border-t border-gray-200 bg-gray-50">
                 <p className="font-semibold text-gray-900 text-sm mb-1">Pedal installation video</p>
                 <p className="text-xs text-gray-500">
-                  uploaded {formatDistanceToNow(parseISO(instructor.videos[0].uploadedAt), { addSuffix: true })} � {instructor.videos[0].angles} angles
+                  uploaded {formatDistanceToNow(parseISO(instructor.videos[0].uploadedAt), { addSuffix: true })} . {instructor.videos[0].angles} angles
                 </p>
               </div>
 
-              {/* Approve/Reject Buttons */}
-              <div className="px-4 py-3 border-t border-gray-200 flex gap-2">
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleApproveVideo(instructor.videos[0].id);
-                  }}
-                  className="h-9 w-9 rounded-lg bg-white border border-gray-300 flex items-center justify-center text-gray-700 hover:border-gray-400 hover:bg-gray-50 transition-all"
-                >
-                  <Check className="h-4 w-4" />
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleRejectVideo(instructor.videos[0].id);
-                  }}
-                  className="h-9 w-9 rounded-lg bg-white border border-gray-300 flex items-center justify-center text-gray-700 hover:border-red-300 hover:bg-red-50 transition-all"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
+              {/* Approve/Reject Buttons or Status Badge */}
+               <div className="px-4 py-3 border-t border-gray-200 flex gap-2">
+                 {(() => {
+                   const videoStatus = videoStatuses[instructor.videos[0].id] || instructor.videos[0].status || "pending";
+                   
+                   if (videoStatus === "pending") {
+                     return (
+                       <>
+                         <button
+                           onClick={(e) => {
+                             e.stopPropagation();
+                             handleApproveVideo(instructor.videos[0].id);
+                           }}
+                           className="h-9 w-9 rounded-lg bg-white border border-gray-300 flex items-center justify-center text-gray-700 hover:border-gray-400 hover:bg-gray-50 transition-all"
+                         >
+                           <Check className="h-4 w-4" />
+                         </button>
+                         <button
+                           onClick={(e) => {
+                             e.stopPropagation();
+                             handleRejectVideo(instructor.videos[0].id);
+                           }}
+                           className="h-9 w-9 rounded-lg bg-white border border-gray-300 flex items-center justify-center text-gray-700 hover:border-red-300 hover:bg-red-50 transition-all"
+                         >
+                           <X className="h-4 w-4" />
+                         </button>
+                       </>
+                     );
+                   } else if (videoStatus === "approved") {
+                     return (
+                       <div className="px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap flex items-center gap-2" style={{backgroundColor: '#DDF8EF', color: '#00CE84'}}>
+                         <span style={{fontSize: '30px', lineHeight: '1', marginTop: '-10px'}}>.</span>
+                         <span>Approved</span>
+                       </div>
+                     );
+                   } else if (videoStatus === "rejected") {
+                     return (
+                       <div className="flex items-center gap-2">
+                         {/* <button
+                           onClick={(e) => {
+                             e.stopPropagation();
+                             handleRejectVideo(instructor.videos[0].id);
+                           }}
+                           className="p-1.5 rounded-lg bg-blue-50 border border-blue-200 text-blue-600 hover:bg-blue-100 hover:border-blue-300 transition-all"
+                           title="Reject video again"
+                         >
+                           <X className="h-4 w-4" />
+                         </button> */}
+                         <div className="px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap flex items-center gap-2" style={{backgroundColor: '#FDECEC', color: '#EF4444'}}>
+                           <span style={{fontSize: '30px', lineHeight: '1', marginTop: '-10px'}}>.</span>
+                           <span>Rejected</span>
+                         </div>
+                       </div>
+                     );
+                   } else {
+                     return (
+                       <div className="px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap bg-gray-100 text-gray-700">
+                         Pending
+                       </div>
+                     );
+                   }
+                 })()}
+               </div>
 
               {/* CTA Button */}
               <button
@@ -1137,7 +1188,7 @@ export default function InstructorApprovalPage(): JSX.Element {
             {/* Header */}
             <div className="flex items-start justify-between mb-4">
               <h2 className="text-lg font-bold text-gray-900">
-                Reject � {currentDocument ? getDocumentDisplayName(currentDocument.type) : "Document"}
+                Reject ? {currentDocument ? getDocumentDisplayName(currentDocument.type) : "Document"}
               </h2>
               <button
                 onClick={() => setIsRejectionModalOpen(false)}
@@ -1259,7 +1310,7 @@ export default function InstructorApprovalPage(): JSX.Element {
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden" onClick={(e) => e.stopPropagation()}>
             {/* Modal Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-              <h2 className="text-lg font-bold text-gray-900">Request re-upload � Pedal video</h2>
+              <h2 className="text-lg font-bold text-gray-900">Request re-upload ? Pedal video</h2>
               <button
                 onClick={() => setIsVideoRejectionModalOpen(false)}
                 className="text-gray-400 hover:text-gray-600 transition-colors"
