@@ -18,6 +18,7 @@ import {
 import {
   addDaysISO,
   istTodayISO,
+  loadErrorToMessage,
   timeToMinutes,
 } from "@/lib/sales-dashboard/validation";
 import { fetchCompanyInstructorIds } from "@/lib/sales-dashboard/zones-db";
@@ -33,6 +34,21 @@ const sb = supabase as any;
 
 const PAGE_SIZE = 1000;
 const IN_CHUNK = 60;
+
+// How long the realtime handler collects Schedule-change events before
+// refreshing the affected instructors once. Long enough to swallow a bulk-add
+// burst, short enough that the grid still feels live after a booking.
+const REALTIME_DEBOUNCE_MS = 400;
+
+// Client-side deadline for a roster/schedule/config fetch. Supabase/PostgREST
+// requests have no timeout of their own, so a stalled connection left a row on
+// "Loading schedule…" (or the whole page on "Loading availability…") forever,
+// with `s.loading` never cleared because `doLoad` never settled. On expiry the
+// fetch is aborted, the row leaves the loading set and a retryable error is
+// shown instead of a permanent skeleton.
+const LOAD_TIMEOUT_MS = 20_000;
+const LOAD_TIMEOUT_MESSAGE =
+  "Loading timed out. Check your connection and try again.";
 
 export interface InstructorRow {
   id: string;
@@ -103,15 +119,24 @@ export interface BlockDetail {
   lessonNumber: number | null;
   startedAt: string | null;
   endedAt: string | null;
+  // Learner's phone, shown in the side panel's Instructor-Management-style
+  // card (tentative holds keep it in tentative_details.phone instead).
+  learnerPhone: string;
 }
 
 export interface SalesData {
   config: BookingFlowConfig;
+  // Main roster grid window: forward-only (starts tomorrow), unchanged.
   dates: string[];
+  // Full past+future window the expanded Schedule timetable pages over.
+  windowDates: string[];
   timeStarts: number[];
   allInstructors: LightInstructor[];
   instructors: InstructorRow[];
   loading: LightInstructor[];
+  // Display names for ids in `loading`/`errors`, cached so those rows render
+  // even before the light index (allInstructors) has loaded.
+  names: Map<string, string>;
   errors: Record<string, string>;
   freeGrid: Map<string, Map<string, number[]>>;
   displayGrid: Map<string, Map<string, number[]>>;
@@ -131,6 +156,7 @@ async function fetchScheduleWindow(
   dateFrom: string,
   dateTo: string,
   excludedStatuses: string[],
+  signal?: AbortSignal,
 ): Promise<ScheduleRow[]> {
   const excludeFilter =
     excludedStatuses.length > 0 ? `(${excludedStatuses.join(",")})` : null;
@@ -151,7 +177,8 @@ async function fetchScheduleWindow(
       if (group) query = query.in("instructor_id", group);
       const { data, error } = await query
         .order("id", { ascending: true })
-        .range(offset, offset + PAGE_SIZE - 1);
+        .range(offset, offset + PAGE_SIZE - 1)
+        .abortSignal(signal);
       if (error) throw error;
       rows.push(...((data ?? []) as ScheduleRow[]));
       if (!data || data.length < PAGE_SIZE) break;
@@ -221,6 +248,14 @@ interface Store {
   displayGrid: Map<string, Map<string, number[]>>;
   blocks: BlockDetail[];
   loading: Set<string>;
+  // Display name per loading/errored instructor id. The roster grid renders
+  // loading/error rows from `loading`/`errors`, whose names used to be resolved
+  // through the light instructor index (allRef). On a cold load that index can
+  // still be empty while a fetch is in flight, so the row was dropped entirely
+  // -- which produced the bogus "No instructors loaded yet" empty state while
+  // the same fetch was genuinely running. Caching the name here makes the row
+  // renderable regardless of index timing.
+  names: Map<string, string>;
   errors: Record<string, string>;
 }
 
@@ -231,6 +266,11 @@ export function useSalesData() {
 
   const configRef = useRef<BookingFlowConfig | null>(null);
   const datesRef = useRef<string[]>([]);
+  // The forward slice of datesRef the main roster grid uses (tomorrow onward).
+  // `datesRef` itself now carries the expanded timetable's full past+future
+  // window, but every main-grid consumer (month nav, day strip, "X free"
+  // totals) must keep seeing the original forward-only list.
+  const forwardDatesRef = useRef<string[]>([]);
   const timeStartsRef = useRef<number[]>([]);
   const allRef = useRef<LightInstructor[]>([]);
   const storeRef = useRef<Store>({
@@ -239,6 +279,7 @@ export function useSalesData() {
     displayGrid: new Map(),
     blocks: [],
     loading: new Set(),
+    names: new Map(),
     errors: {},
   });
 
@@ -250,13 +291,24 @@ export function useSalesData() {
     const byId = new Map(allRef.current.map((a) => [a.id, a]));
     setData({
       config: cfg,
-      dates: datesRef.current,
+      dates: forwardDatesRef.current,
+      windowDates: datesRef.current,
       timeStarts: timeStartsRef.current,
       allInstructors: allRef.current,
       instructors: [...s.instructors.values()],
-      loading: loadingIds
-        .map((id) => byId.get(id))
-        .filter((x): x is LightInstructor => Boolean(x)),
+      // Never drop a loading id just because the index hasn't loaded its name
+      // yet -- fall back to the cached name (possibly "") so the grid, the
+      // empty-state gate and the error gate all agree that a fetch is running.
+      loading: loadingIds.map(
+        (id): LightInstructor =>
+          byId.get(id) ?? {
+            id,
+            name: s.names.get(id) ?? "",
+            status: null,
+            enabled: null,
+          },
+      ),
+      names: s.names,
       errors: { ...s.errors },
       freeGrid: s.grid,
       displayGrid: s.displayGrid,
@@ -265,15 +317,30 @@ export function useSalesData() {
   }, []);
 
   const doLoad = useCallback(
-    async (ids: string[]) => {
+    // `silent` re-fetches instructors that are ALREADY on the grid without
+    // blanking them to the "Loading schedule…" skeleton first (used by the
+    // realtime refresh and post-booking refresh). `force` is what lets a silent
+    // refresh target an instructor that is still present -- otherwise the
+    // `!s.instructors.has(id)` filter would skip every one of them.
+    async (ids: string[], opts: { silent?: boolean; force?: boolean } = {}) => {
       if (ids.length === 0) return;
+      const { silent = false, force = false } = opts;
       const s = storeRef.current;
       const wanted = [...new Set(ids)].filter(
-        (id) => !s.instructors.has(id) && !s.loading.has(id),
+        (id) => !s.loading.has(id) && (force || !s.instructors.has(id)),
       );
       if (wanted.length === 0) return;
-      for (const id of wanted) s.loading.add(id);
-      commit();
+      const nameById = new Map(allRef.current.map((a) => [a.id, a.name]));
+      for (const id of wanted) {
+        // A retry must clear the previous error or the row would show both the
+        // error and the skeleton at once.
+        delete s.errors[id];
+        if (!silent) {
+          s.loading.add(id);
+          if (!s.names.has(id)) s.names.set(id, nameById.get(id) ?? "");
+        }
+      }
+      if (!silent) commit();
       const cfg = configRef.current;
       if (!cfg) {
         for (const id of wanted) s.loading.delete(id);
@@ -287,6 +354,11 @@ export function useSalesData() {
         "rejected",
       ];
 
+      // Aborts the in-flight queries when the deadline below fires. Without
+      // this the request (and the resulting stuck skeleton) could outlive the
+      // race and mutate the store after we've already shown a timeout error.
+      const controller = new AbortController();
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
       try {
         // Instructor detail rows and the Schedule window are independent
         // queries (Schedule doesn't need the Instructor rows at all) — fetch
@@ -302,7 +374,7 @@ export function useSalesData() {
         // parseInstructors() inside it would close over `companyIds`, the very
         // variable this destructuring declares, and TypeScript rejects that as
         // a self-referential initializer. Parsing happens just below instead.
-        const [rawChunks, scheduleRows, companyIds] = await Promise.all([
+        const fetchAll = Promise.all([
           Promise.all(
             chunk(wanted, IN_CHUNK).map(async (part) => {
               const { data: rows, error } = await sb
@@ -324,13 +396,28 @@ export function useSalesData() {
                   // fetchCompanyInstructorIds(), which degrades to an empty set.
                   "id_instructor, name, areas, unavailability, status, enabled",
                 )
-                .in("id_instructor", part);
+                .in("id_instructor", part)
+                .abortSignal(controller.signal);
               if (error) throw error;
               return (rows ?? []) as Record<string, unknown>[];
             }),
           ),
-          fetchScheduleWindow(wanted, from, to, excluded),
+          fetchScheduleWindow(wanted, from, to, excluded, controller.signal),
           fetchCompanyInstructorIds(),
+        ]);
+        // If the deadline wins the race below, `fetchAll` rejects later when
+        // the abort lands; without this handler that becomes an unhandled
+        // promise rejection even though we already surfaced the timeout.
+        fetchAll.catch(() => {});
+        const timeout = new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            controller.abort();
+            reject(new Error(LOAD_TIMEOUT_MESSAGE));
+          }, LOAD_TIMEOUT_MS);
+        });
+        const [rawChunks, scheduleRows, companyIds] = await Promise.race([
+          fetchAll,
+          timeout,
         ]);
 
         const infos = new Map<string, InstructorRow>();
@@ -360,7 +447,7 @@ export function useSalesData() {
             chunk(learnerIds, IN_CHUNK).map(async (part) => {
               const { data: learners, error: learnerErr } = await sb
                 .from("Learner")
-                .select("id, name, area")
+                .select("id, name, area, phone, pick_up_location")
                 .in("id", part);
               if (learnerErr) throw learnerErr;
               return (learners ?? []) as Record<string, unknown>[];
@@ -380,15 +467,27 @@ export function useSalesData() {
 
         const learnerNames = new Map<string, string>();
         const learnerAreas = new Map<string, string>();
+        const learnerPhones = new Map<string, string>();
         for (const part of learnerChunks) {
           for (const l of part) {
             learnerNames.set(
               String(l.id),
               l.name == null ? "" : String(l.name),
             );
+            // Prefer the full pick-up address over the short `area` — that is
+            // the field Instructor Management's timetable card shows.
             learnerAreas.set(
               String(l.id),
-              l.area == null ? "" : String(l.area),
+              l.pick_up_location == null ||
+                String(l.pick_up_location).trim() === ""
+                ? l.area == null
+                  ? ""
+                  : String(l.area)
+                : String(l.pick_up_location),
+            );
+            learnerPhones.set(
+              String(l.id),
+              l.phone == null ? "" : String(l.phone),
             );
           }
         }
@@ -470,6 +569,9 @@ export function useSalesData() {
                 : null,
             startedAt: r.started_at,
             endedAt: r.ended_at,
+            learnerPhone:
+              str(td.phone) ||
+              (r.learner_id ? (learnerPhones.get(r.learner_id) ?? "") : ""),
           };
         });
 
@@ -519,13 +621,29 @@ export function useSalesData() {
         for (const info of infos.values()) s.instructors.set(info.id, info);
         for (const [id, perDate] of grid) s.grid.set(id, perDate);
         for (const [id, perDate] of displayGrid) s.displayGrid.set(id, perDate);
+        // Replace, don't append: a silent refresh (or removing then re-adding
+        // an instructor) re-fetches the same window, and blind push would leave
+        // duplicate BlockDetail rows for every refreshed instructor.
+        const wantedSet = new Set(wanted);
+        s.blocks = s.blocks.filter((b) => !wantedSet.has(b.instructorId));
         s.blocks.push(...blockDetails);
-        for (const id of wanted) s.loading.delete(id);
-      } catch (err) {
         for (const id of wanted) {
           s.loading.delete(id);
-          s.errors[id] = err instanceof Error ? err.message : String(err);
+          s.names.delete(id);
+          delete s.errors[id];
         }
+      } catch (err) {
+        const message = loadErrorToMessage(err);
+        for (const id of wanted) {
+          s.loading.delete(id);
+          // A silent refresh keeps the already-rendered grid on screen rather
+          // than replacing it with an error banner: the data shown is merely
+          // stale, not gone, and the realtime stream will retry on the next
+          // change. Only a foreground load reports the failure.
+          if (!silent) s.errors[id] = message;
+        }
+      } finally {
+        if (timeoutId !== null) clearTimeout(timeoutId);
       }
       commit();
     },
@@ -544,7 +662,10 @@ export function useSalesData() {
       const s = storeRef.current;
       s.instructors.delete(id);
       s.grid.delete(id);
+      s.displayGrid.delete(id);
+      s.blocks = s.blocks.filter((b) => b.instructorId !== id);
       s.loading.delete(id);
+      s.names.delete(id);
       delete s.errors[id];
       commit();
     },
@@ -556,7 +677,8 @@ export function useSalesData() {
     if (allRef.current.length > 0) return;
     const { data: listRes, error: listErr } = await sb
       .from("Instructor")
-      .select("id_instructor, name, status, enabled");
+      .select("id_instructor, name, status, enabled")
+      .abortSignal(AbortSignal.timeout(LOAD_TIMEOUT_MS));
     if (listErr) throw listErr;
     allRef.current = parseLight((listRes ?? []) as Record<string, unknown>[]);
     // This runs in parallel with loadSession() on mount (Promise.all in
@@ -575,7 +697,8 @@ export function useSalesData() {
       .from("app_settings")
       .select("value")
       .eq("key", "booking_flow")
-      .maybeSingle();
+      .maybeSingle()
+      .abortSignal(AbortSignal.timeout(LOAD_TIMEOUT_MS));
     if (cfgErr) throw cfgErr;
     const config = readBookingFlowConfig(settingRow?.value);
     if (!config.enabled) {
@@ -585,11 +708,22 @@ export function useSalesData() {
     }
     configRef.current = config;
 
-    const from = addDaysISO(istTodayISO(), 1);
+    const today = istTodayISO();
     const viewDays = config.view_days_ahead ?? DEFAULT_VIEW_DAYS_AHEAD;
+    const from = addDaysISO(today, 1);
     const to = addDaysISO(from, viewDays - 1);
+    // The expanded Schedule timetable (a rolling 7-day window like Instructor
+    // Management's "View Schedule") can page backwards through the current
+    // month, so the schedule window starts at the 1st of the current month
+    // rather than tomorrow. `forwardDatesRef` keeps the main roster grid on
+    // its original forward-only window (tomorrow onward); `datesRef` is the
+    // full past+future window the expanded panel reads and the engine builds
+    // free grids over.
     datesRef.current = [];
-    for (let d = from; d <= to; d = addDaysISO(d, 1)) datesRef.current.push(d);
+    const windowFrom = `${today.slice(0, 7)}-01`;
+    for (let d = windowFrom; d <= to; d = addDaysISO(d, 1))
+      datesRef.current.push(d);
+    forwardDatesRef.current = datesRef.current.filter((d) => d >= from);
     // The grid's visible time columns are bounded by the shared
     // booking_flow config's slotStart/slotEnd/slotDurationMinutes -- the
     // same window a new tentative booking can actually be created in, so
@@ -614,6 +748,7 @@ export function useSalesData() {
       displayGrid: new Map(),
       blocks: [],
       loading: new Set(),
+      names: new Map(),
       errors: {},
     };
     setPhase("loading");
@@ -626,7 +761,7 @@ export function useSalesData() {
         commit();
         if (kept.length > 0) await doLoad(kept);
       } catch (err) {
-        setErrorMsg(err instanceof Error ? err.message : String(err));
+        setErrorMsg(loadErrorToMessage(err));
         setPhase("error");
       }
     })();
@@ -642,7 +777,7 @@ export function useSalesData() {
         commit();
       } catch (err) {
         if (!active) return;
-        setErrorMsg(err instanceof Error ? err.message : String(err));
+        setErrorMsg(loadErrorToMessage(err));
         setPhase("error");
       }
     })();
@@ -651,28 +786,28 @@ export function useSalesData() {
     };
   }, [loadSession, commit]);
 
-  // Silently re-fetch specific instructors' Schedule/Instructor data without
-  // touching `phase` -- unlike reload(), this doesn't reset the whole store,
-  // re-fetch app_settings, or re-fetch every OTHER already-loaded
-  // instructor, so it never triggers the full-page loading screen. Used
-  // after a booking/override completes (only the affected instructor(s)
-  // changed) and by the realtime subscription below (only the instructor
-  // named in the changed row needs refreshing). Silently ignores any id not
+  // Re-fetch specific instructors' Schedule/Instructor data without touching
+  // `phase` -- unlike reload(), this doesn't reset the whole store, re-fetch
+  // app_settings, or re-fetch every OTHER already-loaded instructor, so it
+  // never triggers the full-page loading screen. Used after a booking/override
+  // completes and by the realtime subscription below.
+  //
+  // SILENT by design: the old implementation deleted the instructor from the
+  // store first, which blanked the row to the "Loading schedule…" skeleton and
+  // redrew it on every realtime event -- across a company with many sales
+  // dashboards open, a Schedule write anywhere made every grid flicker. Now the
+  // instructor stays rendered with its current (stale) schedule while the fetch
+  // runs, and only swaps in place once fresh data arrives. `force` lets doLoad
+  // re-fetch an instructor that is still present. Silently ignores any id not
   // currently in the roster -- nothing to refresh for those.
   const refreshInstructors = useCallback(
     (ids: string[]) => {
       const s = storeRef.current;
       const present = ids.filter((id) => s.instructors.has(id));
       if (present.length === 0) return;
-      // Deleting first makes doLoad treat these as "not yet loaded" so it
-      // re-fetches fresh data instead of skipping them as already-present.
-      // This briefly shows the same per-row "Loading schedule..." skeleton
-      // used when an instructor is first added.
-      for (const id of present) s.instructors.delete(id);
-      commit();
-      void doLoad(present);
+      void doLoad(present, { silent: true, force: true });
     },
-    [commit, doLoad],
+    [doLoad],
   );
 
   // Realtime sync: when a Schedule row changes anywhere (e.g. a new
@@ -684,6 +819,54 @@ export function useSalesData() {
   // or `alter publication supabase_realtime add table "Schedule";` in the
   // SQL editor) -- without it this subscription connects but never receives
   // events.
+  //
+  // Coalesced: a bulk-add can fire dozens of Schedule events in one second,
+  // and with many dashboards open each one would otherwise re-fetch the full
+  // 400-day window per event. Events are collected for REALTIME_DEBOUNCE_MS
+  // and each touched instructor is refreshed exactly once per burst. Direct
+  // calls to refreshInstructors() (after a booking/override) stay immediate —
+  // this only gates the realtime stream.
+  const realtimePendingRef = useRef<Set<string>>(new Set());
+  const realtimeTimerRef = useRef<number | null>(null);
+
+  const flushRealtimeRefresh = useCallback(() => {
+    if (realtimeTimerRef.current !== null) {
+      window.clearTimeout(realtimeTimerRef.current);
+      realtimeTimerRef.current = null;
+    }
+    const ids = [...realtimePendingRef.current];
+    realtimePendingRef.current.clear();
+    if (ids.length > 0) refreshInstructors(ids);
+  }, [refreshInstructors]);
+
+  const queueRealtimeRefresh = useCallback(
+    (instrId: string | null) => {
+      if (instrId) {
+        realtimePendingRef.current.add(instrId);
+      } else {
+        // DELETE events only carry the deleted row's primary key in
+        // payload.old by default (Postgres's REPLICA IDENTITY DEFAULT),
+        // not the rest of the row -- so instructor_id is never available
+        // here for a deletion, regardless of client-side code. Refreshing
+        // every currently-loaded instructor is the safe fallback: it's
+        // strictly more work than a targeted refresh, never less correct,
+        // and the roster is normally a handful of instructors, not the
+        // whole table. Fixed at the source (REPLICA IDENTITY FULL on
+        // "Schedule") would let deletes be targeted too, but that's a DB
+        // change requiring separate approval.
+        for (const id of storeRef.current.instructors.keys())
+          realtimePendingRef.current.add(id);
+      }
+      if (realtimeTimerRef.current === null) {
+        realtimeTimerRef.current = window.setTimeout(
+          flushRealtimeRefresh,
+          REALTIME_DEBOUNCE_MS,
+        );
+      }
+    },
+    [flushRealtimeRefresh],
+  );
+
   useEffect(() => {
     const channel = sb
       .channel("sales-dashboard-schedule-sync")
@@ -694,31 +877,21 @@ export function useSalesData() {
           new?: { instructor_id?: string } | null;
           old?: { instructor_id?: string } | null;
         }) => {
-          const instrId =
-            payload.new?.instructor_id ?? payload.old?.instructor_id;
-          if (instrId) {
-            refreshInstructors([instrId]);
-            return;
-          }
-          // DELETE events only carry the deleted row's primary key in
-          // payload.old by default (Postgres's REPLICA IDENTITY DEFAULT),
-          // not the rest of the row -- so instructor_id is never available
-          // here for a deletion, regardless of client-side code. Refreshing
-          // every currently-loaded instructor is the safe fallback: it's
-          // strictly more work than a targeted refresh, never less
-          // correct, and the roster is normally a handful of instructors,
-          // not the whole table. Fixed at the source (REPLICA IDENTITY
-          // FULL on "Schedule") would let deletes be targeted too, but
-          // that's a DB change requiring separate approval.
-          const loadedIds = [...storeRef.current.instructors.keys()];
-          if (loadedIds.length > 0) refreshInstructors(loadedIds);
+          queueRealtimeRefresh(
+            payload.new?.instructor_id ?? payload.old?.instructor_id ?? null,
+          );
         },
       )
       .subscribe();
     return () => {
+      if (realtimeTimerRef.current !== null) {
+        window.clearTimeout(realtimeTimerRef.current);
+        realtimeTimerRef.current = null;
+      }
+      realtimePendingRef.current.clear();
       void sb.removeChannel(channel);
     };
-  }, [refreshInstructors]);
+  }, [queueRealtimeRefresh]);
 
   return {
     phase,

@@ -543,8 +543,8 @@ test.describe("Sales Dashboard — tentative booking flow", () => {
       .first();
     await expect(scheduleToggle).toBeVisible({ timeout: 15_000 });
     await expect(scheduleToggle).toHaveAttribute("aria-expanded", "true");
-    // The expanded monthly timetable is really rendered, not just labelled.
-    await expect(page.locator(".detail-row .mini")).toBeVisible();
+    // The expanded weekly timetable is really rendered, not just labelled.
+    await expect(page.locator(".detail-row .week-timetable")).toBeVisible();
 
     // Only the booked instructor's row survives. `.detail-row` is the extra
     // <tr> the expanded timetable renders, so counting `.row` (not every <tr>)
@@ -1130,5 +1130,287 @@ test.describe("Sales Dashboard — tentative delete restricted to creator", () =
         { timeout: 10_000 },
       )
       .toBe(0);
+  });
+});
+
+test.describe("Sales Dashboard — tentative edit (batch update)", () => {
+  const SEED_DATE = "2027-05-08";
+  const EDIT_MARKER = "PW-SUITE-EDIT-OWNED";
+  const OTHER_MARKER = "PW-SUITE-EDIT-OTHER";
+  const PAID_OTHER_MARKER = "PW-SUITE-EDIT-OTHER-PAID";
+
+  const clearSeeded = () =>
+    sb
+      .from("Schedule")
+      .delete()
+      .eq("instructor_id", TEST_DP_ID)
+      .eq("date", SEED_DATE);
+
+  test.beforeEach(clearSeeded);
+  test.afterEach(clearSeeded);
+  test.afterAll(clearSeeded);
+
+  test("creator edits own batch; anyone edits an unpaid slot; a paid slot of another agent is protected", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+
+    // Discover the logged-in account's name the same way the app does.
+    await searchAndAdd(page, "test_dp");
+    const opened = await openTentativeModal(page, SEED_DATE);
+    test.skip(!opened, "no free hour available to open the booking modal");
+    if (!opened) return;
+    await expect
+      .poll(
+        async () => (await page.locator("#salesAgent").inputValue()).length,
+        { timeout: 10_000 },
+      )
+      .toBeGreaterThan(0);
+    const currentUserName = await page.locator("#salesAgent").inputValue();
+    await page.getByRole("button", { name: "Cancel" }).click();
+
+    // Clear the day so a previous run cannot leave a conflicting block.
+    await clearSeededDay(TEST_DP_ID, SEED_DATE);
+
+    const batchId = crypto.randomUUID();
+
+    // Seed two rows in the same batch (same batch_id, same agent).
+    for (const seed of [
+      { start: "10:00:00", end: "11:00:00" },
+      { start: "13:00:00", end: "14:00:00" },
+    ]) {
+      await seedExclusiveSlot(
+        {
+          instructor_id: TEST_DP_ID,
+          date: SEED_DATE,
+          start_time: seed.start,
+          end_time: seed.end,
+          status: "hold",
+          isTentative: true,
+          tentative_details: {
+            name: EDIT_MARKER,
+            phone: "9123450020",
+            sales_agent: currentUserName,
+            payment_status: "unpaid",
+            address: "owned addr",
+            course: "demo",
+            batch_id: batchId,
+            created_at: new Date().toISOString(),
+          },
+          learner_id: null,
+          course_id: null,
+          lesson_id: null,
+        },
+        TEST_DP_ID,
+        SEED_DATE,
+      );
+    }
+
+    // Seed a third row by a different agent (no batch_id match).
+    await seedExclusiveSlot(
+      {
+        instructor_id: TEST_DP_ID,
+        date: SEED_DATE,
+        start_time: "16:00:00",
+        end_time: "17:00:00",
+        status: "hold",
+        isTentative: true,
+        tentative_details: {
+          name: OTHER_MARKER,
+          phone: "9123450021",
+          sales_agent: "Someone Else Entirely",
+          payment_status: "unpaid",
+          address: "other addr",
+          course: "demo",
+          created_at: new Date().toISOString(),
+        },
+        learner_id: null,
+        course_id: null,
+        lesson_id: null,
+      },
+      TEST_DP_ID,
+      SEED_DATE,
+    );
+
+    await seedExclusiveSlot(
+      {
+        instructor_id: TEST_DP_ID,
+        date: SEED_DATE,
+        start_time: "19:00:00",
+        end_time: "20:00:00",
+        status: "hold",
+        isTentative: true,
+        tentative_details: {
+          name: PAID_OTHER_MARKER,
+          phone: "9123450022",
+          sales_agent: "Someone Else Entirely",
+          payment_status: "half_paid",
+          address: "paid addr",
+          course: "demo",
+          created_at: new Date().toISOString(),
+        },
+        learner_id: null,
+        course_id: null,
+        lesson_id: null,
+      },
+      TEST_DP_ID,
+      SEED_DATE,
+    );
+
+    await waitForSeedVisibleInBrowser(page, TEST_DP_ID, SEED_DATE);
+    await page.reload();
+    await page.waitForSelector(".sales-dashboard-root", { timeout: 15_000 });
+    await page.waitForTimeout(1000);
+    await gotoMonth(page, "May", "2027");
+    await gotoDay(page, 8);
+    const row = page.locator(".row", { hasText: "test_dp" }).first();
+
+    const timeLabels = await page
+      .locator("thead th.col-time-h")
+      .allInnerTexts();
+    const idx10 = timeLabels.findIndex((t) => t.includes("10:00"));
+    const idx13 = timeLabels.findIndex((t) => t.includes("13:00"));
+    const idx16 = timeLabels.findIndex((t) => t.includes("16:00"));
+    const idx19 = timeLabels.findIndex((t) => t.includes("19:00"));
+    expect(idx19).toBeGreaterThanOrEqual(0);
+    expect(idx10).toBeGreaterThanOrEqual(0);
+    expect(idx13).toBeGreaterThanOrEqual(0);
+    expect(idx16).toBeGreaterThanOrEqual(0);
+
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    await expect(row.locator("td.cell")).toHaveCount(timeLabels.length, {
+      timeout: 20_000,
+    });
+
+    const slot = (idx: number) => row.locator("td.cell").nth(idx);
+
+    const hoverSlot = async (idx: number, expected: string) => {
+      await page.mouse.move(2, 2);
+      for (let attempt = 0; attempt < 6; attempt++) {
+        await slot(idx).hover();
+        const popover = page.locator(".slot-pop");
+        try {
+          await expect(popover).toContainText(expected, { timeout: 2_000 });
+          return popover;
+        } catch {
+          await page.mouse.move(2, 2);
+        }
+      }
+      const cls = await slot(idx)
+        .getAttribute("class")
+        .catch(() => "<cell gone>");
+      const popText = await page
+        .locator(".slot-pop")
+        .innerText()
+        .catch(() => "<no popover>");
+      throw new Error(
+        `hovering slot[${idx}] never showed "${expected}". ` +
+          `cell class="${cls}" popover="${popText.replace(/\s+/g, " ").trim()}"`,
+      );
+    };
+
+    // 1) Own batch: both slots show "Edit Slot"
+    const owned10 = await hoverSlot(idx10, EDIT_MARKER);
+    await expect(
+      owned10.getByRole("button", { name: "Edit Slot" }),
+    ).toBeVisible();
+    await expect(
+      owned10.getByRole("button", { name: "Delete Slot" }),
+    ).toBeVisible();
+
+    const owned13 = await hoverSlot(idx13, EDIT_MARKER);
+    await expect(
+      owned13.getByRole("button", { name: "Edit Slot" }),
+    ).toBeVisible();
+
+    // 2) Another agent's UNPAID row: anyone may edit it, but only its
+    // creator may delete it.
+    const otherPopover = await hoverSlot(idx16, "Someone Else Entirely");
+    await expect(
+      otherPopover.getByRole("button", { name: "Edit Slot" }),
+    ).toHaveCount(1);
+    await expect(
+      otherPopover.getByRole("button", { name: "Delete Slot" }),
+    ).toHaveCount(0);
+
+    // 2b) Another agent's PAID row is protected: neither edit nor delete,
+    // and the popover says why.
+    const paidPopover = await hoverSlot(idx19, PAID_OTHER_MARKER);
+    await expect(
+      paidPopover.getByRole("button", { name: "Edit Slot" }),
+    ).toHaveCount(0);
+    await expect(
+      paidPopover.getByRole("button", { name: "Delete Slot" }),
+    ).toHaveCount(0);
+    await expect(paidPopover).toContainText("only they can delete or edit");
+
+    // 3) Click Edit Slot on the first class → modal opens in edit mode
+    await slot(idx10).hover();
+    await owned10.getByRole("button", { name: "Edit Slot" }).click();
+
+    // Modal header reads "Edit Tentative Booking"
+    await expect(page.getByText("Edit Tentative Booking")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    // Both classes listed in the "Selected Slots" list
+    await expect(page.getByText("Classes in this booking (2)")).toBeVisible();
+
+    // Shared fields prefilled
+    await expect(page.locator("#customerName")).toHaveValue(EDIT_MARKER);
+    await expect(page.locator("#customerPhone")).toHaveValue("9123450020");
+    await expect(page.locator("#salesAgent")).toHaveValue(currentUserName);
+    await expect(page.locator("#customerAddress")).toHaveValue("owned addr");
+    await expect(page.locator("#course")).toHaveValue("demo");
+    await expect(page.locator("#paymentStatus")).toHaveValue("unpaid");
+
+    // Each row has a "Change time" button (edit mode)
+    const changeTimeButtons = page
+      .locator(".modal")
+      .getByRole("button", { name: /Change time/ });
+    await expect(changeTimeButtons).toHaveCount(2);
+
+    // Change shared fields and save
+    await page.locator("#customerName").fill("PW-SUITE-EDIT-UPDATED");
+    await page.locator("#paymentStatus").selectOption("half_paid");
+    await page.getByRole("button", { name: "Save Changes" }).click();
+
+    // Wait for success toast
+    await expect(
+      page.getByText("Tentative booking updated successfully!"),
+    ).toBeVisible({ timeout: 30_000 });
+
+    // Poll DB: both rows should have the updated name and payment_status
+    await expect
+      .poll(
+        async () => {
+          const { data } = await sb
+            .from("Schedule")
+            .select("tentative_details")
+            .eq("instructor_id", TEST_DP_ID)
+            .eq("date", SEED_DATE)
+            .eq("isTentative", true);
+          const updated = (data ?? []).filter(
+            (r) =>
+              r.tentative_details?.name === "PW-SUITE-EDIT-UPDATED" &&
+              r.tentative_details?.payment_status === "half_paid",
+          );
+          return updated.length;
+        },
+        { timeout: 15_000, message: "rows not updated in DB" },
+      )
+      .toBe(2);
+
+    // Third row unchanged
+    const { data: otherData } = await sb
+      .from("Schedule")
+      .select("tentative_details")
+      .eq("instructor_id", TEST_DP_ID)
+      .eq("date", SEED_DATE)
+      .eq("start_time", "16:00:00")
+      .eq("isTentative", true)
+      .single();
+    expect(otherData.tentative_details?.name).toBe(OTHER_MARKER);
+    expect(otherData.tentative_details?.payment_status).toBe("unpaid");
   });
 });
