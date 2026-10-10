@@ -997,6 +997,46 @@ export async function approveStage1Documents(instructorId: string): Promise<any>
   return apiData;
 }
 
+/**
+ * Approve Stage 2 - Enable instructor for pedal video matching
+ * Called when admin clicks "Approve Stage 2 - Enable Matching" button
+ * Sets instructor.enabled = true
+ * POST /v1/admin/instructors/{user_id}/approve
+ */
+export async function approveStage2(instructorId: string): Promise<any> {
+  const goAccessToken = localStorage.getItem("go_access_token");
+  if (!goAccessToken) {
+    throw new Error("No authentication token. Please login again.");
+  }
+
+  console.log(`[APPROVE_STAGE2_API] Approving Stage 2 for instructor ${instructorId}`);
+
+  const url = `${BACKEND_API}/admin/instructors/${instructorId}/approve`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${goAccessToken}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+  }
+
+  const apiData = await response.json();
+
+  if (!apiData.success) {
+    throw new Error(apiData.message || "Failed to approve Stage 2");
+  }
+
+  console.log(`[APPROVE_STAGE2_API] ✅ Stage 2 approved successfully for instructor ${instructorId}`);
+  console.log("[APPROVE_STAGE2_API] Response:", apiData);
+
+  return apiData;
+}
+
 export async function reuploadDocument(
   instructorId: string,
   documentId: string,

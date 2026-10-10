@@ -14,6 +14,7 @@ import {
   rejectDocument,
   rejectVideo,
   approveStage1Documents,
+  approveStage2,
   reuploadDocument,
   type DocumentType,
   type DocumentSide,
@@ -499,6 +500,22 @@ export default function InstructorApprovalPage(): JSX.Element {
       const errorMsg = err instanceof Error ? err.message : "Failed to approve Stage 1 documents";
       console.error("[UI] Error approving Stage 1 documents:", errorMsg);
       alert(`? Error: ${errorMsg}`);
+    }
+  };
+
+  const handleApproveStage2 = async () => {
+    if (!id) return;
+
+    try {
+      console.log(`[UI] Admin approving Stage 2 for instructor ${id}`);
+      const response = await approveStage2(id);
+      console.log("[UI] Stage 2 approved successfully:", response);
+
+      alert(`✓ Stage 2 approved! Instructor is now enabled for matching.`);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "Failed to approve Stage 2";
+      console.error("[UI] Error approving Stage 2:", errorMsg);
+      alert(`✗ Error: ${errorMsg}`);
     }
   };
 
@@ -1175,7 +1192,7 @@ export default function InstructorApprovalPage(): JSX.Element {
 
               {/* CTA Button */}
               <button
-                 onClick={() => console.log("Stage 2 approved")}
+                 onClick={handleApproveStage2}
                  className="w-full font-semibold py-2.5 px-4 rounded-lg transition-all text-sm text-white"
                  style={{ backgroundColor: "#00CE84" }}
               >
