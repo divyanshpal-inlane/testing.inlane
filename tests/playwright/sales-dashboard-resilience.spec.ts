@@ -7,9 +7,18 @@ const sb = createClient(
   SB,
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNzbnpnZnp4bnNjdW12amVmcG9uIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MjMyODEyMDksImV4cCI6MjAzODg1NzIwOX0.Go70qkJn_MsIjU9QgRy1HbIUGmY-M7wmNg6MU77VaDk",
 );
-const DP = "34239456-159b-42a0-8184-a0e11954cfd0"; // test_dp
-const HIDAYAT = "b2d0a21a-5c7a-4416-8f3d-15cffa13d800"; // test_ins_hidayat_dont_delete
-const NOT_IN_ROSTER = "d74ed381-2fc5-4c63-8dd9-aa1bee2c7a03";
+// Playwright runs spec FILES in parallel against one shared database, and
+// realtime delivers every Schedule write to every open dashboard. test_dp is
+// used heavily by the other specs, so it must never be on THIS spec's roster or
+// their writes would be counted as ours. The two fixtures below are not written
+// to by any other spec; test_dp is deliberately the "not on this dashboard"
+// instructor (its events from other specs are exactly the irrelevant events
+// that must cost nothing).
+const NOT_IN_ROSTER = "34239456-159b-42a0-8184-a0e11954cfd0"; // test_dp
+const MINE = "b2d0a21a-5c7a-4416-8f3d-15cffa13d800"; // test_ins_hidayat_dont_delete
+const OTHER_LOADED = "377c563d-24f6-4d49-9849-6d4e243416eb"; // test-instr-latehrs_dont_delete
+const NAME_MINE = "test_ins_hidayat_dont_delete";
+const NAME_OTHER = "test-instr-latehrs_dont_delete";
 const DATE = "2027-05-25";
 const MARK = "ZZ-RESILIENCE";
 
@@ -17,7 +26,7 @@ const clear = () =>
   sb
     .from("Schedule")
     .delete()
-    .in("instructor_id", [DP, HIDAYAT, NOT_IN_ROSTER])
+    .in("instructor_id", [MINE, OTHER_LOADED, NOT_IN_ROSTER])
     .eq("date", DATE);
 test.beforeEach(clear);
 test.afterEach(clear);
@@ -25,9 +34,11 @@ test.afterEach(clear);
 type Req = { table: string; url: string };
 function recorder(page: Page) {
   const reqs: Req[] = [];
+  let lastAt = Date.now();
   page.on("request", (r) => {
     const u = r.url();
     if (!u.startsWith(REST)) return;
+    lastAt = Date.now();
     reqs.push({
       table: u.slice(REST.length).split("?")[0],
       url: decodeURIComponent(u),
@@ -35,6 +46,16 @@ function recorder(page: Page) {
   });
   return {
     reqs,
+    lastAt: () => lastAt,
+    // Other specs share these test instructors and the live database, so wait
+    // for traffic to go quiet before opening a measuring window; otherwise a
+    // late event from someone else's cleanup is counted against this test.
+    settle: async (quietMs = 2500, maxMs = 25_000) => {
+      const start = Date.now();
+      while (Date.now() - lastAt < quietMs && Date.now() - start < maxMs) {
+        await page.waitForTimeout(250);
+      }
+    },
     clear: () => (reqs.length = 0),
     count: (table?: string) =>
       reqs.filter((r) => !table || r.table === table).length,
@@ -59,8 +80,8 @@ async function addByName(page: Page, name: string) {
 async function openWithRoster(page: Page) {
   await page.goto("/admin/sales-dashboard");
   await page.waitForSelector(".sales-dashboard-root", { timeout: 30_000 });
-  await addByName(page, "test_dp");
-  await addByName(page, "test_ins_hidayat_dont_delete");
+  await addByName(page, NAME_MINE);
+  await addByName(page, NAME_OTHER);
   // let the first loads + realtime subscription settle
   await page.waitForTimeout(3000);
 }
@@ -105,6 +126,7 @@ test.describe("Sales Dashboard - backend load & resilience", () => {
     await openWithRoster(page);
 
     // An event for an instructor that is NOT on this dashboard: free.
+    await rec.settle();
     rec.clear();
     const other = await sb
       .from("Schedule")
@@ -113,20 +135,25 @@ test.describe("Sales Dashboard - backend load & resilience", () => {
       .single();
     expect(other.error).toBeNull();
     await page.waitForTimeout(4000);
-    expect(rec.count(), "insert for a non-roster instructor").toBe(0);
+    expect(
+      rec.reqs.map((r) => r.table + " " + r.url.slice(0, 120)).join(" || "),
+      "insert for a non-roster instructor",
+    ).toBe("");
 
     // Deleting a row this dashboard never loaded: also free (used to refresh
     // EVERY roster instructor, because a DELETE carries no instructor_id).
+    await rec.settle();
     rec.clear();
     await sb.from("Schedule").delete().eq("id", other.data!.id);
     await page.waitForTimeout(4000);
     expect(rec.count(), "delete of a row we don't show").toBe(0);
 
     // Insert for a loaded instructor: refreshes just that one.
+    await rec.settle();
     rec.clear();
     const mine = await sb
       .from("Schedule")
-      .insert(holdRow(DP))
+      .insert(holdRow(MINE))
       .select("id")
       .single();
     expect(mine.error).toBeNull();
@@ -136,12 +163,13 @@ test.describe("Sales Dashboard - backend load & resilience", () => {
     await page.waitForTimeout(2500);
     const sched = rec.reqs.filter((r) => r.table === "Schedule");
     expect(sched.length).toBe(1);
-    expect(sched[0].url).toContain(DP);
-    expect(sched[0].url).not.toContain(HIDAYAT);
+    expect(sched[0].url).toContain(MINE);
+    expect(sched[0].url).not.toContain(OTHER_LOADED);
 
     // Wait until the dashboard has the new row in its blocks, then delete it:
-    // the refresh must target only DP, not the whole roster.
+    // the refresh must target only the instructor who owned the row, not the whole roster.
     await page.waitForTimeout(1000);
+    await rec.settle();
     rec.clear();
     await sb.from("Schedule").delete().eq("id", mine.data!.id);
     await expect
@@ -150,11 +178,11 @@ test.describe("Sales Dashboard - backend load & resilience", () => {
     await page.waitForTimeout(2500);
     const afterDelete = rec.reqs.filter((r) => r.table === "Schedule");
     expect(afterDelete.length).toBe(1);
-    expect(afterDelete[0].url).toContain(DP);
+    expect(afterDelete[0].url).toContain(MINE);
     expect(
       afterDelete[0].url,
       "delete must not refresh the other instructor",
-    ).not.toContain(HIDAYAT);
+    ).not.toContain(OTHER_LOADED);
   });
 
   test("a hidden tab spends no requests, then catches up once when shown", async ({
@@ -164,6 +192,7 @@ test.describe("Sales Dashboard - backend load & resilience", () => {
     const rec = recorder(page);
     await openWithRoster(page);
 
+    await rec.settle();
     await setVisibility(page, "hidden");
     rec.clear();
     for (const start of ["10:00:00", "12:00:00", "14:00:00"]) {
@@ -171,7 +200,7 @@ test.describe("Sales Dashboard - backend load & resilience", () => {
         .from("Schedule")
         .insert(
           holdRow(
-            DP,
+            MINE,
             start,
             `${String(Number(start.slice(0, 2)) + 1).padStart(2, "0")}:00:00`,
           ),
@@ -212,10 +241,10 @@ test.describe("Sales Dashboard - backend load & resilience", () => {
       await route.continue();
     });
 
-    await addByName(page, "test_dp");
+    await addByName(page, NAME_OTHER);
     // loads successfully after the retries: a real row, and no error text
     await expect(
-      page.locator(".row", { hasText: "test_dp" }).first(),
+      page.locator(".row", { hasText: NAME_OTHER }).first(),
     ).toBeVisible({
       timeout: 30_000,
     });
@@ -273,7 +302,7 @@ test.describe("Sales Dashboard - backend load & resilience", () => {
         }),
       });
     });
-    await addByName(page, "test_dp").catch(() => undefined);
+    await addByName(page, NAME_OTHER).catch(() => undefined);
     await expect(
       page.getByText(/Couldn't load schedule|does not exist/i).first(),
     ).toBeVisible({
