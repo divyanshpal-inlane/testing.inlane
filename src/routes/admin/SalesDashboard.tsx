@@ -3335,6 +3335,40 @@ export default function SalesDashboard() {
         };
       }
 
+      // Nothing real (class, buffer, leave) explains this cell, so it is not
+      // "busy" -- it simply is not a valid class start. Say why instead of
+      // showing a generic "Busy" that reads like a conflict: a class starting
+      // here would not fit inside the configured booking hours.
+      if (config?.slotStart && config?.slotEnd) {
+        const openMin = timeToMinutes(config.slotStart);
+        const closeMin = timeToMinutes(config.slotEnd);
+        const classMin = config.slotDurationMinutes ?? 60;
+        if (minute < openMin || minute >= closeMin) {
+          return {
+            title: "Outside business hours",
+            detail: [
+              timeLabel,
+              `Instructor: ${name}`,
+              `Bookable hours are ${config.slotStart}–${config.slotEnd}.`,
+            ],
+            kind: "default",
+            deleteAction: null,
+          };
+        }
+        if (minute + classMin > closeMin) {
+          return {
+            title: `Closes at ${config.slotEnd}`,
+            detail: [
+              timeLabel,
+              `Instructor: ${name}`,
+              `A ${classMin}-minute class can't start here — it would end after ${config.slotEnd}.`,
+            ],
+            kind: "default",
+            deleteAction: null,
+          };
+        }
+      }
+
       return {
         title: "Busy",
         detail: [timeLabel, `Instructor: ${name}`],

@@ -152,3 +152,61 @@ test("another agent can edit an unpaid slot (becomes half paid) and the creator 
     )
     .toBe("ZZ-NEW-PAYER|half_paid|Someone Else Entirely|1");
 });
+
+test("cells after the last bookable start say why, instead of a generic Busy", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  await open(page);
+  await gotoDate(page);
+  const row = page.locator(".row", { hasText: "test_dp" }).first();
+  const labels = await page.locator("thead th.col-time-h").allInnerTexts();
+  await expect(row.locator("td.cell")).toHaveCount(labels.length, {
+    timeout: 20_000,
+  });
+  const idx = (t: string) => labels.findIndex((l) => l.includes(t));
+  const popover = page.locator(".slot-pop");
+  const hoverText = async (i: number, expected: RegExp) => {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await page.mouse.move(2, 2);
+      await row.locator("td.cell").nth(i).hover();
+      try {
+        await expect(popover).toContainText(expected, { timeout: 2_000 });
+        return (await popover.innerText()).replace(/\s+/g, " ");
+      } catch {
+        /* retry */
+      }
+    }
+    throw new Error(
+      "popover never matched " +
+        expected +
+        " -> got: " +
+        (await popover.innerText().catch(() => "<none>")).replace(/s+/g, " "),
+    );
+  };
+
+  // 21:00-22:00 is the last bookable class: both of its half-hour cells are free.
+  await expect(row.locator("td.cell").nth(idx("21:00"))).toHaveClass(
+    /cell-free/,
+  );
+  await expect(row.locator("td.cell").nth(idx("21:30"))).toHaveClass(
+    /cell-free/,
+  );
+
+  // Cells from the closing time (22:00) on are outside business hours --
+  // nothing is booked there, so they must NOT be labelled "Busy".
+  const i2200 = idx("22:00");
+  if (i2200 >= 0) {
+    const t2200 = await hoverText(i2200, /Outside business hours/i);
+    expect(t2200).toContain("06:00");
+    expect(t2200).toContain("22:00");
+    expect(t2200).not.toMatch(/\bBusy\b/);
+  }
+
+  // Before opening / after closing.
+  const i0500 = idx("05:00");
+  if (i0500 >= 0) {
+    const t = await hoverText(i0500, /Outside business hours/i);
+    expect(t).not.toMatch(/\bBusy\b/);
+  }
+});

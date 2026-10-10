@@ -16,6 +16,11 @@ import {
   readBookingFlowConfig,
 } from "@/lib/sales-dashboard/config";
 import {
+  cacheRead,
+  cacheWrite,
+  withRetry,
+} from "@/lib/sales-dashboard/resilience";
+import {
   addDaysISO,
   istTodayISO,
   loadErrorToMessage,
@@ -38,7 +43,24 @@ const IN_CHUNK = 60;
 // How long the realtime handler collects Schedule-change events before
 // refreshing the affected instructors once. Long enough to swallow a bulk-add
 // burst, short enough that the grid still feels live after a booking.
-const REALTIME_DEBOUNCE_MS = 400;
+const REALTIME_DEBOUNCE_MS = 1500;
+
+// A tab that was hidden at least this long may have missed realtime events
+// (browsers throttle/suspend background sockets), so it catches up once when it
+// comes back instead of refreshing continuously while nobody is looking.
+const HIDDEN_CATCHUP_MS = 60_000;
+
+// Transient-failure retries for a foreground load (a silent refresh never
+// retries: it already keeps the stale grid and the next event tries again).
+const LOAD_RETRIES = 2;
+
+// Rarely-changing reads are cached so a reload during a backend blip still
+// renders. Fresh = used without hitting the network; stale = fallback only.
+const CONFIG_CACHE_KEY = "booking_flow";
+const CONFIG_STALE_OK_MS = 7 * 24 * 60 * 60 * 1000;
+const INDEX_CACHE_KEY = "instructor_index";
+const INDEX_FRESH_MS = 10 * 60 * 1000;
+const INDEX_STALE_OK_MS = 24 * 60 * 60 * 1000;
 
 // Client-side deadline for a roster/schedule/config fetch. Supabase/PostgREST
 // requests have no timeout of their own, so a stalled connection left a row on
@@ -157,6 +179,7 @@ async function fetchScheduleWindow(
   dateTo: string,
   excludedStatuses: string[],
   signal?: AbortSignal,
+  retries = 0,
 ): Promise<ScheduleRow[]> {
   const excludeFilter =
     excludedStatuses.length > 0 ? `(${excludedStatuses.join(",")})` : null;
@@ -166,19 +189,25 @@ async function fetchScheduleWindow(
     : [null];
   for (const group of groups) {
     for (let offset = 0; ; offset += PAGE_SIZE) {
-      let query = sb
-        .from("Schedule")
-        .select(
-          "id, instructor_id, date, start_time, end_time, status, learner_id, course_id, leadName, isTentative, tentative_details, pause_reason, pause_notes, started_at, ended_at, lesson:lesson_id(number)",
-        )
-        .gte("date", dateFrom)
-        .lte("date", dateTo);
-      if (excludeFilter) query = query.not("status", "in", excludeFilter);
-      if (group) query = query.in("instructor_id", group);
-      const { data, error } = await query
-        .order("id", { ascending: true })
-        .range(offset, offset + PAGE_SIZE - 1)
-        .abortSignal(signal);
+      // Built inside the closure so a retry issues a brand-new request.
+      const { data, error } = await withRetry(
+        () => {
+          let query = sb
+            .from("Schedule")
+            .select(
+              "id, instructor_id, date, start_time, end_time, status, learner_id, course_id, leadName, isTentative, tentative_details, pause_reason, pause_notes, started_at, ended_at, lesson:lesson_id(number)",
+            )
+            .gte("date", dateFrom)
+            .lte("date", dateTo);
+          if (excludeFilter) query = query.not("status", "in", excludeFilter);
+          if (group) query = query.in("instructor_id", group);
+          return query
+            .order("id", { ascending: true })
+            .range(offset, offset + PAGE_SIZE - 1)
+            .abortSignal(signal);
+        },
+        { retries, signal },
+      );
       if (error) throw error;
       rows.push(...((data ?? []) as ScheduleRow[]));
       if (!data || data.length < PAGE_SIZE) break;
@@ -359,6 +388,7 @@ export function useSalesData() {
       // race and mutate the store after we've already shown a timeout error.
       const controller = new AbortController();
       let timeoutId: ReturnType<typeof setTimeout> | null = null;
+      const retries = silent ? 0 : LOAD_RETRIES;
       try {
         // Instructor detail rows and the Schedule window are independent
         // queries (Schedule doesn't need the Instructor rows at all) — fetch
@@ -377,32 +407,43 @@ export function useSalesData() {
         const fetchAll = Promise.all([
           Promise.all(
             chunk(wanted, IN_CHUNK).map(async (part) => {
-              const { data: rows, error } = await sb
-                .from("Instructor")
-                .select(
-                  // No "gender" column here — the female-instructor-preference
-                  // matching in the ported availability engine expects
-                  // Instructor.gender, but this table doesn't have it. Selecting
-                  // it makes PostgREST reject the whole query (400), which was
-                  // silently breaking every instructor add. This dashboard never
-                  // exposes a female-preference control, so parseInstructors()
-                  // just falls back to gender: null (isFemale() -> false), which
-                  // matches this dashboard's actual behavior either way.
-                  //
-                  // "is_company_instructor" is likewise NOT selected here, for
-                  // the same reason: migration 20260929_100000 is manual-apply
-                  // only, so the column may not exist yet and adding it here
-                  // would 400 every instructor load. It arrives instead via
-                  // fetchCompanyInstructorIds(), which degrades to an empty set.
-                  "id_instructor, name, areas, unavailability, status, enabled",
-                )
-                .in("id_instructor", part)
-                .abortSignal(controller.signal);
+              const { data: rows, error } = await withRetry(
+                () =>
+                  sb
+                    .from("Instructor")
+                    .select(
+                      // No "gender" column here — the female-instructor-preference
+                      // matching in the ported availability engine expects
+                      // Instructor.gender, but this table doesn't have it. Selecting
+                      // it makes PostgREST reject the whole query (400), which was
+                      // silently breaking every instructor add. This dashboard never
+                      // exposes a female-preference control, so parseInstructors()
+                      // just falls back to gender: null (isFemale() -> false), which
+                      // matches this dashboard's actual behavior either way.
+                      //
+                      // "is_company_instructor" is likewise NOT selected here, for
+                      // the same reason: migration 20260929_100000 is manual-apply
+                      // only, so the column may not exist yet and adding it here
+                      // would 400 every instructor load. It arrives instead via
+                      // fetchCompanyInstructorIds(), which degrades to an empty set.
+                      "id_instructor, name, areas, unavailability, status, enabled",
+                    )
+                    .in("id_instructor", part)
+                    .abortSignal(controller.signal),
+                { retries, signal: controller.signal },
+              );
               if (error) throw error;
               return (rows ?? []) as Record<string, unknown>[];
             }),
           ),
-          fetchScheduleWindow(wanted, from, to, excluded, controller.signal),
+          fetchScheduleWindow(
+            wanted,
+            from,
+            to,
+            excluded,
+            controller.signal,
+            retries,
+          ),
           fetchCompanyInstructorIds(),
         ]);
         // If the deadline wins the race below, `fetchAll` rejects later when
@@ -445,20 +486,30 @@ export function useSalesData() {
         const [learnerChunks, courseChunks] = await Promise.all([
           Promise.all(
             chunk(learnerIds, IN_CHUNK).map(async (part) => {
-              const { data: learners, error: learnerErr } = await sb
-                .from("Learner")
-                .select("id, name, area, phone, pick_up_location")
-                .in("id", part);
+              const { data: learners, error: learnerErr } = await withRetry(
+                () =>
+                  sb
+                    .from("Learner")
+                    .select("id, name, area, phone, pick_up_location")
+                    .in("id", part)
+                    .abortSignal(controller.signal),
+                { retries, signal: controller.signal },
+              );
               if (learnerErr) throw learnerErr;
               return (learners ?? []) as Record<string, unknown>[];
             }),
           ),
           Promise.all(
             chunk(courseIds, IN_CHUNK).map(async (part) => {
-              const { data: courses, error: courseErr } = await sb
-                .from("Courses")
-                .select("id, name")
-                .in("id", part);
+              const { data: courses, error: courseErr } = await withRetry(
+                () =>
+                  sb
+                    .from("Courses")
+                    .select("id, name")
+                    .in("id", part)
+                    .abortSignal(controller.signal),
+                { retries, signal: controller.signal },
+              );
               if (courseErr) throw courseErr;
               return (courses ?? []) as Record<string, unknown>[];
             }),
@@ -675,11 +726,34 @@ export function useSalesData() {
   const loadInstructorIndex = useCallback(async () => {
     // Lazy-load instructor index only when needed (for search suggestions)
     if (allRef.current.length > 0) return;
-    const { data: listRes, error: listErr } = await sb
-      .from("Instructor")
-      .select("id_instructor, name, status, enabled")
-      .abortSignal(AbortSignal.timeout(LOAD_TIMEOUT_MS));
-    if (listErr) throw listErr;
+    // Cache-first: the light index (names/status for search suggestions)
+    // changes rarely, so a fresh copy skips the request entirely. On a failed
+    // fetch an older copy still beats an empty search box.
+    let listRes = cacheRead<Record<string, unknown>[]>(
+      INDEX_CACHE_KEY,
+      INDEX_FRESH_MS,
+    );
+    if (!listRes) {
+      try {
+        const { data, error: listErr } = await withRetry(
+          () =>
+            sb
+              .from("Instructor")
+              .select("id_instructor, name, status, enabled")
+              .abortSignal(AbortSignal.timeout(LOAD_TIMEOUT_MS)),
+          { retries: LOAD_RETRIES },
+        );
+        if (listErr) throw listErr;
+        listRes = (data ?? []) as Record<string, unknown>[];
+        cacheWrite(INDEX_CACHE_KEY, listRes);
+      } catch (err) {
+        listRes = cacheRead<Record<string, unknown>[]>(
+          INDEX_CACHE_KEY,
+          INDEX_STALE_OK_MS,
+        );
+        if (!listRes) throw err;
+      }
+    }
     allRef.current = parseLight((listRes ?? []) as Record<string, unknown>[]);
     // This runs in parallel with loadSession() on mount (Promise.all in
     // SalesDashboard). Without this commit, the index only reaches the UI if
@@ -693,14 +767,40 @@ export function useSalesData() {
 
   const loadSession = useCallback(async () => {
     // Fast startup: only load config, not all instructors
-    const { data: settingRow, error: cfgErr } = await sb
-      .from("app_settings")
-      .select("value")
-      .eq("key", "booking_flow")
-      .maybeSingle()
-      .abortSignal(AbortSignal.timeout(LOAD_TIMEOUT_MS));
-    if (cfgErr) throw cfgErr;
-    const config = readBookingFlowConfig(settingRow?.value);
+    // The booking config is the one request the whole page depends on, so a
+    // single transient failure used to blank every dashboard ("Couldn't load
+    // availability"). Retry it, and if the backend is still unreachable fall
+    // back to the last good copy -- the config changes rarely, and bookings are
+    // still validated by the database, so a cached copy is safe to render with.
+    let configValue: unknown;
+    // With a cached copy to fall back on there is little point waiting through
+    // a long retry ladder: one quick retry, then render from the cache.
+    const haveCachedConfig =
+      cacheRead<unknown>(CONFIG_CACHE_KEY, CONFIG_STALE_OK_MS) != null;
+    try {
+      const { data: settingRow, error: cfgErr } = await withRetry(
+        () =>
+          sb
+            .from("app_settings")
+            .select("value")
+            .eq("key", "booking_flow")
+            .maybeSingle()
+            .abortSignal(AbortSignal.timeout(LOAD_TIMEOUT_MS)),
+        { retries: haveCachedConfig ? 1 : LOAD_RETRIES },
+      );
+      if (cfgErr) throw cfgErr;
+      configValue = settingRow?.value;
+      if (configValue != null) cacheWrite(CONFIG_CACHE_KEY, configValue);
+    } catch (err) {
+      const cached = cacheRead<unknown>(CONFIG_CACHE_KEY, CONFIG_STALE_OK_MS);
+      if (cached == null) throw err;
+      console.warn(
+        "[sales-dashboard] booking config unreachable; using cached copy",
+        err,
+      );
+      configValue = cached;
+    }
+    const config = readBookingFlowConfig(configValue);
     if (!config.enabled) {
       throw new Error(
         "booking_flow configuration is missing or incomplete in app_settings (enabled:false).",
@@ -834,29 +934,17 @@ export function useSalesData() {
       window.clearTimeout(realtimeTimerRef.current);
       realtimeTimerRef.current = null;
     }
+    // Nobody is looking at a hidden tab, so don't spend backend requests on it.
+    // The ids stay queued and are flushed (once, coalesced) when it is shown.
+    if (document.visibilityState === "hidden") return;
     const ids = [...realtimePendingRef.current];
     realtimePendingRef.current.clear();
     if (ids.length > 0) refreshInstructors(ids);
   }, [refreshInstructors]);
 
   const queueRealtimeRefresh = useCallback(
-    (instrId: string | null) => {
-      if (instrId) {
-        realtimePendingRef.current.add(instrId);
-      } else {
-        // DELETE events only carry the deleted row's primary key in
-        // payload.old by default (Postgres's REPLICA IDENTITY DEFAULT),
-        // not the rest of the row -- so instructor_id is never available
-        // here for a deletion, regardless of client-side code. Refreshing
-        // every currently-loaded instructor is the safe fallback: it's
-        // strictly more work than a targeted refresh, never less correct,
-        // and the roster is normally a handful of instructors, not the
-        // whole table. Fixed at the source (REPLICA IDENTITY FULL on
-        // "Schedule") would let deletes be targeted too, but that's a DB
-        // change requiring separate approval.
-        for (const id of storeRef.current.instructors.keys())
-          realtimePendingRef.current.add(id);
-      }
+    (instrIds: string[]) => {
+      for (const id of instrIds) realtimePendingRef.current.add(id);
       if (realtimeTimerRef.current === null) {
         realtimeTimerRef.current = window.setTimeout(
           flushRealtimeRefresh,
@@ -867,6 +955,36 @@ export function useSalesData() {
     [flushRealtimeRefresh],
   );
 
+  // Decides which loaded instructor (if any) a Schedule change affects,
+  // WITHOUT a network call, so an irrelevant event costs nothing:
+  //  - a row this dashboard is already showing (matched by id in the loaded
+  //    blocks) -> refresh just its instructor. This also covers DELETE, whose
+  //    payload carries only the primary key (REPLICA IDENTITY DEFAULT) -- we no
+  //    longer refresh the WHOLE roster for it;
+  //  - a new / moved-in row inside the loaded date window -> its instructor;
+  //  - anything else (another instructor's row we never loaded, a change dated
+  //    outside the window, a delete of a row we don't show) -> ignore.
+  const instructorsAffectedBy = useCallback(
+    (payload: {
+      new?: { id?: number; instructor_id?: string; date?: string } | null;
+      old?: { id?: number } | null;
+    }): string[] => {
+      const rowId = payload.old?.id ?? payload.new?.id;
+      if (rowId != null) {
+        const shown = storeRef.current.blocks.find((b) => b.id === rowId);
+        if (shown) return [shown.instructorId];
+      }
+      const instr = payload.new?.instructor_id;
+      const date = payload.new?.date;
+      if (!instr || !storeRef.current.instructors.has(instr)) return [];
+      const from = datesRef.current[0];
+      const to = datesRef.current[datesRef.current.length - 1];
+      if (date && from && to && (date < from || date > to)) return [];
+      return [instr];
+    },
+    [],
+  );
+
   useEffect(() => {
     const channel = sb
       .channel("sales-dashboard-schedule-sync")
@@ -874,16 +992,35 @@ export function useSalesData() {
         "postgres_changes",
         { event: "*", schema: "public", table: "Schedule" },
         (payload: {
-          new?: { instructor_id?: string } | null;
-          old?: { instructor_id?: string } | null;
+          new?: { id?: number; instructor_id?: string; date?: string } | null;
+          old?: { id?: number } | null;
         }) => {
-          queueRealtimeRefresh(
-            payload.new?.instructor_id ?? payload.old?.instructor_id ?? null,
-          );
+          const ids = instructorsAffectedBy(payload);
+          if (ids.length > 0) queueRealtimeRefresh(ids);
         },
       )
       .subscribe();
+
+    let hiddenAt: number | null = null;
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        hiddenAt = Date.now();
+        return;
+      }
+      const wasHiddenFor = hiddenAt === null ? 0 : Date.now() - hiddenAt;
+      hiddenAt = null;
+      // Events may have been missed while the socket was throttled: catch up
+      // once. Otherwise just flush whatever was queued while hidden.
+      if (wasHiddenFor >= HIDDEN_CATCHUP_MS) {
+        queueRealtimeRefresh([...storeRef.current.instructors.keys()]);
+      } else if (realtimePendingRef.current.size > 0) {
+        queueRealtimeRefresh([]);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
     return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
       if (realtimeTimerRef.current !== null) {
         window.clearTimeout(realtimeTimerRef.current);
         realtimeTimerRef.current = null;
@@ -891,7 +1028,7 @@ export function useSalesData() {
       realtimePendingRef.current.clear();
       void sb.removeChannel(channel);
     };
-  }, [queueRealtimeRefresh]);
+  }, [instructorsAffectedBy, queueRealtimeRefresh]);
 
   return {
     phase,
