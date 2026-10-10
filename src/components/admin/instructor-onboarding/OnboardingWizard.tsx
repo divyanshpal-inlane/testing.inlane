@@ -7,15 +7,12 @@ import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
+import { supabaseAdmin } from "@/context/auth-context";
 import {
   insertZone,
   invalidateDbZoneCache,
 } from "@/lib/sales-dashboard/zones-db";
 import { supabase } from "@/lib/supabaseClient";
-// TESTING ONLY / REMOVE BEFORE PRODUCTION PR: admin auth calls go through the
-// admin-instructor-auth edge function so no service-role key is in the bundle.
-// Production imports `supabaseAdmin` from "@/context/auth-context" instead.
-import { findAuthUser, supabaseAdmin } from "@/lib/testing/adminAuthProxy";
 
 import { StepIndicator } from "./StepIndicator";
 // Import step components
@@ -41,36 +38,66 @@ interface ValidationResult {
   errors: string[];
 }
 
+const AUTH_LIST_PAGE_SIZE = 1000;
+const AUTH_LIST_MAX_PAGES = 20;
+
 /**
  * Find an existing auth user by phone or email.
  *
- * TESTING ONLY / REMOVE BEFORE PRODUCTION PR: the match (every page of
- * `auth.admin.listUsers`, last-10-digit phone / lower-cased email) runs inside
- * the admin-instructor-auth edge function, so the full auth user list never
- * reaches the browser. Production walks the pages here with the admin client.
+ * `auth.admin.listUsers()` is paginated and defaults to a single page, so
+ * scanning only the first response silently misses most accounts. The admin
+ * account list is well past one page in production, which is how duplicate
+ * onboardings got past this check. Walk every page before concluding "free".
  */
 const findExistingAuthUser = async (
   phoneNumber: string,
   email: string,
 ): Promise<{ id: string; phone?: string; email?: string } | null> => {
-  const { data, error } = await findAuthUser(phoneNumber, email);
+  const phoneDigits = phoneNumber.replace(/\D/g, "").slice(-10);
+  const normalizedEmail = email.trim().toLowerCase();
 
-  if (error) {
-    // Fail closed: if the lookup itself breaks we must not report "no
-    // duplicate" and then hit an opaque createUser conflict below.
-    throw new Error(
-      `Could not verify whether this phone/email is already registered: ${error.message}`,
-    );
-  }
+  const matches = (u: { id: string; phone?: string; email?: string }) => {
+    const candidateDigits = (u.phone || "").replace(/\D/g, "").slice(-10);
+    if (phoneDigits.length === 10 && candidateDigits === phoneDigits) {
+      return true;
+    }
+    if (u.email && u.email.trim().toLowerCase() === normalizedEmail) {
+      return true;
+    }
+    return false;
+  };
 
-  const found = data?.user;
-  return found
-    ? {
+  for (let page = 1; page <= AUTH_LIST_MAX_PAGES; page++) {
+    const { data, error } = await supabaseAdmin.auth.admin.listUsers({
+      page,
+      perPage: AUTH_LIST_PAGE_SIZE,
+    });
+
+    if (error) {
+      // Fail closed: if the listing itself breaks we must not report "no
+      // duplicate" and then hit an opaque createUser conflict below.
+      throw new Error(
+        `Could not verify whether this phone/email is already registered: ${error.message}`,
+      );
+    }
+
+    const found = data?.users?.find(matches);
+    if (found) {
+      return {
         id: found.id,
         phone: found.phone ?? undefined,
         email: found.email ?? undefined,
-      }
-    : null;
+      };
+    }
+
+    if (!data || data.users.length < AUTH_LIST_PAGE_SIZE) {
+      return null;
+    }
+  }
+
+  throw new Error(
+    "Could not verify whether this phone/email is already registered: too many auth users to scan.",
+  );
 };
 
 /**

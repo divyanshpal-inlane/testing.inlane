@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
@@ -10,7 +10,6 @@ import {
   useSchedulePreferences,
   useUpdatePreference,
 } from "@/queries/preferences";
-import { Database } from "@/types/database.types";
 import {
   DAYS_OF_WEEK,
   TIME_SLOT_LABELS,
@@ -22,24 +21,30 @@ interface PreferenceSelectorProps {
   learnerId: string;
   lessons: string[];
   type: string;
+  isFlexible?: boolean;
 }
 
 function PreferenceSelector({
   learnerId,
   lessons,
   type,
+  isFlexible = false,
 }: PreferenceSelectorProps) {
   const [selectedSlots, setSelectedSlots] = useState<Set<string>>(new Set());
-  const [isSaving, setIsSaving] = useState(false); // New state to track the entire save process
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const savingRef = useRef(false);
 
   // Fetch existing preferences
   const { data: existingPreferences, isLoading } =
     useSchedulePreferences(learnerId);
 
   // Update preferences mutation
-  const { mutate: updatePreference, isPending } = useUpdatePreference();
-  const { mutate: rescheduleRequest, isPending: isRescheduleRequestPending } =
-    useMutationRescheduleRequest();
+  const { mutateAsync: updatePreference, isPending } = useUpdatePreference();
+  const {
+    mutateAsync: rescheduleRequest,
+    isPending: isRescheduleRequestPending,
+  } = useMutationRescheduleRequest();
   const navigate = useNavigate();
 
   // Initialize selected slots from existing preferences
@@ -97,7 +102,7 @@ function PreferenceSelector({
           .single();
 
         if (error) throw error;
-        if (data) setLearnerName(data.name);
+        if (data) setLearnerName(data.name ?? "");
       } catch (error) {
         console.error("Error fetching learner name:", error);
       }
@@ -107,13 +112,24 @@ function PreferenceSelector({
   }, [learnerId]);
 
   const handleSubmit = async () => {
-    if (isSaving) return; // Prevent multiple submissions
+    if (savingRef.current) return;
+    if (!isFlexible && selectedSlots.size === 0) {
+      setSaveError("Select at least one timing slot before saving.");
+      return;
+    }
 
+    savingRef.current = true;
+    setIsSaving(true);
+    setSaveError("");
     try {
-      setIsSaving(true); // Set saving state to true at the beginning
-
       // Convert selected slots to preferences format
-      const preferences = Array.from(selectedSlots).map((key) => {
+      // Flexible availability means all slots, not an empty preference list.
+      const slotsToSave = isFlexible
+        ? DAYS_OF_WEEK.flatMap((_, day) =>
+            TIME_SLOTS.map((slot) => `${day}-${slot}`),
+          )
+        : Array.from(selectedSlots);
+      const preferences = slotsToSave.map((key) => {
         const slot = key.split("-");
         const dayOfWeek = slot[0];
         const timeSlot = `${slot[1]}-${slot[2]}`;
@@ -123,103 +139,59 @@ function PreferenceSelector({
         };
       });
 
-      // Update preferences
-      updatePreference(
-        {
+      await updatePreference({ learnerId, preferences });
+
+      // New/lesson10 requests are created here. Reschedule requests are
+      // already created by the confirmation/payment flow; do not duplicate them.
+      // Keep virtual lesson IDs intact so custom courses retain their hour count.
+      if (type === "new" || type === "lesson10") {
+        await rescheduleRequest({
           learnerId,
-          preferences,
-        },
-        {
-          onSuccess: () => {
-            const requestType = type === "lesson10" ? "lesson10" : type;
+          lessonIds: lessons,
+          type,
+        });
+      }
 
-            // Navigate with delay to home after preferences are updated
-            navigate("/loading", { state: { next: "/home" } });
-            // navigate("/home");
-
-            // Continue with email and message operations in the background
-            if (type === "lesson10" || type === "new") {
-              if (type === "lesson10") {
-                supabase.functions
-                  .invoke("send-message", {
-                    body: {
-                      message_type: "THANKS_FOR_AVAILABILITY",
-                      learner_id: learnerId,
-                    },
-                  })
-                  .catch((err) => console.error("Error sending message:", err));
-
-                sendAdminEmail(
-                  "New 10th Lesson Scheduling Request",
-                  `${learnerName} has submitted availability for their 10th lesson scheduling.`,
-                ).catch((err) =>
-                  console.error("Error sending admin email:", err),
-                );
-              } else if (type === "new") {
-                supabase.functions
-                  .invoke("send-message", {
-                    body: {
-                      message_type: "THANKS_FOR_AVAILABILITY",
-                      learner_id: learnerId,
-                    },
-                  })
-                  .catch((err) => console.error("Error sending message:", err));
-
-                sendAdminEmail(
-                  "New Lesson Scheduling Request",
-                  `${learnerName} has submitted their availability for lesson scheduling.`,
-                ).catch((err) =>
-                  console.error("Error sending admin email:", err),
-                );
-              }
-
-              // Create reschedule request for all types (including demo/custom).
-              // Virtual lesson ids ("virtual-lesson-N") are passed through
-              // as-is: since migration 20260418 widened lesson_ids to TEXT[],
-              // the column accepts them, and the admin CreateSchedule flow
-              // synthesizes N mock lessons from them — that count is the ONLY
-              // way it knows how many hours a demo/custom request needs.
-              // (The old code filtered them out as "not valid UUIDs", which
-              // sent an empty array and made every custom-course request look
-              // like a single 1-hour lesson on the admin side.)
-              rescheduleRequest(
-                {
-                  learnerId,
-                  lessonIds: lessons,
-                  type: requestType,
-                },
-                {
-                  onError: (error) => {
-                    console.error("Error with reschedule request:", error);
-                  },
-                },
-              );
-            } else {
-              supabase.functions
-                .invoke("send-message", {
-                  body: {
-                    message_type: "WEBAPP_RESCHEDULE_REQUEST",
-                    learner_id: learnerId,
-                  },
-                })
-                .catch((err) => console.error("Error sending message:", err));
-
-              sendAdminEmail(
-                "New Reschedule Request",
-                `${learnerName} has requested to reschedule lesson.`,
-              ).catch((err) =>
-                console.error("Error sending admin email:", err),
-              );
-            }
+      // Notifications are best-effort, but only AFTER the queue entry exists.
+      supabase.functions
+        .invoke("send-message", {
+          body: {
+            message_type:
+              type === "reschedule"
+                ? "WEBAPP_RESCHEDULE_REQUEST"
+                : "THANKS_FOR_AVAILABILITY",
+            learner_id: learnerId,
           },
-          onError: (error) => {
-            console.error("Error updating preferences:", error);
-            setIsSaving(false);
-          },
-        },
-      );
+        })
+        .catch((err) => console.error("Error sending message:", err));
+
+      const subject =
+        type === "lesson10"
+          ? "New 10th Lesson Scheduling Request"
+          : type === "new"
+            ? "New Lesson Scheduling Request"
+            : "New Reschedule Request";
+      sendAdminEmail(
+        subject,
+        `${learnerName} has submitted availability for ${type === "lesson10" ? "their 10th lesson" : "lesson scheduling"}.`,
+      ).catch((err) => console.error("Error sending admin email:", err));
+
+      // Do not unmount until BOTH preferences and the admin request are saved.
+      navigate("/loading", { state: { next: "/home" } });
     } catch (error) {
       console.error("Error saving preferences:", error);
+      const isPermissionError =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "42501";
+      setSaveError(
+        isPermissionError
+          ? "Your account couldn't be authorized to save this scheduling request. Please sign in again or contact support. Your selected timings have been kept."
+          : "We couldn't submit your scheduling request. Please try Save again. Your selected timings have been kept.",
+      );
+    } finally {
+      savingRef.current = false;
       setIsSaving(false);
     }
   };
@@ -276,11 +248,11 @@ function PreferenceSelector({
                     {TIME_SLOTS.map((slot) => (
                       <div key={slot} className="grid grid-cols-7 gap-6">
                         {DAYS_OF_WEEK.map((_, index) => {
-                          const isSelected = selectedSlots.has(
-                            `${index}-${slot}`,
-                          );
+                          const isSelected =
+                            isFlexible || selectedSlots.has(`${index}-${slot}`);
                           return (
                             <Button
+                              type="button"
                               key={`${index}-${slot}`}
                               variant={isSelected ? "default" : "outline"}
                               className={`h-12 rounded-lg border-2 ${
@@ -289,7 +261,7 @@ function PreferenceSelector({
                                   : "border-gray-200 hover:bg-gray-50"
                               }`}
                               onClick={() => handleSlotToggle(index, slot)}
-                              disabled={isSaving} // Disable during saving
+                              disabled={isSaving || isFlexible}
                             >
                               {isSelected ? "✓" : ""}
                             </Button>
@@ -309,7 +281,13 @@ function PreferenceSelector({
       </Card>
 
       <div className="sticky bottom-0 mt-4 border-t bg-white p-4">
+        {saveError && (
+          <p role="alert" className="mb-3 text-sm text-red-600">
+            {saveError}
+          </p>
+        )}
         <Button
+          type="button"
           onClick={handleSubmit}
           disabled={isPending || isRescheduleRequestPending || isSaving} // Disable during any async operation
           className="w-full"

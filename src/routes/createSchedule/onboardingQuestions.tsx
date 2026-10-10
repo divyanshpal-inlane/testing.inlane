@@ -1,6 +1,6 @@
 import { format } from "date-fns";
 import { ArrowLeft } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
@@ -12,11 +12,13 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { useLearnerUpdate } from "@/queries/learner";
+import { useLearner, useLearnerUpdate } from "@/queries/learner";
 
 export default function OnboardingQuestions() {
   const navigate = useNavigate();
-  const { mutate: updateLearner, isPending } = useLearnerUpdate();
+  const { data: learner } = useLearner();
+  const { mutate: updateLearner, isPending, error } = useLearnerUpdate();
+  const seededRef = useRef(false);
 
   const [startDate, setStartDate] = useState<Date | undefined>(undefined);
   const [canTakeTwoHourClasses, setCanTakeTwoHourClasses] =
@@ -28,7 +30,18 @@ export default function OnboardingQuestions() {
   // Array of all days for mapping
   const DAYS_OF_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
+  useEffect(() => {
+    if (!learner || seededRef.current) return;
+    seededRef.current = true;
+    if (learner.preferred_start_date) {
+      setStartDate(new Date(`${learner.preferred_start_date}T00:00:00`));
+    }
+    setCanTakeTwoHourClasses(learner.prefers_two_hour_classes ?? false);
+    setSelectedTwoHourDays(learner.two_hour_days?.split(", ") ?? []);
+  }, [learner]);
+
   const handleSubmit = () => {
+    if (isPending || !startDate) return;
     updateLearner(
       {
         preferred_start_date: startDate
@@ -168,12 +181,17 @@ export default function OnboardingQuestions() {
       </div>
 
       <div className="sticky bottom-0 border-t bg-white p-4">
+        {error && (
+          <p role="alert" className="mb-3 text-sm text-red-600">
+            Unable to save your lesson details. Please try again.
+          </p>
+        )}
         <Button
           className="w-full"
           onClick={handleSubmit}
           disabled={isPending || !startDate}
         >
-          Continue
+          {isPending ? "Saving..." : "Continue"}
         </Button>
       </div>
     </div>
