@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Instructor Approval - Types and Mock Data
  * Handles document review and instructor approval workflow
  */
@@ -1033,6 +1033,46 @@ export async function approveStage2(instructorId: string): Promise<any> {
 
   console.log(`[APPROVE_STAGE2_API] ✅ Stage 2 approved successfully for instructor ${instructorId}`);
   console.log("[APPROVE_STAGE2_API] Response:", apiData);
+
+  return apiData;
+}
+
+
+/**
+ * Reject Instructor - Set status to rejected and enabled to false
+ * Called when admin clicks "Reject Instructor" button on Stage 1
+ * POST /v1/admin/instructors/{user_id}/reject
+ */
+export async function rejectInstructor(instructorId: string): Promise<any> {
+  const goAccessToken = localStorage.getItem("go_access_token");
+  if (!goAccessToken) {
+    throw new Error("No authentication token. Please login again.");
+  }
+
+  console.log(`[REJECT_INSTRUCTOR_API] Rejecting instructor ${instructorId}`);
+
+  const url = `${BACKEND_API}/admin/instructors/${instructorId}/reject`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${goAccessToken}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+  }
+
+  const apiData = await response.json();
+
+  if (!apiData.success) {
+    throw new Error(apiData.message || "Failed to reject instructor");
+  }
+
+  console.log(`[REJECT_INSTRUCTOR_API] ✅ Instructor rejected successfully: ${instructorId}`);
+  console.log("[REJECT_INSTRUCTOR_API] Response:", apiData);
 
   return apiData;
 }

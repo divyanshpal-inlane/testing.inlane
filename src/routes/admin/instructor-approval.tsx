@@ -15,6 +15,7 @@ import {
   rejectVideo,
   approveStage1Documents,
   approveStage2,
+  rejectInstructor,
   reuploadDocument,
   type DocumentType,
   type DocumentSide,
@@ -519,6 +520,22 @@ export default function InstructorApprovalPage(): JSX.Element {
     }
   };
 
+  const handleRejectInstructor = async () => {
+    if (!id) return;
+
+    try {
+      console.log(`[UI] Admin rejecting instructor ${id}`);
+      const response = await rejectInstructor(id);
+      console.log("[UI] Instructor rejected successfully:", response);
+
+      alert(`✓ Instructor rejected! Status updated to rejected.`);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "Failed to reject instructor";
+      console.error("[UI] Error rejecting instructor:", errorMsg);
+      alert(`✗ Error: ${errorMsg}`);
+    }
+  };
+
   // Loading state
   if (isLoading) {
     return (
@@ -940,18 +957,26 @@ export default function InstructorApprovalPage(): JSX.Element {
                 </div>
               )}
 
-              <button
-                onClick={handleApproveStage1}
-                disabled={approvedCount !== instructor.totalCount}
-                className="w-full font-semibold py-2.5 px-4 rounded-lg transition-all text-sm text-white"
-                style={{
-                  backgroundColor: approvedCount === instructor.totalCount ? "#00CE84" : "#DDF8EF",
-                  color: approvedCount === instructor.totalCount ? "white" : "#00CE84",
-                  cursor: approvedCount === instructor.totalCount ? "pointer" : "not-allowed"
-                }}
-              >
-                Approve Stage 1 - Mark Active
-              </button>
+              <div className="flex gap-3">
+                <button
+                  onClick={handleApproveStage1}
+                  disabled={approvedCount !== instructor.totalCount}
+                  className="flex-1 font-semibold py-2.5 px-4 rounded-lg transition-all text-sm text-white"
+                  style={{
+                    backgroundColor: approvedCount === instructor.totalCount ? "#00CE84" : "#DDF8EF",
+                    color: approvedCount === instructor.totalCount ? "white" : "#00CE84",
+                    cursor: approvedCount === instructor.totalCount ? "pointer" : "not-allowed"
+                  }}
+                >
+                  Activate Instructor
+                </button>
+                <button
+                  onClick={handleRejectInstructor}
+                  className="flex-1 font-semibold py-2.5 px-4 rounded-lg transition-all text-sm border-2 border-red-600 bg-white text-red-600 hover:bg-red-50"
+                >
+                  Reject Instructor
+                </button>
+              </div>
             </div>
           </div>
         </div>
