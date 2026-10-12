@@ -71,6 +71,7 @@ import { supabase } from "@/lib/supabaseClient";
 import { cn } from "@/lib/utils";
 import { useCurrentAdmin } from "@/queries/adminPermissions";
 import { useCurrentUser } from "@/queries/userManagement";
+import { maskPhoneNumber } from "@/utils/phoneMasking";
 
 const LocationSearch = lazy(
   () => import("@/components/admin/sales-dashboard/LocationSearch"),
@@ -742,7 +743,12 @@ function buildSlotCard(row: {
     },
     { label: "Instructor", value: row.instructor || "N/A" },
     { label: "Learner", value: learnerWithClass || "N/A" },
-    { label: "Phone", value: row.phone || "N/A" },
+    // Customer phone numbers (including ones saved from the CRM by Instructor
+    // Management) are never shown in full to agents.
+    {
+      label: "Phone",
+      value: row.phone ? maskPhoneNumber(row.phone) : "N/A",
+    },
     { label: "Location", value: row.location || "N/A" },
     { label: "Course", value: row.course || "N/A" },
     { label: "Description", value: row.description || "N/A" },
@@ -2918,7 +2924,9 @@ export default function SalesDashboard() {
       const timeLabel = `${minutesToTime(minute)}–${minutesToTime(minute + (config?.gridMinutes ?? 30))}`;
 
       const unavail = (instr?.unavailability ?? null) as
-        unknown[] | null | undefined;
+        | unknown[]
+        | null
+        | undefined;
       const weekday = dateToWeekdayLower(date);
       const blockedByUnavail =
         unavail != null && isTimeUnavailable(unavail, date, weekday, minute);
