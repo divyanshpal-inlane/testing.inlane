@@ -63,7 +63,6 @@ import {
   shouldRenderLearnerLLFlow,
 } from "@/lib/learner-service";
 import { supabase } from "@/lib/supabaseClient";
-import { useMyLLApplication } from "@/queries/llCustomer";
 // useUpdateScheduleStatus removed — lesson status changes are handled by instructor OTP flow only
 import {
   useLearner,
@@ -74,6 +73,7 @@ import {
   useLessonSchedule,
   useUpcomingLesson,
 } from "@/queries/learner";
+import { useMyLLApplication } from "@/queries/llCustomer";
 import { usePaymentsByLearner } from "@/queries/payment";
 import {
   useLearnerRescheduleRequests,
@@ -123,10 +123,8 @@ export default function Home() {
     isFetching: isServiceEnrollmentFetching,
     isLoading: isServiceEnrollmentLoading,
   } = useLearnerServiceEnrollment({ learnerId: learner?.id });
-  const {
-    data: myLLApplication,
-    isLoading: isLLApplicationLoading,
-  } = useMyLLApplication(learner?.id);
+  const { data: myLLApplication, isLoading: isLLApplicationLoading } =
+    useMyLLApplication(learner?.id);
 
   const [showPolicyModal, setShowPolicyModal] = useState(false);
   const { data: scheduleRequests, isLoading: scheduleRequestsLoading } =
@@ -226,21 +224,21 @@ export default function Home() {
 
   const selectedCaseType = serviceEnrollment?.case_type;
   const homeExperience = learnerHomeExperience(selectedCaseType);
-  
-  // IMPORTANT: If learner has an LL application that's approved but doesn't have 
+
+  // IMPORTANT: If learner has an LL application that's approved but doesn't have
   // an ll_number yet, they should stay in the LL flow UNLESS they have completed
-  // setup (preferences set) or have scheduled lessons. This handles cases where 
+  // setup (preferences set) or have scheduled lessons. This handles cases where
   // LL_received was set prematurely (before ll_number was issued).
   // Check this FIRST before other routing logic.
-  const hasLLApplicationInProgress = 
-    myLLApplication?.application && 
+  const hasLLApplicationInProgress =
+    myLLApplication?.application &&
     !myLLApplication?.application?.ll_number &&
     learner?.LL_application_approved &&
     // Don't show LL flow if they've already set preferences OR have scheduled lessons OR have an upcoming lesson
     (schedulePreferences?.length ?? 0) === 0 &&
     !(Array.isArray(scheduledLessons) && scheduledLessons.length > 0) &&
     !LessonData?.upcomingLesson;
-  
+
   if (hasLLApplicationInProgress) {
     return (
       <div className="flex min-h-screen flex-col">
@@ -254,7 +252,7 @@ export default function Home() {
       </div>
     );
   }
-  
+
   const shouldRenderLLFlow =
     shouldRenderLearnerLLFlow(selectedCaseType, learner?.LL_received, isDemo) &&
     !(selectedCaseType === "lessons_with_rto" && learner?.LL_received);
@@ -276,7 +274,7 @@ export default function Home() {
   // setup once their LL is received instead of being trapped in the RTO home.
   // FIX: Don't show RTO LL flow if learner has scheduled lessons or upcoming lesson
   const shouldShowRTOLLFlow = shouldRenderLLFlow && !LessonData?.upcomingLesson;
-  
+
   if (
     homeExperience === "rto" &&
     (shouldShowRTOLLFlow || (returnedFromSetup && !!nextSetupRoute))

@@ -1,6 +1,6 @@
 import { getYear } from "date-fns";
-import { useCallback, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import React, { useCallback, useState } from "react";
+import { Navigate, useNavigate } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -11,8 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useUser } from "@/context/auth-context";
-import { useLearnerUpdate } from "@/queries/learner";
-import { learnerHasDOB } from "@/utils/duplicateDetection";
+import { useLearner, useLearnerUpdate } from "@/queries/learner";
 
 const days = Array.from({ length: 31 }, (_, i) => i + 1);
 
@@ -42,6 +41,23 @@ export default function Birthday() {
   const { mutate, isPending } = useLearnerUpdate();
   const navigate = useNavigate();
   const { phone } = useUser();
+  const { data: learner, isLoading: learnerLoading, refetch } = useLearner();
+
+  // Refetch learner data on mount to ensure we have the latest DOB status
+  // This prevents the issue where cached data shows no DOB but DB has it
+  React.useEffect(() => {
+    console.log(
+      "[BIRTHDAY] Refetching learner data to ensure fresh DOB status",
+    );
+    refetch();
+  }, [refetch]);
+
+  // Guard: If learner already has DOB, redirect to next step
+  // This uses the same cached data that /home uses for navigation
+  if (!learnerLoading && learner?.dob) {
+    console.log("[BIRTHDAY] Learner already has DOB, redirecting to aadhar");
+    return <Navigate to="/onboard/aadhar" replace />;
+  }
 
   const handleContinueClick = useCallback(async () => {
     setError("");
@@ -75,17 +91,6 @@ export default function Birthday() {
     console.log("[BIRTHDAY] Proceeding with DOB update for phone:", phone);
 
     try {
-      // Check if learner already has DOB filled to prevent overwriting
-      const alreadyHasDOB = await learnerHasDOB(phone);
-
-      if (alreadyHasDOB) {
-        console.warn("[BIRTHDAY] ⚠️ Learner already has DOB filled");
-        setError(
-          "You have already entered your date of birth. If you need to change it, please contact support.",
-        );
-        return;
-      }
-
       const dob = `${yearNum}-${String(monthIndex + 1).padStart(2, "0")}-${String(
         dayNum,
       ).padStart(2, "0")}`;
