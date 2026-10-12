@@ -724,7 +724,6 @@ function buildSlotCard(row: {
   instructor: string;
   learner: string;
   lessonNumber: number | null;
-  phone: string;
   location: string;
   course: string;
   description: string;
@@ -742,7 +741,6 @@ function buildSlotCard(row: {
     },
     { label: "Instructor", value: row.instructor || "N/A" },
     { label: "Learner", value: learnerWithClass || "N/A" },
-    { label: "Phone", value: row.phone || "N/A" },
     { label: "Location", value: row.location || "N/A" },
     { label: "Course", value: row.course || "N/A" },
     { label: "Description", value: row.description || "N/A" },
@@ -3110,7 +3108,6 @@ export default function SalesDashboard() {
                   instructor: name,
                   learner: cover.learnerName,
                   lessonNumber: cover.lessonNumber,
-                  phone: cover.learnerPhone,
                   location: cover.area,
                   course: cover.courseName,
                   // Real classes carry no tentative-only fields — Instructor
@@ -3160,7 +3157,6 @@ export default function SalesDashboard() {
                     instructor: name,
                     learner: cover.learnerName,
                     lessonNumber: cover.lessonNumber,
-                    phone: cover.learnerPhone,
                     location: cover.area,
                     course: cover.courseName,
                     description: "",
@@ -3254,7 +3250,6 @@ export default function SalesDashboard() {
               instructor: name,
               learner: cover.learnerName,
               lessonNumber: cover.lessonNumber,
-              phone: cover.learnerPhone,
               location: cover.area,
               // Instructor Management's tentative card shows the hold's
               // description (not a course) plus its lead and payment info.

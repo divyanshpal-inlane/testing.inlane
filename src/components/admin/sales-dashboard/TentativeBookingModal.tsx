@@ -336,8 +336,10 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
     mutationFn: async () => {
       if (slots.length === 0) throw new Error("No slot selected");
 
+      // When editing, the phone is never shown or editable: the booking keeps
+      // whatever phone it already has (it stays in `baseDetails`).
       const normalizedPhone = normalizePhone(formData.customerPhone);
-      if (!normalizedPhone) {
+      if (!normalizedPhone && !editContext) {
         throw new Error("Invalid phone number");
       }
 
@@ -363,7 +365,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
         const editDetails: Record<string, unknown> = {
           ...(editContext.baseDetails ?? {}),
           name: formData.customerName,
-          phone: normalizedPhone,
+          ...(normalizedPhone ? { phone: normalizedPhone } : {}),
           sales_agent: formData.salesAgent,
           payment_status: formData.paymentStatus,
           address: formData.customerAddress,
@@ -507,7 +509,9 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
     if (!formData.customerName.trim()) {
       newErrors.customerName = "Customer name is required";
     }
-    if (!formData.customerPhone.trim()) {
+    if (editContext) {
+      // Phone is hidden and unchanged when editing.
+    } else if (!formData.customerPhone.trim()) {
       newErrors.customerPhone = "Phone number is required";
     } else if (!isValidPhone(formData.customerPhone)) {
       // normalizePhone() alone would accept e.g. "0987654321" — 10 digits,
@@ -766,37 +770,40 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
             )}
           </div>
 
-          {/* Phone */}
-          <div>
-            <label
-              htmlFor="customerPhone"
-              className="block text-sm font-medium text-foreground"
-            >
-              Phone Number *
-            </label>
-            <input
-              id="customerPhone"
-              type="tel"
-              inputMode="numeric"
-              maxLength={10}
-              value={formData.customerPhone}
-              onChange={(e) =>
-                set(
-                  "customerPhone",
-                  e.target.value.replace(/\D/g, "").slice(0, 10),
-                )
-              }
-              placeholder="10-digit phone number"
-              className={`mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
-                errors.customerPhone ? "border-destructive" : "border-input"
-              }`}
-            />
-            {errors.customerPhone && (
-              <p className="mt-1 text-xs text-destructive">
-                {errors.customerPhone}
-              </p>
-            )}
-          </div>
+          {/* Phone -- hidden when editing: agents never see an existing
+              customer's phone; the booking keeps the one it already has. */}
+          {!editContext && (
+            <div>
+              <label
+                htmlFor="customerPhone"
+                className="block text-sm font-medium text-foreground"
+              >
+                Phone Number *
+              </label>
+              <input
+                id="customerPhone"
+                type="tel"
+                inputMode="numeric"
+                maxLength={10}
+                value={formData.customerPhone}
+                onChange={(e) =>
+                  set(
+                    "customerPhone",
+                    e.target.value.replace(/\D/g, "").slice(0, 10),
+                  )
+                }
+                placeholder="10-digit phone number"
+                className={`mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+                  errors.customerPhone ? "border-destructive" : "border-input"
+                }`}
+              />
+              {errors.customerPhone && (
+                <p className="mt-1 text-xs text-destructive">
+                  {errors.customerPhone}
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Sales Agent -- read-only, set to whoever is actually logged in
               (see currentUserName in SalesDashboard.tsx). This used to be

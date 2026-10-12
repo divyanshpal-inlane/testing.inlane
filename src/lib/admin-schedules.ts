@@ -2,6 +2,8 @@ import { supabase } from "@/lib/supabaseClient";
 
 const PAGE_SIZE = 1000;
 
+const SLOT_BOOKING_FUNCTION = "instructor-slot-booking";
+
 // Left joins retain demo/custom/topup rows with no course/lesson, as well as
 // unassigned classes. Never feed nullable foreign keys to UUID .in() lookups.
 const SCHEDULE_SELECT = `
@@ -44,3 +46,27 @@ export async function fetchAdminSchedules(
 export type AdminSchedule = Awaited<
   ReturnType<typeof fetchAdminSchedules>
 >[number];
+
+// Instructor-module reads go through the slot-booking edge function instead of
+// fetchAdminSchedules: it strips learner phone numbers (and tentative_details
+// .phone) server-side, so no customer phone number ever reaches the browser.
+export async function fetchInstructorModuleSchedules(
+  instructorId: string,
+  signal?: AbortSignal,
+): Promise<AdminSchedule[]> {
+  if (!instructorId) return [];
+  const { data, error } = await supabase.functions.invoke(
+    SLOT_BOOKING_FUNCTION,
+    { body: { action: "schedules", instructorId }, signal },
+  );
+  if (error) throw error;
+  const payload = data as {
+    success?: boolean;
+    rows?: AdminSchedule[];
+    error?: string;
+  } | null;
+  if (payload?.success === false) {
+    throw new Error(payload.error ?? "Failed to fetch schedules");
+  }
+  return payload?.rows ?? [];
+}
