@@ -45,7 +45,6 @@ import {
   Loader2,
   Map,
   MapPin,
-  Phone,
   Plus,
   PlusCircle,
   Search,
@@ -113,7 +112,7 @@ import {
 } from "@/constants/instructorStatus";
 import { usePhoneVisibility } from "@/context/phone-visibility-context";
 import { useAdminImportedCalendar } from "@/hooks/useAdminImportedCalendar";
-import { fetchAdminSchedules } from "@/lib/admin-schedules";
+import { fetchInstructorModuleSchedules } from "@/lib/admin-schedules";
 import {
   deleteZoneById,
   insertZone,
@@ -123,13 +122,104 @@ import {
 import { supabase } from "@/lib/supabaseClient";
 import { cn } from "@/lib/utils";
 import { useCurrentAdmin } from "@/queries/adminPermissions";
-import { checkInstructorAvailability } from "@/queries/instructor";
 import { useCurrentUser } from "@/queries/userManagement";
 import { SlotConfig } from "@/types/schedule";
 import { googleMapsLoader } from "@/utils/googleMaps";
 import { maskCarNumber, maskPhoneNumber } from "@/utils/phoneMasking";
 
 import { Schedule } from "./schedules";
+
+// --- Instructor slot-booking proxy -----------------------------------------
+// Learner/customer phone numbers must never reach the browser inside the
+// Instructor Management module, and the Cratio CRM token must never live in
+// client code. Both the CRM lead lookup and the server-side slot validation go
+// through this edge function, which strips phone numbers from every response.
+const SLOT_BOOKING_FUNCTION = "instructor-slot-booking";
+
+type LeadLookupResult = {
+  success?: boolean;
+  configured?: boolean;
+  found?: boolean;
+  customer?: {
+    name?: string;
+    address?: string;
+    leadName?: string;
+    course?: string;
+    payment?: string;
+  } | null;
+  error?: string;
+  code?: string;
+};
+
+// Thin wrapper over the slot-booking function. Surfaces the function's own
+// error text (which supabase-js hides behind a generic non-2xx message).
+async function invokeSlotBooking<T = Record<string, unknown>>(
+  body: Record<string, unknown>,
+): Promise<T> {
+  const { data, error } = await supabase.functions.invoke(
+    SLOT_BOOKING_FUNCTION,
+    { body },
+  );
+  if (error) {
+    let message = error.message;
+    const context = (error as { context?: Response }).context;
+    if (context && typeof context.json === "function") {
+      try {
+        const parsed = (await context.json()) as { error?: string };
+        if (parsed?.error) message = parsed.error;
+      } catch {
+        // Non-JSON body — keep the generic message.
+      }
+    }
+    throw new Error(message);
+  }
+  return (data ?? {}) as T;
+}
+
+// Best-effort match of the CRM's free-text course (e.g. "4 Wheeler 10 days")
+// to one of our courses by name; undefined leaves the selection untouched.
+function matchCourseId(
+  crmCourse: string | undefined,
+  courses: { id: number | string; name: string | null }[] | undefined,
+): string | undefined {
+  const norm = (v: string) =>
+    v
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  const target = crmCourse ? norm(crmCourse) : "";
+  if (!target || !courses) return undefined;
+  return courses
+    .find((c) => {
+      const name = norm(c.name ?? "");
+      if (!name) return false;
+      return name === target || name.includes(target) || target.includes(name);
+    })
+    ?.id.toString();
+}
+
+type LeadLookupBy = "email" | "leadId";
+
+async function lookupCratioLead(
+  leadId: string,
+  by: LeadLookupBy,
+): Promise<LeadLookupResult> {
+  return invokeSlotBooking<LeadLookupResult>({
+    action: "lookup",
+    leadId,
+    by,
+  });
+}
+
+async function validateSlotsViaEdge(
+  instructorId: string,
+  slots: { date: string; start_time: string; end_time: string }[],
+): Promise<Record<string, { available: boolean; reason: string }>> {
+  const data = await invokeSlotBooking<{
+    availabilityMap?: Record<string, { available: boolean; reason: string }>;
+  }>({ action: "validate", instructorId, slots });
+  return data.availabilityMap ?? {};
+}
 
 // Define a type for the instructor data that comes from the database
 interface Unavailability {
@@ -570,9 +660,13 @@ const AddressAutocomplete = memo(
   ({
     value,
     onChange,
+    readOnly = false,
+    className,
   }: {
     value: string;
     onChange: (address: string, lat: number | null, lng: number | null) => void;
+    readOnly?: boolean;
+    className?: string;
   }) => {
     const inputRef = useRef<HTMLInputElement>(null);
     const autocompleteRef = useRef<google.maps.places.Autocomplete | null>(
@@ -639,7 +733,12 @@ const AddressAutocomplete = memo(
     }, []);
 
     useEffect(() => {
-      if (!inputRef.current || !isScriptLoaded || !window.google?.maps?.places)
+      if (
+        readOnly ||
+        !inputRef.current ||
+        !isScriptLoaded ||
+        !window.google?.maps?.places
+      )
         return;
 
       // Clear previous instance if it exists
@@ -676,7 +775,7 @@ const AddressAutocomplete = memo(
       return () => {
         if (listener) google.maps.event.removeListener(listener);
       };
-    }, [isScriptLoaded]);
+    }, [isScriptLoaded, readOnly]);
 
     const handleManualTyping = (e: React.ChangeEvent<HTMLInputElement>) => {
       const val = e.target.value;
@@ -690,19 +789,27 @@ const AddressAutocomplete = memo(
         <Input
           ref={inputRef}
           value={internalValue}
+          readOnly={readOnly}
           onChange={(e) => {
+            if (readOnly) return;
             setEngaged(true);
             handleManualTyping(e);
           }}
-          onFocus={() => setEngaged(true)}
+          onFocus={() => {
+            if (!readOnly) setEngaged(true);
+          }}
           placeholder="Search address..."
-          className="w-full"
+          className={cn(
+            "w-full",
+            className,
+            readOnly && "bg-muted text-muted-foreground",
+          )}
           autoComplete="off"
           onKeyDown={(e) => {
             if (e.key === "Enter") e.preventDefault();
           }}
         />
-        {engaged && !isScriptLoaded && (
+        {engaged && !isScriptLoaded && !readOnly && (
           <div className="mt-1 text-xs text-gray-500">
             Loading address autocomplete...
           </div>
@@ -2491,7 +2598,6 @@ function WeeklyScheduleView({
     isTentative: true,
     tentative_details: {
       name: "",
-      phone: "",
       paid_info: "",
       pickup_location: "",
       description: "",
@@ -2511,7 +2617,6 @@ function WeeklyScheduleView({
     isTentative: true,
     tentative_details: {
       name: "",
-      phone: "",
       paid_info: "",
       pickup_location: "",
       description: "",
@@ -2626,7 +2731,6 @@ function WeeklyScheduleView({
       instructor_id: instructorId,
       tentative_details: {
         name: schedule?.tentative_details?.name || "",
-        phone: schedule?.tentative_details?.phone || "",
         paid_info: schedule?.tentative_details?.paid_info || "",
         pickup_location: schedule?.tentative_details?.pickup_location || "",
         description: schedule?.tentative_details?.description || "",
@@ -2648,7 +2752,6 @@ function WeeklyScheduleView({
     instructor_id: instructorId,
     tentative_details: {
       name: "",
-      phone: "",
       paid_info: "",
       pickup_location: "",
       description: "",
@@ -2673,7 +2776,6 @@ function WeeklyScheduleView({
       instructor_id: instructorId,
       tentative_details: {
         name: "",
-        phone: "",
         paid_info: "",
         pickup_location: "",
         description: "",
@@ -2709,7 +2811,6 @@ function WeeklyScheduleView({
               instructor_id: instructorId,
               tentative_details: {
                 name: tentativeSchedule.tentative_details.name,
-                phone: tentativeSchedule.tentative_details.phone,
                 paid_info: tentativeSchedule.tentative_details.paid_info,
                 pickup_location:
                   tentativeSchedule.tentative_details.pickup_location,
@@ -2741,7 +2842,6 @@ function WeeklyScheduleView({
             instructor_id: instructorId,
             tentative_details: {
               name: tentativeSchedule.tentative_details.name,
-              phone: tentativeSchedule.tentative_details.phone,
               paid_info: tentativeSchedule.tentative_details.paid_info,
               pickup_location:
                 tentativeSchedule.tentative_details.pickup_location,
@@ -2829,14 +2929,6 @@ function WeeklyScheduleView({
       return false;
     }
 
-    if (formDataSchedule.tentative_details.phone.length === 0) {
-      toast({
-        title: "Error",
-        description: "Customer phone is required",
-        variant: "destructive",
-      });
-      return false;
-    }
     if (formDataSchedule.tentative_details.paid_info.length === 0) {
       toast({
         title: "Error",
@@ -3100,7 +3192,6 @@ function WeeklyScheduleView({
         instructor_id: instructorId,
         tentative_details: {
           name: schedule.tentative_details?.name || "",
-          phone: schedule.tentative_details?.phone || "",
           paid_info: schedule.tentative_details?.paid_info || "",
           pickup_location: schedule.tentative_details?.pickup_location || "",
           description: schedule.tentative_details?.description || "",
@@ -3263,7 +3354,6 @@ function WeeklyScheduleView({
             instructor_id: instructorId,
             tentative_details: {
               name: tentativeScheduleCopy.tentative_details.name,
-              phone: tentativeScheduleCopy.tentative_details.phone,
               paid_info: tentativeScheduleCopy.tentative_details.paid_info,
               pickup_location:
                 tentativeScheduleCopy.tentative_details.pickup_location,
@@ -3374,15 +3464,11 @@ function WeeklyScheduleView({
       : schedules.filter((schedule) => {
           // console.log("Filtering schedule:", schedule, "with searchQuery:", searchQuery);
           let nameMatch = false;
-          let phoneMatch = false;
           if (!schedule?.isTentative) {
             nameMatch = schedule?.learner?.name
               ?.toLowerCase()
               .includes(searchQuery.toLowerCase());
-            phoneMatch = schedule?.learner?.phone
-              ?.toLowerCase()
-              .includes(searchQuery.toLowerCase());
-            return nameMatch || phoneMatch;
+            return nameMatch;
           } else {
             const tentativeDetails = schedule.tentative_details || {};
             // console.log("Filtering tentativeDetails:", tentativeDetails);
@@ -3393,13 +3479,10 @@ function WeeklyScheduleView({
               tentativeDetails?.leadName
                 ?.toLowerCase()
                 .includes(searchQuery.toLowerCase());
-            phoneMatch = tentativeDetails?.phone
-              ?.toLowerCase()
-              .includes(searchQuery.toLowerCase());
             const descriptionMatch = tentativeDetails?.description
               ?.toLowerCase()
               .includes(searchQuery.toLowerCase());
-            return nameMatch || phoneMatch || descriptionMatch;
+            return nameMatch || descriptionMatch;
           }
           return false;
         });
@@ -3931,13 +4014,6 @@ function WeeklyScheduleView({
                                       </div>
                                       <div className="text-xs">
                                         <span className="font-semibold">
-                                          Phone:
-                                        </span>{" "}
-                                        {schedule.tentative_details?.phone ||
-                                          "N/A"}
-                                      </div>
-                                      <div className="text-xs">
-                                        <span className="font-semibold">
                                           Desc:
                                         </span>{" "}
                                         {schedule.tentative_details
@@ -3973,12 +4049,6 @@ function WeeklyScheduleView({
                                           Learner:
                                         </span>{" "}
                                         {schedule.learner?.name || "N/A"}
-                                      </div>
-                                      <div className="text-xs">
-                                        <span className="font-semibold">
-                                          Phone:
-                                        </span>{" "}
-                                        {schedule.learner?.phone || "N/A"}
                                       </div>
 
                                       {/* Map Link */}
@@ -4085,27 +4155,6 @@ function WeeklyScheduleView({
                       tentative_details: {
                         ...tentativeSchedule.tentative_details,
                         name: e.target.value,
-                      },
-                    })
-                  }
-                  className="col-span-3"
-                  required
-                />
-              </div>
-              <div className="grid grid-cols-4 items-center gap-4">
-                <Label htmlFor="tentative_details-phone" className="text-right">
-                  Phone<span className="text-red-500">*</span>
-                </Label>
-                <Input
-                  id="tentative_details-phone"
-                  value={tentativeSchedule.tentative_details.phone}
-                  onChange={(e) =>
-                    setTentativeSchedule({
-                      ...tentativeSchedule,
-                      // Correctly update the nested 'tentative_details' object
-                      tentative_details: {
-                        ...tentativeSchedule.tentative_details,
-                        phone: e.target.value,
                       },
                     })
                   }
@@ -4306,21 +4355,6 @@ function WeeklyScheduleView({
                 <Input
                   id="tentative_copy_details-name"
                   value={tentativeScheduleCopy.tentative_details.name}
-                  disabled={true}
-                  className="col-span-3"
-                  required
-                />
-              </div>
-              <div className="grid grid-cols-4 items-center gap-4">
-                <Label
-                  htmlFor="tentative_copy_details-phone"
-                  className="text-right"
-                >
-                  Phone<span className="text-red-500">*</span>
-                </Label>
-                <Input
-                  id="tentative_copy_details-phone"
-                  value={tentativeScheduleCopy.tentative_details.phone}
                   disabled={true}
                   className="col-span-3"
                   required
@@ -4648,7 +4682,6 @@ export const AddTentativeSchedule = ({
 
   const [tentativeDetails, setTentativeDetails] = useState({
     name: "",
-    phone: "",
     paid_info: "Unpaid",
     pickup_location: "",
     leadName: "",
@@ -4657,6 +4690,101 @@ export const AddTentativeSchedule = ({
     lat: null as number | null,
     lng: null as number | null,
   });
+
+  // Cratio CRM lead lookup. `crmFilled` marks the CRM-sourced fields
+  // (name/address/sales lead); every field stays editable afterwards.
+  const [leadId, setLeadId] = useState("");
+  const [lookupBy, setLookupBy] = useState<LeadLookupBy>("email");
+  const [isLookingUpLead, setIsLookingUpLead] = useState(false);
+  const [crmFilled, setCrmFilled] = useState(false);
+
+  const handleLeadLookup = async () => {
+    const id = leadId.trim();
+    if (!id) {
+      toast({
+        title: "E-mail required",
+        description: "Enter the customer's e-mail to look up.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setIsLookingUpLead(true);
+    try {
+      const result = await lookupCratioLead(id, lookupBy);
+      if (result.configured === false) {
+        toast({
+          title: "CRM not configured",
+          description:
+            "The CRM lookup endpoint is not set up yet. Enter the details manually.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (result.error) {
+        toast({
+          title: "CRM lookup failed",
+          description:
+            "Could not fetch the lead from the CRM. Enter the details manually.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (result.code === "CRM_LOOKUP_LEAD_ID_UNAVAILABLE") {
+        toast({
+          title: "Lead ID search not available yet",
+          description:
+            "The CRM does not expose Lead ID yet. Switch to the E-mail tab and enter the customer's e-mail.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (result.code === "CRM_LOOKUP_USE_EMAIL") {
+        toast({
+          title: "Enter a valid e-mail",
+          description: "That doesn't look like an e-mail address.",
+          variant: "destructive",
+        });
+        return;
+      }
+      const customer = result.customer;
+      if (!result.found || !customer) {
+        toast({
+          title: "Lead not found",
+          description:
+            lookupBy === "email"
+              ? `No Cratio lead has the e-mail ${id}. If the lead has no e-mail in Cratio, add one to the lead there first.`
+              : `No CRM lead matched ${id}.`,
+          variant: "destructive",
+        });
+        return;
+      }
+      setTentativeDetails((prev) => ({
+        ...prev,
+        name: customer.name ?? prev.name,
+        leadName: customer.leadName ?? prev.leadName,
+        address: customer.address ?? prev.address,
+        pickup_location: customer.address ?? prev.pickup_location,
+        course_id: matchCourseId(customer.course, courses) ?? prev.course_id,
+        paid_info: customer.payment ?? prev.paid_info,
+      }));
+      setCrmFilled(true);
+      toast({
+        title: "Lead loaded",
+        description: `Details pulled from CRM lead ${id}.`,
+        variant: "success",
+      });
+    } catch (err) {
+      console.error("CRM lead lookup failed:", err);
+      toast({
+        title: "Lookup failed",
+        description:
+          "Could not reach the CRM. Enter the details manually and try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLookingUpLead(false);
+    }
+  };
 
   const [availabilityMap, setAvailabilityMap] = useState<Record<string, any>>(
     {},
@@ -4689,8 +4817,8 @@ export const AddTentativeSchedule = ({
           });
           setAvailabilityMap(mockMap);
         } else {
-          // 2. Fetch Instructor Conflicts from DB
-          const result = await checkInstructorAvailability(slots, instructorId);
+          // 2. Fetch Instructor Conflicts via the edge function (phone-free).
+          const result = await validateSlotsViaEdge(instructorId, slots);
 
           // 3. Merge Results: Local duplicates take priority over DB status
           const mergedResult: Record<string, any> = { ...result };
@@ -4725,9 +4853,7 @@ export const AddTentativeSchedule = ({
 
   const getValidationErrors = () => {
     const errors = [];
-    const cleanPhone = tentativeDetails.phone.replace(/\D/g, "");
     if (!tentativeDetails.name.trim()) errors.push("Name is required");
-    if (cleanPhone.length !== 10) errors.push("Phone must be 10 digits");
     if (!tentativeDetails.leadName.trim())
       errors.push("Sales Lead is required");
     if (stats.blocked > 0) errors.push("Remove blocked slots");
@@ -4815,27 +4941,28 @@ export const AddTentativeSchedule = ({
 
   const AddTentativeScheduleMutation = useMutation({
     mutationFn: async () => {
-      const schedulesToInsert = slots.map((slot) => ({
-        date: slot.date,
-        start_time: slot.start_time,
-        end_time: slot.end_time,
-        instructor_id: instructorId,
-        isTentative: true,
-        status: "hold",
-        course_id:
-          tentativeDetails.course_id === "none" ||
-          tentativeDetails.course_id === "topup"
-            ? null
-            : parseInt(tentativeDetails.course_id),
-        tentative_details: {
-          ...tentativeDetails,
+      await invokeSlotBooking({
+        action: "create",
+        instructorId,
+        leadId: leadId.trim() || undefined,
+        leadBy: lookupBy,
+        slots: slots.map((slot) => ({
+          date: slot.date,
+          start_time: slot.start_time,
+          end_time: slot.end_time,
           description: slot.description,
+        })),
+        details: {
+          name: tentativeDetails.name,
+          paid_info: tentativeDetails.paid_info,
+          pickup_location: tentativeDetails.pickup_location,
+          leadName: tentativeDetails.leadName,
+          address: tentativeDetails.address,
+          course_id: tentativeDetails.course_id,
+          lat: tentativeDetails.lat,
+          lng: tentativeDetails.lng,
         },
-      }));
-      const { error } = await supabase
-        .from("Schedule")
-        .insert(schedulesToInsert);
-      if (error) throw error;
+      });
     },
     onSuccess: () => {
       toast({
@@ -4869,6 +4996,65 @@ export const AddTentativeSchedule = ({
           {/* Input Fields - Stacked on separate lines with smaller font */}
           <div className="flex max-w-md flex-col gap-3">
             <div className="space-y-1">
+              <div className="flex gap-1">
+                {(["email", "leadId"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => {
+                      setLookupBy(mode);
+                      setLeadId("");
+                    }}
+                    className={cn(
+                      "rounded-md border px-2 py-1 text-[11px] font-medium",
+                      lookupBy === mode
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "bg-background text-muted-foreground",
+                    )}
+                  >
+                    {mode === "email" ? "E-mail" : "Lead ID"}
+                  </button>
+                ))}
+              </div>
+              <Label className="text-xs">
+                {lookupBy === "email" ? "Customer e-mail" : "Lead ID"}
+              </Label>
+              <div className="flex gap-2">
+                <Input
+                  className="h-8 text-xs"
+                  value={leadId}
+                  onChange={(e) => setLeadId(e.target.value)}
+                  placeholder={
+                    lookupBy === "email"
+                      ? "Enter customer e-mail"
+                      : "Enter CRM Lead ID"
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") e.preventDefault();
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 shrink-0 text-xs"
+                  onClick={handleLeadLookup}
+                  disabled={isLookingUpLead}
+                >
+                  {isLookingUpLead ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    "Look up"
+                  )}
+                </Button>
+              </div>
+              {crmFilled && (
+                <p className="text-[10px] font-medium text-emerald-600">
+                  Loaded from CRM — you can still edit any field.
+                </p>
+              )}
+            </div>
+            <div className="space-y-1">
               <Label className="text-xs">Name*</Label>
               <Input
                 className="h-8 text-xs"
@@ -4879,20 +5065,6 @@ export const AddTentativeSchedule = ({
                     name: e.target.value,
                   })
                 }
-              />
-            </div>
-            <div className="space-y-1">
-              <Label className="text-xs">Phone Number*</Label>
-              <Input
-                className="h-8 text-xs"
-                value={tentativeDetails.phone}
-                onChange={(e) =>
-                  setTentativeDetails({
-                    ...tentativeDetails,
-                    phone: e.target.value,
-                  })
-                }
-                maxLength={10}
               />
             </div>
             <div className="space-y-1">
@@ -5258,7 +5430,6 @@ export const EditTentativeSchedule = ({
 
       const newDetails = {
         name: schedule.tentative_details?.name || "",
-        phone: schedule.tentative_details?.phone || "",
         paid_info: schedule.tentative_details?.paid_info || "N/A",
         pickup_location: schedule.tentative_details?.pickup_location || "",
         leadName: schedule.tentative_details?.leadName || "",
@@ -5280,7 +5451,6 @@ export const EditTentativeSchedule = ({
   const [slots, setSlots] = useState([]);
   const [tentativeDetails, setTentativeDetails] = useState({
     name: "",
-    phone: "",
     paid_info: "Unpaid",
     pickup_location: "",
     leadName: "",
@@ -5289,6 +5459,100 @@ export const EditTentativeSchedule = ({
     lat: null as number | null,
     lng: null as number | null,
   });
+
+  // See AddTentativeSchedule: CRM lookup + phone-free write path.
+  const [leadId, setLeadId] = useState("");
+  const [lookupBy, setLookupBy] = useState<LeadLookupBy>("email");
+  const [isLookingUpLead, setIsLookingUpLead] = useState(false);
+  const [crmFilled, setCrmFilled] = useState(false);
+
+  const handleLeadLookup = async () => {
+    const id = leadId.trim();
+    if (!id) {
+      toast({
+        title: "E-mail required",
+        description: "Enter the customer's e-mail to look up.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setIsLookingUpLead(true);
+    try {
+      const result = await lookupCratioLead(id, lookupBy);
+      if (result.configured === false) {
+        toast({
+          title: "CRM not configured",
+          description:
+            "The CRM lookup endpoint is not set up yet. Enter the details manually.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (result.error) {
+        toast({
+          title: "CRM lookup failed",
+          description:
+            "Could not fetch the lead from the CRM. Enter the details manually.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (result.code === "CRM_LOOKUP_LEAD_ID_UNAVAILABLE") {
+        toast({
+          title: "Lead ID search not available yet",
+          description:
+            "The CRM does not expose Lead ID yet. Switch to the E-mail tab and enter the customer's e-mail.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (result.code === "CRM_LOOKUP_USE_EMAIL") {
+        toast({
+          title: "Enter a valid e-mail",
+          description: "That doesn't look like an e-mail address.",
+          variant: "destructive",
+        });
+        return;
+      }
+      const customer = result.customer;
+      if (!result.found || !customer) {
+        toast({
+          title: "Lead not found",
+          description:
+            lookupBy === "email"
+              ? `No Cratio lead has the e-mail ${id}. If the lead has no e-mail in Cratio, add one to the lead there first.`
+              : `No CRM lead matched ${id}.`,
+          variant: "destructive",
+        });
+        return;
+      }
+      setTentativeDetails((prev) => ({
+        ...prev,
+        name: customer.name ?? prev.name,
+        leadName: customer.leadName ?? prev.leadName,
+        address: customer.address ?? prev.address,
+        pickup_location: customer.address ?? prev.pickup_location,
+        course_id: matchCourseId(customer.course, courses) ?? prev.course_id,
+        paid_info: customer.payment ?? prev.paid_info,
+      }));
+      setCrmFilled(true);
+      toast({
+        title: "Lead loaded",
+        description: `Details pulled from CRM lead ${id}.`,
+        variant: "success",
+      });
+    } catch (err) {
+      console.error("CRM lead lookup failed:", err);
+      toast({
+        title: "Lookup failed",
+        description:
+          "Could not reach the CRM. Enter the details manually and try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLookingUpLead(false);
+    }
+  };
 
   const { data: courses } = useQuery({
     queryKey: ["courses"],
@@ -5313,7 +5577,6 @@ export const EditTentativeSchedule = ({
 
       setTentativeDetails({
         name: schedule.tentative_details?.name || "",
-        phone: schedule.tentative_details?.phone || "",
         paid_info: schedule.tentative_details?.paid_info || "Unpaid",
         pickup_location: schedule.tentative_details?.pickup_location || "",
         leadName: schedule.tentative_details?.leadName || "",
@@ -5333,7 +5596,7 @@ export const EditTentativeSchedule = ({
     const validateAllSlots = async () => {
       if (!instructorId || slots.length === 0) return;
       try {
-        const result = await checkInstructorAvailability(slots, instructorId);
+        const result = await validateSlotsViaEdge(instructorId, slots);
         setAvailabilityMap(result);
       } catch (err) {
         console.error("Availability Check Failed:", err);
@@ -5353,9 +5616,7 @@ export const EditTentativeSchedule = ({
 
   const validationErrors = useMemo(() => {
     const errors = [];
-    const cleanPhone = (tentativeDetails.phone || "").replace(/\D/g, "");
     if (!tentativeDetails.name?.trim()) errors.push("Name is required");
-    if (cleanPhone.length !== 10) errors.push("Phone must be 10 digits");
     if (!tentativeDetails.leadName?.trim())
       errors.push("Sales Lead is required");
     if (stats.blocked > 0) errors.push("Remove blocked slots");
@@ -5368,28 +5629,29 @@ export const EditTentativeSchedule = ({
     mutationFn: async () => {
       if (!slots[0]) return;
 
-      const updatedData = {
-        date: slots[0].date,
-        start_time: slots[0].start_time,
-        end_time: slots[0].end_time,
-        // SANITIZE HERE: If it's a special string, send null to the DB
-        course_id:
-          tentativeDetails.course_id === "none" ||
-          tentativeDetails.course_id === "topup"
-            ? null
-            : tentativeDetails.course_id,
-        tentative_details: {
-          ...tentativeDetails,
+      await invokeSlotBooking({
+        action: "update",
+        id: schedule.id,
+        instructorId,
+        leadId: leadId.trim() || undefined,
+        leadBy: lookupBy,
+        slot: {
+          date: slots[0].date,
+          start_time: slots[0].start_time,
+          end_time: slots[0].end_time,
           description: slots[0].description,
         },
-      };
-
-      const { error } = await supabase
-        .from("Schedule")
-        .update(updatedData)
-        .eq("id", schedule.id);
-
-      if (error) throw error;
+        details: {
+          name: tentativeDetails.name,
+          paid_info: tentativeDetails.paid_info,
+          pickup_location: tentativeDetails.pickup_location,
+          leadName: tentativeDetails.leadName,
+          address: tentativeDetails.address,
+          course_id: tentativeDetails.course_id,
+          lat: tentativeDetails.lat,
+          lng: tentativeDetails.lng,
+        },
+      });
     },
     onSuccess: () => {
       toast({
@@ -5425,6 +5687,63 @@ export const EditTentativeSchedule = ({
 
         <div className="space-y-6">
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="space-y-2 md:col-span-2">
+              <div className="flex gap-1">
+                {(["email", "leadId"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => {
+                      setLookupBy(mode);
+                      setLeadId("");
+                    }}
+                    className={cn(
+                      "rounded-md border px-3 py-1.5 text-xs font-medium",
+                      lookupBy === mode
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "bg-background text-muted-foreground",
+                    )}
+                  >
+                    {mode === "email" ? "E-mail" : "Lead ID"}
+                  </button>
+                ))}
+              </div>
+              <Label>
+                {lookupBy === "email" ? "Customer e-mail" : "Lead ID"}
+              </Label>
+              <div className="flex gap-2">
+                <Input
+                  value={leadId}
+                  onChange={(e) => setLeadId(e.target.value)}
+                  placeholder={
+                    lookupBy === "email"
+                      ? "Enter customer e-mail"
+                      : "Enter CRM Lead ID"
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") e.preventDefault();
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="shrink-0"
+                  onClick={handleLeadLookup}
+                  disabled={isLookingUpLead}
+                >
+                  {isLookingUpLead ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    "Look up"
+                  )}
+                </Button>
+              </div>
+              {crmFilled && (
+                <p className="text-xs font-medium text-emerald-600">
+                  Loaded from CRM — you can still edit any field.
+                </p>
+              )}
+            </div>
             <div className="space-y-2">
               <Label>Name*</Label>
               <Input
@@ -5435,19 +5754,6 @@ export const EditTentativeSchedule = ({
                     name: e.target.value,
                   })
                 }
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>Phone Number*</Label>
-              <Input
-                value={tentativeDetails.phone}
-                onChange={(e) =>
-                  setTentativeDetails({
-                    ...tentativeDetails,
-                    phone: e.target.value,
-                  })
-                }
-                maxLength={10}
               />
             </div>
             <div className="space-y-2">
@@ -6010,7 +6316,7 @@ export const InstructorSchedulePage = () => {
           .eq("id_instructor", id)
           .abortSignal(signal)
           .single(),
-        fetchAdminSchedules("instructor_id", id, signal),
+        fetchInstructorModuleSchedules(id, signal),
       ]);
       if (profile.error) throw profile.error;
       return {
@@ -6150,13 +6456,7 @@ export const InstructorSchedulePage = () => {
     return instructor.schedules.filter((s) => {
       const name =
         (s.isTentative ? s.tentative_details?.name : s.learner?.name) || "";
-      const phone =
-        (s.isTentative ? s.tentative_details?.phone : s.learner?.phone) || "";
-      return (
-        !searchQuery.trim() ||
-        name.toLowerCase().includes(q) ||
-        phone.includes(q)
-      );
+      return !searchQuery.trim() || name.toLowerCase().includes(q);
     });
   }, [instructor, searchQuery]);
 
@@ -6319,7 +6619,7 @@ export const InstructorSchedulePage = () => {
           <div className="relative w-full max-w-xs">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input
-              placeholder="Search name or phone..."
+              placeholder="Search name..."
               className="h-8 w-full rounded-md border-none bg-slate-50 pl-9 text-xs outline-none focus:ring-1 focus:ring-slate-200"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -6538,17 +6838,7 @@ export const InstructorSchedulePage = () => {
                             </span>
                           </div>
 
-                          {/* 3. PHONE */}
-                          <div className="flex items-center gap-2">
-                            <Phone className="h-3.5 w-3.5 text-slate-400" />
-                            <span className="text-[11px] font-semibold text-slate-600">
-                              {isTentative
-                                ? display(details.phone)
-                                : display(schedule.learner?.phone)}
-                            </span>
-                          </div>
-
-                          {/* 4. LOCATION (Conditional Link) */}
+                          {/* 3. LOCATION (Conditional Link) */}
                           {mapUrl && pickupLocation !== "N/A" ? (
                             <a
                               href={mapUrl}

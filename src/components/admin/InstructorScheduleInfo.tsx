@@ -15,7 +15,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { supabase } from "@/lib/supabaseClient";
+import { fetchInstructorModuleSchedules } from "@/lib/admin-schedules";
 
 import { Badge } from "../ui/badge";
 
@@ -30,10 +30,10 @@ type ScheduleInfoData = {
   isTentative: boolean;
   tentative_details?: {
     name?: string;
-    phone?: string;
     description?: string;
     paid_info?: string;
     leadName?: string;
+    pickup_location?: string;
   };
 };
 
@@ -61,13 +61,10 @@ export const SearchInstructorScheduleInfo: React.FC<
   const { data: scheduleData, isLoading } = useQuery({
     queryKey: ["Schedule", instructorId],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("Schedule")
-        .select(`*`)
-        .eq("instructor_id", instructorId)
-        .order("date", { ascending: true });
-      if (error) throw error;
-      return data as ScheduleInfoData[];
+      // Phone-free read path: the edge function strips learner and tentative
+      // phone numbers before the browser ever sees them.
+      const rows = await fetchInstructorModuleSchedules(instructorId);
+      return rows as unknown as ScheduleInfoData[];
     },
     // onSuccess: () => {
     //   queryClient.invalidateQueries({ queryKey: ["Schedule", instructorId] });
@@ -95,7 +92,6 @@ export const SearchInstructorScheduleInfo: React.FC<
       schedule.tentative_details?.paid_info
         ?.toLowerCase()
         .includes(searchQuery.toLowerCase()) ||
-      schedule.tentative_details?.phone?.includes(searchQuery) ||
       schedule.tentative_details?.pickup_location
         ?.toLowerCase()
         .includes(searchQuery.toLowerCase()) ||
@@ -187,10 +183,6 @@ export const SearchInstructorScheduleInfo: React.FC<
                           </p>
                         </div>
                         <div>
-                          <p className="text-sm">
-                            <span className="font-medium">Phone:</span>{" "}
-                            {schedule.tentative_details?.phone}
-                          </p>
                           <p className="text-sm">
                             <span className="font-medium">Lead Name:</span>{" "}
                             {schedule.tentative_details?.leadName || "N/A"}
