@@ -14,6 +14,8 @@ export type CrmLearnerFill = {
   name?: string;
   email?: string;
   phone?: string;
+  // Free-text course from Cratio; the parent matches it to one of its courses.
+  course?: string;
 };
 
 type LookupLearnerResponse = {
@@ -39,11 +41,12 @@ async function lookupLearner(
 }
 
 // Lead ID / e-mail lookup that pre-fills the Create New Learner form. It only
-// calls `onFill`; every filled field stays editable in the form.
+// calls `onFill`; every filled field stays editable in the form. `onFill`
+// returns true when it also selected a course from `fill.course`.
 export function CrmLeadAutofill({
   onFill,
 }: {
-  onFill: (fill: CrmLearnerFill) => void;
+  onFill: (fill: CrmLearnerFill) => boolean | void;
 }) {
   const { toast } = useToast();
   const [by, setBy] = useState<LookupBy>("leadId");
@@ -94,8 +97,8 @@ export function CrmLeadAutofill({
         });
         return;
       }
-      const { name, email, phone } = result.learner;
-      onFill({ name, email, phone });
+      const { name, email, phone, course } = result.learner;
+      const courseSelected = onFill({ name, email, phone, course });
       const missing = [
         !name && "name",
         !email && "e-mail",
@@ -106,7 +109,13 @@ export function CrmLeadAutofill({
         description:
           missing.length > 0
             ? `Filled from CRM. The lead has no ${missing.join(", ")} — enter it manually.`
-            : "Name, e-mail and phone filled from CRM. You can still edit them.",
+            : `Name, e-mail and phone filled from CRM.${
+                courseSelected
+                  ? " Course selected."
+                  : course
+                    ? ` Couldn't match the course "${course}" — pick it manually.`
+                    : ""
+              } You can still edit them.`,
       });
     } catch (err) {
       console.error("CRM learner lookup failed:", err);

@@ -46,6 +46,7 @@ const CRATIO_DISPLAY_FIELDS = [
   "Caller Name",
   "Created By",
   "Created Username",
+  "Course Applicable",
   "Course Details",
   "Course Tenure",
   "Payment Status",
@@ -95,7 +96,7 @@ function mapPayment(value: unknown): string | undefined {
 // who sold the lead; in that case fall back to the person who worked it.
 function pickSalesPerson(lead: Record<string, unknown>): string | undefined {
   const owner = str(lead["Lead Owner"] ?? lead.sales_lead ?? lead.lead_owner);
-  if (owner && !/(ops|team|unassigned|admin)/i.test(owner)) return owner;
+  if (owner && !/\b(ops|team|unassigned|admin)\b/i.test(owner)) return owner;
   return (
     str(lead["Caller Name"]) ??
     str(lead["Created By"]) ??
@@ -123,6 +124,8 @@ function mapLead(lead: Record<string, unknown>) {
         .join(" ") || undefined,
     payment: mapPayment(lead["Payment Status"]),
     email: str(lead["Email Address"]),
+    // Cratio's "Course Applicable" dropdown; only Learner Management uses it.
+    courseApplicable: str(lead["Course Applicable"]),
     phone: str(
       lead["Mobile Number"] ??
         lead["Mobile"] ??
@@ -139,6 +142,7 @@ type LeadFields = {
   course?: string;
   payment?: string;
   email?: string;
+  courseApplicable?: string;
   phone?: string;
 };
 
@@ -352,7 +356,12 @@ async function lookupLead(leadId: string, by: LookupBy) {
     return { configured: true, found: false, customer: null };
   }
   // The Instructor Management form never receives phone or e-mail.
-  const { phone: _phone, email: _email, ...customer } = result.lead;
+  const {
+    phone: _phone,
+    email: _email,
+    courseApplicable: _courseApplicable,
+    ...customer
+  } = result.lead;
   return { configured: true, found: true, customer };
 }
 
@@ -381,7 +390,13 @@ async function lookupLearnerLead(leadId: string, by: LookupBy) {
   if (!result.found || !result.lead) {
     return { configured: true, found: false, learner: null };
   }
-  const { name, email, phone } = result.lead;
+  const { name, email, phone, courseApplicable, course } = result.lead;
+  // Free text such as "Beginner course- License No 10 Hours"; the form matches
+  // it to one of its own courses. Cratio's "--select--" placeholder = no course.
+  const courseText =
+    [courseApplicable, course]
+      .filter((v) => v && !/^-+\s*select\s*-+$/i.test(v))
+      .join(" ") || undefined;
   const digits = (phone ?? "").replace(/\D/g, "");
   return {
     configured: true,
@@ -389,6 +404,7 @@ async function lookupLearnerLead(leadId: string, by: LookupBy) {
     learner: {
       name,
       email,
+      course: courseText,
       phone: digits.length >= 10 ? digits.slice(-10) : undefined,
     },
   };

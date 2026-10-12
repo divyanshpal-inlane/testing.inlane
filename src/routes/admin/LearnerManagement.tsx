@@ -146,6 +146,34 @@ const PREDEFINED_COURSES = [
   },
 ];
 
+// Best-effort match of Cratio's free-text course (e.g. "Beginner course- License
+// No 10 Hours") to one of PREDEFINED_COURSES. A course matches when the topics
+// named in the text (beginner / flyover / parking / slopes / traffic) are exactly
+// that course's topics, in any order. Anything ambiguous returns undefined.
+function matchPredefinedCourseId(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const lower = text.toLowerCase();
+  const topicsOf = (name: string) =>
+    name
+      .toLowerCase()
+      .replace(/\bcourse\b/g, "")
+      .split("+")
+      .map((t) => t.trim())
+      .filter(Boolean);
+  const allTopics = new Set(
+    PREDEFINED_COURSES.flatMap((c) => topicsOf(c.name)),
+  );
+  const found = [...allTopics].filter((t) => lower.includes(t));
+  if (found.length === 0) return undefined;
+  const matches = PREDEFINED_COURSES.filter((c) => {
+    const topics = topicsOf(c.name);
+    return (
+      topics.length === found.length && topics.every((t) => found.includes(t))
+    );
+  });
+  return matches.length === 1 ? matches[0].id : undefined;
+}
+
 // Skill modules for custom course. `courseId` maps each module to its standalone
 // course so its list price can be looked up (and used as the default, editable
 // per-module price when building a discounted custom course).
@@ -963,12 +991,29 @@ export default function LearnerManagement() {
                 <CrmLeadAutofill
                   onFill={(fill) => {
                     if (fill.phone) setPhoneFromCrm(true);
+                    // Only pick a course when the form is on a predefined
+                    // course (not RTO-only / custom / demo), so a choice the
+                    // admin already made on another type is never overridden.
+                    const courseId =
+                      caseType !== "rto_only" && courseType === "predefined"
+                        ? matchPredefinedCourseId(fill.course)
+                        : undefined;
+                    if (courseId) setSelectedCourseId(courseId);
                     setLearnerData((prev) => ({
                       ...prev,
                       name: fill.name ?? prev.name,
                       email: fill.email ?? prev.email,
                       phone: fill.phone ?? prev.phone,
+                      ...(courseId
+                        ? {
+                            courseId,
+                            courseName:
+                              PREDEFINED_COURSES.find((c) => c.id === courseId)
+                                ?.name || "",
+                          }
+                        : {}),
                     }));
+                    return Boolean(courseId);
                   }}
                 />
                 <div className="grid grid-cols-4 items-center gap-4">
