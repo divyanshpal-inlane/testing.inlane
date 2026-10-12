@@ -4694,7 +4694,7 @@ export const AddTentativeSchedule = ({
   // Cratio CRM lead lookup. `crmFilled` marks the CRM-sourced fields
   // (name/address/sales lead); every field stays editable afterwards.
   const [leadId, setLeadId] = useState("");
-  const [lookupBy, setLookupBy] = useState<LeadLookupBy>("email");
+  const [lookupBy, setLookupBy] = useState<LeadLookupBy>("leadId");
   const [isLookingUpLead, setIsLookingUpLead] = useState(false);
   const [crmFilled, setCrmFilled] = useState(false);
 
@@ -4997,7 +4997,7 @@ export const AddTentativeSchedule = ({
           <div className="flex max-w-md flex-col gap-3">
             <div className="space-y-1">
               <div className="flex gap-1">
-                {(["email", "leadId"] as const).map((mode) => (
+                {(["leadId", "email"] as const).map((mode) => (
                   <button
                     key={mode}
                     type="button"
@@ -5012,7 +5012,7 @@ export const AddTentativeSchedule = ({
                         : "bg-background text-muted-foreground",
                     )}
                   >
-                    {mode === "email" ? "E-mail" : "Lead ID"}
+                    {mode === "leadId" ? "Lead ID" : "E-mail"}
                   </button>
                 ))}
               </div>
@@ -5462,7 +5462,7 @@ export const EditTentativeSchedule = ({
 
   // See AddTentativeSchedule: CRM lookup + phone-free write path.
   const [leadId, setLeadId] = useState("");
-  const [lookupBy, setLookupBy] = useState<LeadLookupBy>("email");
+  const [lookupBy, setLookupBy] = useState<LeadLookupBy>("leadId");
   const [isLookingUpLead, setIsLookingUpLead] = useState(false);
   const [crmFilled, setCrmFilled] = useState(false);
 
@@ -5689,7 +5689,7 @@ export const EditTentativeSchedule = ({
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <div className="space-y-2 md:col-span-2">
               <div className="flex gap-1">
-                {(["email", "leadId"] as const).map((mode) => (
+                {(["leadId", "email"] as const).map((mode) => (
                   <button
                     key={mode}
                     type="button"
@@ -5704,7 +5704,7 @@ export const EditTentativeSchedule = ({
                         : "bg-background text-muted-foreground",
                     )}
                   >
-                    {mode === "email" ? "E-mail" : "Lead ID"}
+                    {mode === "leadId" ? "Lead ID" : "E-mail"}
                   </button>
                 ))}
               </div>
