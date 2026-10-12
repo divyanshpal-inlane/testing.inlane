@@ -26,13 +26,12 @@ const CRATIO_TOKEN = Deno.env.get("CRATIO_API_TOKEN");
 const CRATIO_FORM_NAME = "Leads";
 const CRATIO_TIMEOUT_MS = 8000;
 
-// API column searched by the "Lead ID" tab. Cratio's API does not expose the
-// Lead ID shown in the CRM UI: its only ID column, `Form ID`, is a DIFFERENT
-// number (UI lead 103313 is Form ID 110869), so searching it can load another
-// customer. Until Cratio support names the real field, the tab is switched off
-// and sales looks leads up by e-mail. Once Cratio replies, set this to the
-// field name they give us. Never set it to "Form ID" in production.
-const LEAD_ID_FIELD: string | null = null;
+// API column searched by the "Lead ID" tab: the Lead ID shown on the Cratio lead
+// page. Cratio's `Form ID` is a DIFFERENT number (UI lead 103313 is Form ID
+// 110869) and loads the wrong customer, so never point this at "Form ID". The
+// search condition must travel as a URL query param (see searchCratio), as in
+// Cratio's own Postman example. Set to null to switch the tab off.
+const LEAD_ID_FIELD: string | null = "Lead ID";
 
 type LookupBy = "email" | "leadId";
 const parseBy = (v: unknown): LookupBy => (v === "leadId" ? "leadId" : "email");
@@ -171,7 +170,9 @@ async function searchCratio(
   const url =
     `${CRATIO_LOOKUP_URL}?operation=getRecordsBySearch` +
     `&apikey=${encodeURIComponent(CRATIO_TOKEN ?? "")}` +
-    `&formname=${encodeURIComponent(CRATIO_FORM_NAME)}`;
+    `&formname=${encodeURIComponent(CRATIO_FORM_NAME)}` +
+    // Cratio's documented example sends the search condition as a query param.
+    `&searchcondition=${encodeURIComponent(searchcondition)}`;
 
   let response: Response;
   try {
@@ -287,7 +288,10 @@ async function fetchLead(
   const row = rows.find((r) => norm(r[field]) === norm(key));
   if (!row) {
     console.error(
-      "[instructor-slot-booking] CRM returned no record matching the searched value",
+      "[instructor-slot-booking] CRM returned no record matching the searched value; field present in rows:",
+      rows.some((r) => field in r),
+      "row keys:",
+      Object.keys(rows[0] ?? {}),
     );
     return { configured: true, found: false, lead: null };
   }
