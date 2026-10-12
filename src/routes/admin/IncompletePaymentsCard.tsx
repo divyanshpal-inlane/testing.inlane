@@ -22,6 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
+import { useCanSeeFullPhone } from "@/hooks/useCanSeeFullPhone";
 import { supabase } from "@/lib/supabaseClient";
 import { maskPhoneNumber } from "@/utils/phoneMasking";
 
@@ -68,9 +69,10 @@ const PREDEFINED_COURSES: { id: string; name: string; duration: number }[] = [
 type EditPlan = "full" | "half" | "custom";
 
 export function IncompletePaymentsCard() {
-  // Learner phones are always shown masked on this page.
+  // Admins and super admins see the number; "user" accounts see it masked.
+  const canSeeFullPhone = useCanSeeFullPhone();
   const showPhone = (phone: string | null | undefined) =>
-    maskPhoneNumber(phone);
+    canSeeFullPhone ? (phone ?? "") : maskPhoneNumber(phone);
   const [incompletePayments, setIncompletePayments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [sendingPaymentLink, setSendingPaymentLink] = useState<
