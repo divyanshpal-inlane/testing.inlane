@@ -26,6 +26,7 @@ import {
 import { useToast } from "@/components/ui/use-toast";
 import { supabase } from "@/lib/supabaseClient";
 import { useCourses } from "@/queries/payment";
+import { maskPhoneNumber } from "@/utils/phoneMasking";
 
 import { HalfPaidTracker } from "./HalfPaidTracker";
 import { IncompletePaymentsCard } from "./IncompletePaymentsCard";
@@ -219,6 +220,10 @@ export default function LearnerManagement() {
   const [createdLearnerId, setCreatedLearnerId] = useState<string | null>(null);
   const [isCreateLearnerDialogOpen, setIsCreateLearnerDialogOpen] =
     useState(false);
+  // True while the phone in the form came from the CRM autofill: the real
+  // number stays in learnerData.phone (needed to create the account) but the
+  // field only ever shows it masked.
+  const [phoneFromCrm, setPhoneFromCrm] = useState(false);
   const [isPaymentDialogOpen, setIsPaymentDialogOpen] = useState(false);
   const { toast } = useToast();
   const navigate = useNavigate();
@@ -312,6 +317,7 @@ export default function LearnerManagement() {
 
   // Reset form when dialog opens
   const openCreateDialog = () => {
+    setPhoneFromCrm(false);
     setCaseType("classes_only");
     setVehicleType("four_wheeler");
     setRtoPrototypeData(DEFAULT_RTO_PROTOTYPE_DATA);
@@ -955,14 +961,15 @@ export default function LearnerManagement() {
               </DialogHeader>
               <div className="grid gap-4 py-4">
                 <CrmLeadAutofill
-                  onFill={(fill) =>
+                  onFill={(fill) => {
+                    if (fill.phone) setPhoneFromCrm(true);
                     setLearnerData((prev) => ({
                       ...prev,
                       name: fill.name ?? prev.name,
                       email: fill.email ?? prev.email,
                       phone: fill.phone ?? prev.phone,
-                    }))
-                  }
+                    }));
+                  }}
                 />
                 <div className="grid grid-cols-4 items-center gap-4">
                   <Label htmlFor="name" className="text-right">
@@ -992,13 +999,31 @@ export default function LearnerManagement() {
                   <Label htmlFor="phone" className="text-right">
                     Phone
                   </Label>
-                  <Input
-                    id="phone"
-                    name="phone"
-                    value={learnerData.phone}
-                    onChange={handleInputChange}
-                    className="col-span-3"
-                  />
+                  <div className="col-span-3 space-y-1">
+                    <Input
+                      id="phone"
+                      name="phone"
+                      value={
+                        phoneFromCrm
+                          ? maskPhoneNumber(learnerData.phone)
+                          : learnerData.phone
+                      }
+                      readOnly={phoneFromCrm}
+                      onChange={handleInputChange}
+                    />
+                    {phoneFromCrm && (
+                      <button
+                        type="button"
+                        className="text-xs text-muted-foreground underline"
+                        onClick={() => {
+                          setPhoneFromCrm(false);
+                          setLearnerData((prev) => ({ ...prev, phone: "" }));
+                        }}
+                      >
+                        Enter a different number
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <div className="grid grid-cols-4 items-center gap-4">
                   <Label htmlFor="caseType" className="text-right">
