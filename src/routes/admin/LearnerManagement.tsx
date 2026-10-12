@@ -3,6 +3,7 @@ import { ArrowLeft } from "lucide-react";
 import React, { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { CrmLeadAutofill } from "@/components/admin/learner/CrmLeadAutofill";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -953,6 +954,16 @@ export default function LearnerManagement() {
                 <DialogTitle>Create New Learner</DialogTitle>
               </DialogHeader>
               <div className="grid gap-4 py-4">
+                <CrmLeadAutofill
+                  onFill={(fill) =>
+                    setLearnerData((prev) => ({
+                      ...prev,
+                      name: fill.name ?? prev.name,
+                      email: fill.email ?? prev.email,
+                      phone: fill.phone ?? prev.phone,
+                    }))
+                  }
+                />
                 <div className="grid grid-cols-4 items-center gap-4">
                   <Label htmlFor="name" className="text-right">
                     Name

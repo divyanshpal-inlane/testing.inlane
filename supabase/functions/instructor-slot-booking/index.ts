@@ -122,6 +122,7 @@ function mapLead(lead: Record<string, unknown>) {
         .filter((v) => v && !/^-+\s*select\s*-+$/i.test(v))
         .join(" ") || undefined,
     payment: mapPayment(lead["Payment Status"]),
+    email: str(lead["Email Address"]),
     phone: str(
       lead["Mobile Number"] ??
         lead["Mobile"] ??
@@ -137,6 +138,7 @@ type LeadFields = {
   leadName?: string;
   course?: string;
   payment?: string;
+  email?: string;
   phone?: string;
 };
 
@@ -349,8 +351,47 @@ async function lookupLead(leadId: string, by: LookupBy) {
   if (!result.found || !result.lead) {
     return { configured: true, found: false, customer: null };
   }
-  const { phone: _phone, ...customer } = result.lead;
+  // The Instructor Management form never receives phone or e-mail.
+  const { phone: _phone, email: _email, ...customer } = result.lead;
   return { configured: true, found: true, customer };
+}
+
+// Lookup for Learner Management's "Create New Learner" form. Unlike the
+// Instructor Management lookup, that form needs the lead's e-mail and phone to
+// create the learner account, so this (and only this) action returns them. The
+// phone is normalised to the 10 digits the form validates.
+async function lookupLearnerLead(leadId: string, by: LookupBy) {
+  const result = await fetchLead(leadId, by);
+  if (!result.configured) {
+    return {
+      configured: false,
+      found: false,
+      learner: null,
+      code: result.error,
+    };
+  }
+  if (result.error) {
+    return {
+      configured: true,
+      found: false,
+      learner: null,
+      code: result.error,
+    };
+  }
+  if (!result.found || !result.lead) {
+    return { configured: true, found: false, learner: null };
+  }
+  const { name, email, phone } = result.lead;
+  const digits = (phone ?? "").replace(/\D/g, "");
+  return {
+    configured: true,
+    found: true,
+    learner: {
+      name,
+      email,
+      phone: digits.length >= 10 ? digits.slice(-10) : undefined,
+    },
+  };
 }
 
 // --- slot validation --------------------------------------------------------
@@ -822,6 +863,15 @@ serve(async (req) => {
         return json(400, { success: false, error: "Lead ID is required" });
       }
       const result = await lookupLead(leadId, parseBy(body.by));
+      return json(200, { success: true, ...result });
+    }
+
+    if (action === "lookupLearner") {
+      const leadId = String(body.leadId ?? "").trim();
+      if (!leadId) {
+        return json(400, { success: false, error: "Lead ID is required" });
+      }
+      const result = await lookupLearnerLead(leadId, parseBy(body.by));
       return json(200, { success: true, ...result });
     }
 
