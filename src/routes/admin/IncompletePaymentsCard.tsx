@@ -22,7 +22,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
+import { usePhoneVisibility } from "@/context/phone-visibility-context";
 import { supabase } from "@/lib/supabaseClient";
+import { maskPhoneNumber } from "@/utils/phoneMasking";
 
 // Course catalogue offered when editing a plan — mirrors PREDEFINED_COURSES in
 // LearnerManagement.tsx (the create-learner flow) so an edited plan offers the
@@ -67,6 +69,10 @@ const PREDEFINED_COURSES: { id: string; name: string; duration: number }[] = [
 type EditPlan = "full" | "half" | "custom";
 
 export function IncompletePaymentsCard() {
+  const { canViewUnmaskedPhoneNumbers } = usePhoneVisibility();
+  // Phones are masked unless the admin has the unmasked-phone permission.
+  const showPhone = (phone: string | null | undefined) =>
+    canViewUnmaskedPhoneNumbers ? (phone ?? "") : maskPhoneNumber(phone);
   const [incompletePayments, setIncompletePayments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [sendingPaymentLink, setSendingPaymentLink] = useState<
@@ -418,7 +424,7 @@ export function IncompletePaymentsCard() {
         console.error(invokeError2);
         toast({
           title: "Failed to send email",
-          description: `Failed to send link sent to ${enrollment.Learner.phone}`,
+          description: `Failed to send link sent to ${showPhone(enrollment.Learner.phone)}`,
         });
         throw invokeError2;
       } else {
@@ -932,7 +938,7 @@ export function IncompletePaymentsCard() {
                                 {enrollment.Learner?.name || "Unknown"}
                               </div>
                               <div className="text-sm text-muted-foreground">
-                                {enrollment.Learner?.phone}
+                                {showPhone(enrollment.Learner?.phone)}
                               </div>
                             </td>
                             <td className="px-2 py-2">
@@ -1232,7 +1238,9 @@ export function IncompletePaymentsCard() {
                   Phone (login ID, cannot be changed):{" "}
                 </span>
                 <span className="font-medium">
-                  {editDialogData?.Learner?.phone || "N/A"}
+                  {editDialogData?.Learner?.phone
+                    ? showPhone(editDialogData.Learner.phone)
+                    : "N/A"}
                 </span>
               </div>
 
