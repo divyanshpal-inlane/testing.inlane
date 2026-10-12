@@ -390,13 +390,15 @@ async function lookupLearnerLead(leadId: string, by: LookupBy) {
   if (!result.found || !result.lead) {
     return { configured: true, found: false, learner: null };
   }
-  const { name, email, phone, courseApplicable, course } = result.lead;
-  // Free text such as "Beginner course- License No 10 Hours"; the form matches
-  // it to one of its own courses. Cratio's "--select--" placeholder = no course.
+  const { name, email, phone, courseApplicable } = result.lead;
+  // Only Cratio's "Course Applicable" is used. "Course Details" is a different
+  // field (it held "Traffic + Parking" for a lead whose Course Applicable was
+  // "Beginner course"), so mixing it in picked the wrong course. A "--select--"
+  // placeholder means no course.
   const courseText =
-    [courseApplicable, course]
-      .filter((v) => v && !/^-+\s*select\s*-+$/i.test(v))
-      .join(" ") || undefined;
+    courseApplicable && !/^-+\s*select\s*-+$/i.test(courseApplicable)
+      ? courseApplicable
+      : undefined;
   const digits = (phone ?? "").replace(/\D/g, "");
   return {
     configured: true,
