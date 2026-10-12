@@ -24,6 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
+import { useAuth } from "@/context/auth-context";
 import { supabase } from "@/lib/supabaseClient";
 import { useCourses } from "@/queries/payment";
 import { maskPhoneNumber } from "@/utils/phoneMasking";
@@ -248,10 +249,15 @@ export default function LearnerManagement() {
   const [createdLearnerId, setCreatedLearnerId] = useState<string | null>(null);
   const [isCreateLearnerDialogOpen, setIsCreateLearnerDialogOpen] =
     useState(false);
-  // True while the phone in the form came from the CRM autofill: the real
-  // number stays in learnerData.phone (needed to create the account) but the
-  // field only ever shows it masked.
+  // True while the phone in the form came from the CRM autofill. The real
+  // number stays in learnerData.phone (needed to create the account); for
+  // "user" accounts the field only shows it masked, admins / super admins see
+  // it in full.
   const [phoneFromCrm, setPhoneFromCrm] = useState(false);
+  const { user: authUser } = useAuth();
+  const authRole = authUser?.user_metadata?.user_role;
+  const maskCrmPhone =
+    phoneFromCrm && authRole !== "admin" && authRole !== "super_admin";
   const [isPaymentDialogOpen, setIsPaymentDialogOpen] = useState(false);
   const { toast } = useToast();
   const navigate = useNavigate();
@@ -1049,14 +1055,14 @@ export default function LearnerManagement() {
                       id="phone"
                       name="phone"
                       value={
-                        phoneFromCrm
+                        maskCrmPhone
                           ? maskPhoneNumber(learnerData.phone)
                           : learnerData.phone
                       }
-                      readOnly={phoneFromCrm}
+                      readOnly={maskCrmPhone}
                       onChange={handleInputChange}
                     />
-                    {phoneFromCrm && (
+                    {maskCrmPhone && (
                       <button
                         type="button"
                         className="text-xs text-muted-foreground underline"
