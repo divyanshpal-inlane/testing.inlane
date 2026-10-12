@@ -390,7 +390,8 @@ async function lookupLearnerLead(leadId: string, by: LookupBy) {
   if (!result.found || !result.lead) {
     return { configured: true, found: false, learner: null };
   }
-  const { name, email, phone, courseApplicable } = result.lead;
+  const { name, email, phone, courseApplicable, address, payment } =
+    result.lead;
   // Only Cratio's "Course Applicable" is used. "Course Details" is a different
   // field (it held "Traffic + Parking" for a lead whose Course Applicable was
   // "Beginner course"), so mixing it in picked the wrong course. A "--select--"
@@ -407,6 +408,8 @@ async function lookupLearnerLead(leadId: string, by: LookupBy) {
       name,
       email,
       course: courseText,
+      address,
+      payment,
       phone: digits.length >= 10 ? digits.slice(-10) : undefined,
     },
   };

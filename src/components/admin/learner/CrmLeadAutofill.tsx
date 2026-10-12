@@ -16,6 +16,10 @@ export type CrmLearnerFill = {
   phone?: string;
   // Free-text course from Cratio; the parent matches it to one of its courses.
   course?: string;
+  // Used by the Sales Dashboard booking form.
+  address?: string;
+  // "Unpaid" | "Half paid" | "Full paid"
+  payment?: string;
 };
 
 type LookupLearnerResponse = {
@@ -45,9 +49,15 @@ async function lookupLearner(
 // returns true when it also selected a course from `fill.course`.
 export function CrmLeadAutofill({
   onFill,
+  target = "learner",
 }: {
   onFill: (fill: CrmLearnerFill) => boolean | void;
+  // "learner": Create New Learner (grid layout; needs name, e-mail, phone and
+  // a course). "sales": the Sales Dashboard booking form (stacked layout; needs
+  // name, phone, address and payment; no e-mail and no course).
+  target?: "learner" | "sales";
 }) {
+  const isSales = target === "sales";
   const { toast } = useToast();
   const [by, setBy] = useState<LookupBy>("leadId");
   const [value, setValue] = useState("");
@@ -97,19 +107,32 @@ export function CrmLeadAutofill({
         });
         return;
       }
-      const { name, email, phone, course } = result.learner;
-      const courseSelected = onFill({ name, email, phone, course });
+      const { name, email, phone, address, payment } = result.learner;
+      const course = isSales ? undefined : result.learner.course;
+      const courseSelected = onFill({
+        name,
+        email,
+        phone,
+        course,
+        address,
+        payment,
+      });
       const missing = [
         !name && "name",
-        !email && "e-mail",
+        !isSales && !email && "e-mail",
         !phone && "phone",
+        isSales && !address && "address",
       ].filter(Boolean);
       toast({
         title: "Lead loaded",
         description:
           missing.length > 0
             ? `Filled from CRM. The lead has no ${missing.join(", ")} — enter it manually.`
-            : `Name, e-mail and phone filled from CRM.${
+            : `${
+                isSales
+                  ? "Name, phone and address filled from CRM."
+                  : "Name, e-mail and phone filled from CRM."
+              }${
                 courseSelected
                   ? " Course selected."
                   : course
@@ -131,9 +154,15 @@ export function CrmLeadAutofill({
   };
 
   return (
-    <div className="grid grid-cols-4 items-start gap-4">
-      <Label className="pt-2 text-right">Autofill</Label>
-      <div className="col-span-3 space-y-2">
+    <div
+      className={isSales ? "space-y-1" : "grid grid-cols-4 items-start gap-4"}
+    >
+      <Label
+        className={isSales ? "block text-sm font-medium" : "pt-2 text-right"}
+      >
+        {isSales ? "Autofill from CRM" : "Autofill"}
+      </Label>
+      <div className={isSales ? "space-y-2" : "col-span-3 space-y-2"}>
         <div className="flex gap-1">
           {(["leadId", "email"] as const).map((mode) => (
             <button

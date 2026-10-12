@@ -2,12 +2,15 @@ import { useMutation } from "@tanstack/react-query";
 import React, { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { CrmLeadAutofill } from "@/components/admin/learner/CrmLeadAutofill";
+import { useCanSeeFullPhone } from "@/hooks/useCanSeeFullPhone";
 import type { BulkType } from "@/lib/sales-dashboard/bulkSlots";
 import { generateBulkSlots } from "@/lib/sales-dashboard/bulkSlots";
 import { minutesToTime, timeToMinutes } from "@/lib/sales-dashboard/validation";
 import { isValidPhone, normalizePhone } from "@/lib/sales-dashboard/validation";
 import { supabase } from "@/lib/supabaseClient";
 import { checkInstructorAvailability } from "@/queries/instructor";
+import { maskPhoneNumber } from "@/utils/phoneMasking";
 
 import { AddressAutocomplete } from "./AddressAutocomplete";
 
@@ -42,6 +45,10 @@ export interface SlotPick {
 export interface CustomerFormValues {
   customerName: string;
   customerPhone: string;
+  // True while customerPhone came from the CRM autofill. For accounts that may
+  // not see full phone numbers the field then shows it masked (read-only);
+  // the real number is still what gets saved.
+  phoneFromCrm?: boolean;
   salesAgent: string;
   paymentStatus: "unpaid" | "half_paid" | "full_paid";
   customerAddress: string;
@@ -162,6 +169,8 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
 }) => {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [successMessage, setSuccessMessage] = useState("");
+  const canSeeFullPhone = useCanSeeFullPhone();
+  const maskCrmPhone = Boolean(formData.phoneFromCrm) && !canSeeFullPhone;
   // Bulk Add Schedules dialog state
   const [isBulkDialogOpen, setIsBulkDialogOpen] = useState(false);
   const [bulkType, setBulkType] = useState<BulkType>("single");
@@ -745,6 +754,32 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
             </div>
           </div>
 
+          {/* CRM autofill (new bookings only): fills name, phone, address and
+              payment status; every field stays editable. */}
+          {!editContext && (
+            <CrmLeadAutofill
+              target="sales"
+              onFill={(fill) => {
+                const payment =
+                  fill.payment === "Half paid"
+                    ? "half_paid"
+                    : fill.payment === "Full paid"
+                      ? "full_paid"
+                      : fill.payment === "Unpaid"
+                        ? "unpaid"
+                        : undefined;
+                onFormDataChange({
+                  ...formData,
+                  customerName: fill.name ?? formData.customerName,
+                  customerPhone: fill.phone ?? formData.customerPhone,
+                  customerAddress: fill.address ?? formData.customerAddress,
+                  paymentStatus: payment ?? formData.paymentStatus,
+                  phoneFromCrm: fill.phone ? true : formData.phoneFromCrm,
+                });
+              }}
+            />
+          )}
+
           {/* Customer Name */}
           <div>
             <label
@@ -785,7 +820,12 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                 type="tel"
                 inputMode="numeric"
                 maxLength={10}
-                value={formData.customerPhone}
+                value={
+                  maskCrmPhone
+                    ? maskPhoneNumber(formData.customerPhone)
+                    : formData.customerPhone
+                }
+                readOnly={maskCrmPhone}
                 onChange={(e) =>
                   set(
                     "customerPhone",
@@ -797,6 +837,21 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                   errors.customerPhone ? "border-destructive" : "border-input"
                 }`}
               />
+              {maskCrmPhone && (
+                <button
+                  type="button"
+                  className="mt-1 text-xs text-muted-foreground underline"
+                  onClick={() =>
+                    onFormDataChange({
+                      ...formData,
+                      customerPhone: "",
+                      phoneFromCrm: false,
+                    })
+                  }
+                >
+                  Enter a different number
+                </button>
+              )}
               {errors.customerPhone && (
                 <p className="mt-1 text-xs text-destructive">
                   {errors.customerPhone}
