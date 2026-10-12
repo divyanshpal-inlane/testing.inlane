@@ -1514,6 +1514,17 @@ export default function SalesDashboard() {
         : { ...prev, salesAgent: currentUserName },
     );
   }, [currentUserName]);
+  // Asked before anything that would throw away an in-progress multi-class
+  // booking (more than one class picked): starting a new booking by clicking
+  // another free slot, opening a different booking to edit, or closing the
+  // form. `run` is the action to perform if Sales chooses to discard.
+  const [discardPrompt, setDiscardPrompt] = useState<{
+    count: number;
+    title: string;
+    message: string;
+    confirmLabel: string;
+    run: () => void;
+  } | null>(null);
   // True while Sales has clicked "+ Add another class" and is picking
   // the next slot for the SAME in-progress batch.
   const [addingSlotMode, setAddingSlotMode] = useState(false);
@@ -1605,7 +1616,7 @@ export default function SalesDashboard() {
     setPendingSlots((prev) => prev.filter((_, i) => i !== index));
   }, []);
 
-  const handleCloseTentativeModal = useCallback(() => {
+  const discardAndCloseTentativeModal = useCallback(() => {
     setTentativeModalOpen(false);
     setPendingSlots([]);
     setCustomerFormData(DEFAULT_CUSTOMER_FORM(currentUserName));
@@ -1615,6 +1626,23 @@ export default function SalesDashboard() {
     // stale slot's details on screen after its booking form is dismissed.
     setSelectedSlot(null);
   }, [currentUserName]);
+
+  // Closing (X / Cancel / Esc / click-away) throws the whole batch away, so
+  // ask first when more than one class has been picked. Editing an existing
+  // booking is exempt: nothing there is lost, it is already saved.
+  const handleCloseTentativeModal = useCallback(() => {
+    if (pendingSlots.length > 1 && !editContext) {
+      setDiscardPrompt({
+        count: pendingSlots.length,
+        title: "Discard these classes?",
+        message: `You have ${pendingSlots.length} classes selected for this customer. Closing the form will remove all of them.`,
+        confirmLabel: "Discard classes",
+        run: discardAndCloseTentativeModal,
+      });
+      return;
+    }
+    discardAndCloseTentativeModal();
+  }, [pendingSlots.length, editContext, discardAndCloseTentativeModal]);
 
   const handleTentativeSuccess = useCallback(() => {
     const message = editContext
@@ -2650,13 +2678,29 @@ export default function SalesDashboard() {
       // instructor and its schedule expands in the same commit below, and the
       // layout effect keyed on `preserveScrollRef` restores this offset before
       // paint so the page doesn't jump.
-      preserveScrollRef.current = window.scrollY;
-      setEditContext(null);
-      setPendingSlots([newSlot]);
-      setCustomerFormData(
-        DEFAULT_CUSTOMER_FORM(currentUserName, locSearch?.label ?? ""),
-      );
-      setTentativeModalOpen(true);
+      const startFreshBooking = () => {
+        preserveScrollRef.current = window.scrollY;
+        setEditContext(null);
+        setPendingSlots([newSlot]);
+        setCustomerFormData(
+          DEFAULT_CUSTOMER_FORM(currentUserName, locSearch?.label ?? ""),
+        );
+        setTentativeModalOpen(true);
+      };
+      // This replaces the whole in-progress batch and blanks the customer
+      // form, so confirm first when more than one class was already picked
+      // (a stray click on a free slot used to wipe the set silently).
+      if (pendingSlots.length > 1 && !editContext) {
+        setDiscardPrompt({
+          count: pendingSlots.length,
+          title: "Start a new booking?",
+          message: `You have ${pendingSlots.length} classes selected for this customer. Starting a new booking from this slot will remove all of them and clear the form.`,
+          confirmLabel: "Remove & start new",
+          run: startFreshBooking,
+        });
+        return;
+      }
+      startFreshBooking();
     },
     [
       config?.instructor_gap_minutes,
@@ -2666,6 +2710,7 @@ export default function SalesDashboard() {
       addingSlotMode,
       replacingSlotIndex,
       pendingSlots,
+      editContext,
       currentUserName,
       customerFormData.customerPhone,
       data?.freeGrid,
@@ -2785,7 +2830,7 @@ export default function SalesDashboard() {
   // phone+name (bookings made before batch_id existed). Who may edit is
   // decided in resolveInfo: the creator for any payment status, anyone for an
   // unpaid slot.
-  const handleEditBooking = useCallback(
+  const startEditBooking = useCallback(
     (action: NonNullable<SlotInfo["editAction"]>) => {
       const td = action.tentativeDetails ?? {};
       const batchId =
@@ -2863,6 +2908,25 @@ export default function SalesDashboard() {
       setTentativeModalOpen(true);
     },
     [currentUserName, data?.blocks, instructorsById],
+  );
+
+  // Opening a different booking to edit replaces the in-progress batch, so
+  // ask first when more than one class is picked.
+  const handleEditBooking = useCallback(
+    (action: NonNullable<SlotInfo["editAction"]>) => {
+      if (pendingSlots.length > 1 && !editContext) {
+        setDiscardPrompt({
+          count: pendingSlots.length,
+          title: "Open another booking?",
+          message: `You have ${pendingSlots.length} classes selected for a new booking. Opening another booking to edit will remove all of them.`,
+          confirmLabel: "Remove & open",
+          run: () => startEditBooking(action),
+        });
+        return;
+      }
+      startEditBooking(action);
+    },
+    [pendingSlots.length, editContext, startEditBooking],
   );
 
   // Lets Sales fix a wrong entry (e.g. a typo'd name/phone or a slot picked
@@ -4341,6 +4405,56 @@ export default function SalesDashboard() {
           </div>
         </div>
       </main>
+
+      {/* Warns before an in-progress multi-class booking is thrown away.
+          "Keep my classes" changes nothing (the selection and form stay as
+          they were); the other button performs the discard. */}
+      {discardPrompt && (
+        // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- standard click-outside-to-dismiss backdrop; the dialog itself has role="alertdialog" and a visible close button
+        <div className="modal-backdrop" onClick={() => setDiscardPrompt(null)}>
+          {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions, jsx-a11y/no-noninteractive-element-interactions -- stops the backdrop's dismiss click from bubbling; the dialog itself has role="alertdialog" and a visible close button */}
+          <div
+            className="modal modal-sm"
+            role="alertdialog"
+            aria-modal="true"
+            aria-label={discardPrompt.title}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <h2>{discardPrompt.title}</h2>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={() => setDiscardPrompt(null)}
+                aria-label="Keep my classes"
+              >
+                ×
+              </button>
+            </div>
+            <p className="confirm-message">{discardPrompt.message}</p>
+            <div className="confirm-actions">
+              <button
+                type="button"
+                className="expand"
+                onClick={() => setDiscardPrompt(null)}
+              >
+                Keep my classes
+              </button>
+              <button
+                type="button"
+                className="reset-dash"
+                onClick={() => {
+                  const run = discardPrompt.run;
+                  setDiscardPrompt(null);
+                  run();
+                }}
+              >
+                {discardPrompt.confirmLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* In-app confirm dialog for deleting a tentative slot — replaces
           window.confirm() so it matches the rest of the dashboard and can
