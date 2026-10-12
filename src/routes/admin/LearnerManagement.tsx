@@ -24,7 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
-import { useAuth } from "@/context/auth-context";
+import { useCanSeeFullPhone } from "@/hooks/useCanSeeFullPhone";
 import { supabase } from "@/lib/supabaseClient";
 import { useCourses } from "@/queries/payment";
 import { maskPhoneNumber } from "@/utils/phoneMasking";
@@ -254,10 +254,8 @@ export default function LearnerManagement() {
   // "user" accounts the field only shows it masked, admins / super admins see
   // it in full.
   const [phoneFromCrm, setPhoneFromCrm] = useState(false);
-  const { user: authUser } = useAuth();
-  const authRole = authUser?.user_metadata?.user_role;
-  const maskCrmPhone =
-    phoneFromCrm && authRole !== "admin" && authRole !== "super_admin";
+  const canSeeFullPhone = useCanSeeFullPhone();
+  const maskCrmPhone = phoneFromCrm && !canSeeFullPhone;
   const [isPaymentDialogOpen, setIsPaymentDialogOpen] = useState(false);
   const { toast } = useToast();
   const navigate = useNavigate();
