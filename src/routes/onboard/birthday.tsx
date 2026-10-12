@@ -46,7 +46,9 @@ export default function Birthday() {
   // Refetch learner data on mount to ensure we have the latest DOB status
   // This prevents the issue where cached data shows no DOB but DB has it
   React.useEffect(() => {
-    console.log("[BIRTHDAY] Refetching learner data to ensure fresh DOB status");
+    console.log(
+      "[BIRTHDAY] Refetching learner data to ensure fresh DOB status",
+    );
     refetch();
   }, [refetch]);
 
