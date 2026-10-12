@@ -218,6 +218,14 @@ async function searchCratio(
   return { payload, rows };
 }
 
+// Negative control: a search for an ID that cannot exist must come back empty.
+// If Cratio instead returns a row, it is ignoring the condition and any row it
+// gives us for a real ID is arbitrary, so it must not be trusted.
+async function searchFilterIsHonoured(field: string): Promise<boolean> {
+  const res = await searchCratio(`${field}@is@0@AND`, field, 1);
+  return !("error" in res) && res.rows.length === 0;
+}
+
 async function fetchLead(
   value: string,
   by: LookupBy = "email",
@@ -285,7 +293,19 @@ async function fetchLead(
 
   // Never trust the search to have filtered: only accept a record whose
   // searched column really holds the value asked for.
-  const row = rows.find((r) => norm(r[field]) === norm(key));
+  let row = rows.find((r) => norm(r[field]) === norm(key));
+  // Cratio can SEARCH on `Lead ID` without RETURNING it. When no row carries
+  // the field we cannot compare it, so accept the match only if the search is
+  // proven to honour the condition (see searchFilterIsHonoured).
+  if (
+    !row &&
+    by === "leadId" &&
+    rows.length > 0 &&
+    !rows.some((r) => field in r) &&
+    (await searchFilterIsHonoured(field))
+  ) {
+    row = rows[0];
+  }
   if (!row) {
     console.error(
       "[instructor-slot-booking] CRM returned no record matching the searched value; field present in rows:",
@@ -733,6 +753,10 @@ async function updateTentativeSchedule(body: {
 }
 
 // Only users with an Admin record may read CRM data or validate booking slots.
+// Any logged-in staff account may use this function: an "Admin" row (which
+// includes super admins, flagged is_super_admin) or a "User" row (team members
+// created by an admin). Learners and instructors are not staff and are refused.
+// Phones are stored in several formats, so match on every common variant.
 async function isAuthorized(authHeader: string | null) {
   if (!authHeader?.startsWith("Bearer ")) return false;
   const token = authHeader.replace("Bearer ", "");
@@ -740,14 +764,23 @@ async function isAuthorized(authHeader: string | null) {
     data: { user },
     error: authError,
   } = await supabase.auth.getUser(token);
-  if (authError || !user) return false;
+  if (authError || !user?.phone) return false;
 
-  const { data: admin, error: adminError } = await supabase
-    .from("Admin")
-    .select("id")
-    .eq("phone", user.phone)
-    .maybeSingle();
-  return !adminError && !!admin;
+  const digits = user.phone.replace(/\D/g, "");
+  const last10 = digits.slice(-10);
+  const variants = [
+    ...new Set([user.phone, digits, last10, `91${last10}`, `+91${last10}`]),
+  ];
+
+  for (const table of ["Admin", "User"] as const) {
+    const { data, error } = await supabase
+      .from(table)
+      .select("id")
+      .in("phone", variants)
+      .limit(1);
+    if (!error && data && data.length > 0) return true;
+  }
+  return false;
 }
 
 serve(async (req) => {
