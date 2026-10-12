@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/use-toast";
-import { usePhoneVisibility } from "@/context/phone-visibility-context";
 import { supabase } from "@/lib/supabaseClient";
 import { maskPhoneNumber } from "@/utils/phoneMasking";
 
@@ -41,7 +40,6 @@ interface HalfPaidEnrollment {
 }
 
 export function HalfPaidTracker() {
-  const { canViewUnmaskedPhoneNumbers } = usePhoneVisibility();
   const [enrollments, setEnrollments] = useState<HalfPaidEnrollment[]>([]);
   const [loading, setLoading] = useState(true);
   const { toast } = useToast();
@@ -269,9 +267,7 @@ export function HalfPaidTracker() {
                           </div>
                           <div className="text-xs text-gray-500">
                             {enrollment.Learner?.phone
-                              ? canViewUnmaskedPhoneNumbers
-                                ? enrollment.Learner.phone
-                                : maskPhoneNumber(enrollment.Learner.phone)
+                              ? maskPhoneNumber(enrollment.Learner.phone)
                               : ""}
                           </div>
                         </td>
