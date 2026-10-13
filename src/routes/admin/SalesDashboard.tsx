@@ -29,6 +29,7 @@ import type {
 } from "@/components/admin/sales-dashboard/TentativeBookingModal";
 import {
   DEFAULT_CUSTOMER_FORM,
+  NO_COURSE,
   TentativeBookingModal,
 } from "@/components/admin/sales-dashboard/TentativeBookingModal";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
@@ -2902,7 +2903,8 @@ export default function SalesDashboard() {
             ? td.payment_status
             : "unpaid",
         customerAddress: typeof td.address === "string" ? td.address : "",
-        course: typeof td.course === "string" && td.course ? td.course : "demo",
+        course:
+          typeof td.course === "string" && td.course ? td.course : NO_COURSE,
       });
       setSelectedSlot(null);
       setTentativeModalOpen(true);

@@ -1,4 +1,4 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import React, { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -55,6 +55,9 @@ export interface CustomerFormValues {
   course: string;
 }
 
+// "None" in the course dropdown (a booking that is not tied to a course yet).
+export const NO_COURSE = "none";
+
 export const DEFAULT_CUSTOMER_FORM = (
   currentUserName = "",
   address = "",
@@ -64,7 +67,7 @@ export const DEFAULT_CUSTOMER_FORM = (
   salesAgent: currentUserName,
   paymentStatus: "unpaid",
   customerAddress: address,
-  course: "demo",
+  course: NO_COURSE,
 });
 
 interface TentativeBookingModalProps {
@@ -117,15 +120,43 @@ interface TentativeBookingModalProps {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const sb = supabase as any;
 
-const COURSES = [
-  { id: "demo", label: "Demo Class" },
-  { id: "course_4", label: "4-Class Course" },
-  { id: "course_5", label: "5-Class Course" },
-  { id: "course_6", label: "6-Class Course" },
-  { id: "course_10", label: "10-Class Course" },
-  { id: "course_15", label: "15-Class Course" },
-  { id: "course_20", label: "20-Class Course" },
+// Course values saved by earlier versions of this form. They are not in the
+// Courses table, so an old booking opened for editing still shows its value.
+const LEGACY_COURSE_LABELS: Record<string, string> = {
+  demo: "Demo Class",
+  course_4: "4-Class Course",
+  course_5: "5-Class Course",
+  course_6: "6-Class Course",
+  course_10: "10-Class Course",
+  course_15: "15-Class Course",
+  course_20: "20-Class Course",
+};
+
+// The dropdown lists the "Mini Course - ..." rows of the Courses table, in
+// this order (anything else new in the table follows, alphabetically).
+const MINI_COURSE_ORDER = [
+  "Mini Course - Flyover",
+  "Mini Course - Parking + Flyover",
+  "Mini Course - Parking",
+  "Mini Course - Slopes + Parking",
+  "Mini Course - Slopes",
+  "Mini Course - Traffic + Flyover",
+  "Mini Course - Traffic + Flyover + Parking",
+  "Mini Course - Traffic + Parking",
+  "Mini Course - Traffic",
 ];
+
+type CourseOption = { id: string; label: string };
+
+function sortMiniCourses(rows: CourseOption[]): CourseOption[] {
+  const rank = (label: string) => {
+    const i = MINI_COURSE_ORDER.indexOf(label);
+    return i === -1 ? MINI_COURSE_ORDER.length : i;
+  };
+  return [...rows].sort(
+    (x, y) => rank(x.label) - rank(y.label) || x.label.localeCompare(y.label),
+  );
+}
 
 function formatSlotTime(startTime: string, endTime: string): string {
   try {
@@ -169,6 +200,40 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
 }) => {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [successMessage, setSuccessMessage] = useState("");
+  // Course choices come from the Courses table: the "Mini Course - ..." rows.
+  const { data: dbCourses = [] } = useQuery({
+    queryKey: ["sales-mini-courses"],
+    enabled: isOpen,
+    staleTime: 5 * 60 * 1000,
+    queryFn: async (): Promise<CourseOption[]> => {
+      const { data, error } = await sb
+        .from("Courses")
+        .select("id, name")
+        .eq("enabled", true)
+        .ilike("name", "Mini Course%");
+      if (error) throw error;
+      return sortMiniCourses(
+        ((data ?? []) as { id: string; name: string | null }[])
+          .filter((c) => c.name)
+          .map((c) => ({ id: String(c.id), label: String(c.name) })),
+      );
+    },
+  });
+  const courseOptions: CourseOption[] = [
+    { id: NO_COURSE, label: "None" },
+    ...dbCourses,
+  ];
+  // An old booking may carry a value from before this list existed.
+  const legacyCourseLabel = LEGACY_COURSE_LABELS[formData.course];
+  if (
+    legacyCourseLabel &&
+    !courseOptions.some((c) => c.id === formData.course)
+  ) {
+    courseOptions.push({
+      id: formData.course,
+      label: `${legacyCourseLabel} (earlier option)`,
+    });
+  }
   const canSeeFullPhone = useCanSeeFullPhone();
   const maskCrmPhone = Boolean(formData.phoneFromCrm) && !canSeeFullPhone;
   // Bulk Add Schedules dialog state
@@ -359,6 +424,8 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
         payment_status: formData.paymentStatus,
         address: formData.customerAddress,
         course: formData.course,
+        course_name:
+          courseOptions.find((c) => c.id === formData.course)?.label ?? null,
         // Groups every row written by one booking (a multi-class batch or a
         // single slot) so a later Edit can find all the rows booked together
         // without guessing from phone/name. Legacy rows created before this
@@ -379,6 +446,8 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
           payment_status: formData.paymentStatus,
           address: formData.customerAddress,
           course: formData.course,
+          course_name:
+            courseOptions.find((c) => c.id === formData.course)?.label ?? null,
           batch_id: batchId,
           updated_at: new Date().toISOString(),
         };
@@ -951,7 +1020,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                 errors.course ? "border-destructive" : "border-input"
               }`}
             >
-              {COURSES.map((c) => (
+              {courseOptions.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.label}
                 </option>
