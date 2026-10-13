@@ -132,9 +132,10 @@ const LEGACY_COURSE_LABELS: Record<string, string> = {
   course_20: "20-Class Course",
 };
 
-// The dropdown lists the "Mini Course - ..." rows of the Courses table, in
-// this order (anything else new in the table follows, alphabetically).
-const MINI_COURSE_ORDER = [
+// The dropdown lists the Courses table in this order; anything else in the
+// table follows, alphabetically. "Topup" is not a course row, so it is added
+// as the last option.
+const COURSE_ORDER = [
   "Mini Course - Flyover",
   "Mini Course - Parking + Flyover",
   "Mini Course - Parking",
@@ -144,20 +145,25 @@ const MINI_COURSE_ORDER = [
   "Mini Course - Traffic + Flyover + Parking",
   "Mini Course - Traffic + Parking",
   "Mini Course - Traffic",
+  "Comprehensive/Beginner's course",
+  "Demo Class",
 ];
+
+// Value saved for the "Topup" option (same value Instructor Management uses).
+const TOPUP_COURSE = "topup";
 
 type CourseOption = { id: string; label: string };
 
-function sortMiniCourses(rows: CourseOption[]): CourseOption[] {
+function sortCourses(rows: CourseOption[]): CourseOption[] {
+  const order = COURSE_ORDER.map((n) => n.toLowerCase());
   const rank = (label: string) => {
-    const i = MINI_COURSE_ORDER.indexOf(label);
-    return i === -1 ? MINI_COURSE_ORDER.length : i;
+    const i = order.indexOf(label.trim().toLowerCase());
+    return i === -1 ? order.length : i;
   };
   return [...rows].sort(
     (x, y) => rank(x.label) - rank(y.label) || x.label.localeCompare(y.label),
   );
 }
-
 function formatSlotTime(startTime: string, endTime: string): string {
   try {
     return `${minutesToTime(timeToMinutes(startTime))}–${minutesToTime(timeToMinutes(endTime))}`;
@@ -200,19 +206,16 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
 }) => {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [successMessage, setSuccessMessage] = useState("");
-  // Course choices come from the Courses table: the "Mini Course - ..." rows.
+  // Course choices come from the Courses table (same rows Instructor
+  // Management's Course Selection lists), plus None and Topup.
   const { data: dbCourses = [] } = useQuery({
-    queryKey: ["sales-mini-courses"],
+    queryKey: ["sales-booking-courses"],
     enabled: isOpen,
     staleTime: 5 * 60 * 1000,
     queryFn: async (): Promise<CourseOption[]> => {
-      const { data, error } = await sb
-        .from("Courses")
-        .select("id, name")
-        .eq("enabled", true)
-        .ilike("name", "Mini Course%");
+      const { data, error } = await sb.from("Courses").select("id, name");
       if (error) throw error;
-      return sortMiniCourses(
+      return sortCourses(
         ((data ?? []) as { id: string; name: string | null }[])
           .filter((c) => c.name)
           .map((c) => ({ id: String(c.id), label: String(c.name) })),
@@ -222,6 +225,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
   const courseOptions: CourseOption[] = [
     { id: NO_COURSE, label: "None" },
     ...dbCourses,
+    { id: TOPUP_COURSE, label: "Topup" },
   ];
   // An old booking may carry a value from before this list existed.
   const legacyCourseLabel = LEGACY_COURSE_LABELS[formData.course];
