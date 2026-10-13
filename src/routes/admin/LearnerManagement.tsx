@@ -3,6 +3,7 @@ import { ArrowLeft } from "lucide-react";
 import React, { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { CrmLeadAutofill } from "@/components/admin/learner/CrmLeadAutofill";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,8 +24,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
+import { useCanSeeFullPhone } from "@/hooks/useCanSeeFullPhone";
 import { supabase } from "@/lib/supabaseClient";
 import { useCourses } from "@/queries/payment";
+import { maskPhoneNumber } from "@/utils/phoneMasking";
 
 import { HalfPaidTracker } from "./HalfPaidTracker";
 import { IncompletePaymentsCard } from "./IncompletePaymentsCard";
@@ -144,6 +147,34 @@ const PREDEFINED_COURSES = [
   },
 ];
 
+// Best-effort match of Cratio's free-text course (e.g. "Beginner course- License
+// No 10 Hours") to one of PREDEFINED_COURSES. A course matches when the topics
+// named in the text (beginner / flyover / parking / slopes / traffic) are exactly
+// that course's topics, in any order. Anything ambiguous returns undefined.
+function matchPredefinedCourseId(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const lower = text.toLowerCase();
+  const topicsOf = (name: string) =>
+    name
+      .toLowerCase()
+      .replace(/\bcourse\b/g, "")
+      .split("+")
+      .map((t) => t.trim())
+      .filter(Boolean);
+  const allTopics = new Set(
+    PREDEFINED_COURSES.flatMap((c) => topicsOf(c.name)),
+  );
+  const found = [...allTopics].filter((t) => lower.includes(t));
+  if (found.length === 0) return undefined;
+  const matches = PREDEFINED_COURSES.filter((c) => {
+    const topics = topicsOf(c.name);
+    return (
+      topics.length === found.length && topics.every((t) => found.includes(t))
+    );
+  });
+  return matches.length === 1 ? matches[0].id : undefined;
+}
+
 // Skill modules for custom course. `courseId` maps each module to its standalone
 // course so its list price can be looked up (and used as the default, editable
 // per-module price when building a discounted custom course).
@@ -218,6 +249,13 @@ export default function LearnerManagement() {
   const [createdLearnerId, setCreatedLearnerId] = useState<string | null>(null);
   const [isCreateLearnerDialogOpen, setIsCreateLearnerDialogOpen] =
     useState(false);
+  // True while the phone in the form came from the CRM autofill. The real
+  // number stays in learnerData.phone (needed to create the account); for
+  // "user" accounts the field only shows it masked, admins / super admins see
+  // it in full.
+  const [phoneFromCrm, setPhoneFromCrm] = useState(false);
+  const canSeeFullPhone = useCanSeeFullPhone();
+  const maskCrmPhone = phoneFromCrm && !canSeeFullPhone;
   const [isPaymentDialogOpen, setIsPaymentDialogOpen] = useState(false);
   const { toast } = useToast();
   const navigate = useNavigate();
@@ -311,6 +349,7 @@ export default function LearnerManagement() {
 
   // Reset form when dialog opens
   const openCreateDialog = () => {
+    setPhoneFromCrm(false);
     setCaseType("classes_only");
     setVehicleType("four_wheeler");
     setRtoPrototypeData(DEFAULT_RTO_PROTOTYPE_DATA);
@@ -953,6 +992,34 @@ export default function LearnerManagement() {
                 <DialogTitle>Create New Learner</DialogTitle>
               </DialogHeader>
               <div className="grid gap-4 py-4">
+                <CrmLeadAutofill
+                  onFill={(fill) => {
+                    if (fill.phone) setPhoneFromCrm(true);
+                    // Only pick a course when the form is on a predefined
+                    // course (not RTO-only / custom / demo), so a choice the
+                    // admin already made on another type is never overridden.
+                    const courseId =
+                      caseType !== "rto_only" && courseType === "predefined"
+                        ? matchPredefinedCourseId(fill.course)
+                        : undefined;
+                    if (courseId) setSelectedCourseId(courseId);
+                    setLearnerData((prev) => ({
+                      ...prev,
+                      name: fill.name ?? prev.name,
+                      email: fill.email ?? prev.email,
+                      phone: fill.phone ?? prev.phone,
+                      ...(courseId
+                        ? {
+                            courseId,
+                            courseName:
+                              PREDEFINED_COURSES.find((c) => c.id === courseId)
+                                ?.name || "",
+                          }
+                        : {}),
+                    }));
+                    return Boolean(courseId);
+                  }}
+                />
                 <div className="grid grid-cols-4 items-center gap-4">
                   <Label htmlFor="name" className="text-right">
                     Name
@@ -981,13 +1048,31 @@ export default function LearnerManagement() {
                   <Label htmlFor="phone" className="text-right">
                     Phone
                   </Label>
-                  <Input
-                    id="phone"
-                    name="phone"
-                    value={learnerData.phone}
-                    onChange={handleInputChange}
-                    className="col-span-3"
-                  />
+                  <div className="col-span-3 space-y-1">
+                    <Input
+                      id="phone"
+                      name="phone"
+                      value={
+                        maskCrmPhone
+                          ? maskPhoneNumber(learnerData.phone)
+                          : learnerData.phone
+                      }
+                      readOnly={maskCrmPhone}
+                      onChange={handleInputChange}
+                    />
+                    {maskCrmPhone && (
+                      <button
+                        type="button"
+                        className="text-xs text-muted-foreground underline"
+                        onClick={() => {
+                          setPhoneFromCrm(false);
+                          setLearnerData((prev) => ({ ...prev, phone: "" }));
+                        }}
+                      >
+                        Enter a different number
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <div className="grid grid-cols-4 items-center gap-4">
                   <Label htmlFor="caseType" className="text-right">

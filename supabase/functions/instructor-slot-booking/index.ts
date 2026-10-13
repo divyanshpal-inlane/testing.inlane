@@ -46,6 +46,7 @@ const CRATIO_DISPLAY_FIELDS = [
   "Caller Name",
   "Created By",
   "Created Username",
+  "Course Applicable",
   "Course Details",
   "Course Tenure",
   "Payment Status",
@@ -95,7 +96,7 @@ function mapPayment(value: unknown): string | undefined {
 // who sold the lead; in that case fall back to the person who worked it.
 function pickSalesPerson(lead: Record<string, unknown>): string | undefined {
   const owner = str(lead["Lead Owner"] ?? lead.sales_lead ?? lead.lead_owner);
-  if (owner && !/(ops|team|unassigned|admin)/i.test(owner)) return owner;
+  if (owner && !/\b(ops|team|unassigned|admin)\b/i.test(owner)) return owner;
   return (
     str(lead["Caller Name"]) ??
     str(lead["Created By"]) ??
@@ -122,6 +123,9 @@ function mapLead(lead: Record<string, unknown>) {
         .filter((v) => v && !/^-+\s*select\s*-+$/i.test(v))
         .join(" ") || undefined,
     payment: mapPayment(lead["Payment Status"]),
+    email: str(lead["Email Address"]),
+    // Cratio's "Course Applicable" dropdown; only Learner Management uses it.
+    courseApplicable: str(lead["Course Applicable"]),
     phone: str(
       lead["Mobile Number"] ??
         lead["Mobile"] ??
@@ -137,6 +141,8 @@ type LeadFields = {
   leadName?: string;
   course?: string;
   payment?: string;
+  email?: string;
+  courseApplicable?: string;
   phone?: string;
 };
 
@@ -218,6 +224,14 @@ async function searchCratio(
   return { payload, rows };
 }
 
+// Negative control: a search for an ID that cannot exist must come back empty.
+// If Cratio instead returns a row, it is ignoring the condition and any row it
+// gives us for a real ID is arbitrary, so it must not be trusted.
+async function searchFilterIsHonoured(field: string): Promise<boolean> {
+  const res = await searchCratio(`${field}@is@0@AND`, field, 1);
+  return !("error" in res) && res.rows.length === 0;
+}
+
 async function fetchLead(
   value: string,
   by: LookupBy = "email",
@@ -285,7 +299,19 @@ async function fetchLead(
 
   // Never trust the search to have filtered: only accept a record whose
   // searched column really holds the value asked for.
-  const row = rows.find((r) => norm(r[field]) === norm(key));
+  let row = rows.find((r) => norm(r[field]) === norm(key));
+  // Cratio can SEARCH on `Lead ID` without RETURNING it. When no row carries
+  // the field we cannot compare it, so accept the match only if the search is
+  // proven to honour the condition (see searchFilterIsHonoured).
+  if (
+    !row &&
+    by === "leadId" &&
+    rows.length > 0 &&
+    !rows.some((r) => field in r) &&
+    (await searchFilterIsHonoured(field))
+  ) {
+    row = rows[0];
+  }
   if (!row) {
     console.error(
       "[instructor-slot-booking] CRM returned no record matching the searched value; field present in rows:",
@@ -329,8 +355,64 @@ async function lookupLead(leadId: string, by: LookupBy) {
   if (!result.found || !result.lead) {
     return { configured: true, found: false, customer: null };
   }
-  const { phone: _phone, ...customer } = result.lead;
+  // The Instructor Management form never receives phone or e-mail.
+  const {
+    phone: _phone,
+    email: _email,
+    courseApplicable: _courseApplicable,
+    ...customer
+  } = result.lead;
   return { configured: true, found: true, customer };
+}
+
+// Lookup for Learner Management's "Create New Learner" form. Unlike the
+// Instructor Management lookup, that form needs the lead's e-mail and phone to
+// create the learner account, so this (and only this) action returns them. The
+// phone is normalised to the 10 digits the form validates.
+async function lookupLearnerLead(leadId: string, by: LookupBy) {
+  const result = await fetchLead(leadId, by);
+  if (!result.configured) {
+    return {
+      configured: false,
+      found: false,
+      learner: null,
+      code: result.error,
+    };
+  }
+  if (result.error) {
+    return {
+      configured: true,
+      found: false,
+      learner: null,
+      code: result.error,
+    };
+  }
+  if (!result.found || !result.lead) {
+    return { configured: true, found: false, learner: null };
+  }
+  const { name, email, phone, courseApplicable, address, payment } =
+    result.lead;
+  // Only Cratio's "Course Applicable" is used. "Course Details" is a different
+  // field (it held "Traffic + Parking" for a lead whose Course Applicable was
+  // "Beginner course"), so mixing it in picked the wrong course. A "--select--"
+  // placeholder means no course.
+  const courseText =
+    courseApplicable && !/^-+\s*select\s*-+$/i.test(courseApplicable)
+      ? courseApplicable
+      : undefined;
+  const digits = (phone ?? "").replace(/\D/g, "");
+  return {
+    configured: true,
+    found: true,
+    learner: {
+      name,
+      email,
+      course: courseText,
+      address,
+      payment,
+      phone: digits.length >= 10 ? digits.slice(-10) : undefined,
+    },
+  };
 }
 
 // --- slot validation --------------------------------------------------------
@@ -733,6 +815,10 @@ async function updateTentativeSchedule(body: {
 }
 
 // Only users with an Admin record may read CRM data or validate booking slots.
+// Any logged-in staff account may use this function: an "Admin" row (which
+// includes super admins, flagged is_super_admin) or a "User" row (team members
+// created by an admin). Learners and instructors are not staff and are refused.
+// Phones are stored in several formats, so match on every common variant.
 async function isAuthorized(authHeader: string | null) {
   if (!authHeader?.startsWith("Bearer ")) return false;
   const token = authHeader.replace("Bearer ", "");
@@ -740,14 +826,23 @@ async function isAuthorized(authHeader: string | null) {
     data: { user },
     error: authError,
   } = await supabase.auth.getUser(token);
-  if (authError || !user) return false;
+  if (authError || !user?.phone) return false;
 
-  const { data: admin, error: adminError } = await supabase
-    .from("Admin")
-    .select("id")
-    .eq("phone", user.phone)
-    .maybeSingle();
-  return !adminError && !!admin;
+  const digits = user.phone.replace(/\D/g, "");
+  const last10 = digits.slice(-10);
+  const variants = [
+    ...new Set([user.phone, digits, last10, `91${last10}`, `+91${last10}`]),
+  ];
+
+  for (const table of ["Admin", "User"] as const) {
+    const { data, error } = await supabase
+      .from(table)
+      .select("id")
+      .in("phone", variants)
+      .limit(1);
+    if (!error && data && data.length > 0) return true;
+  }
+  return false;
 }
 
 serve(async (req) => {
@@ -789,6 +884,15 @@ serve(async (req) => {
         return json(400, { success: false, error: "Lead ID is required" });
       }
       const result = await lookupLead(leadId, parseBy(body.by));
+      return json(200, { success: true, ...result });
+    }
+
+    if (action === "lookupLearner") {
+      const leadId = String(body.leadId ?? "").trim();
+      if (!leadId) {
+        return json(400, { success: false, error: "Lead ID is required" });
+      }
+      const result = await lookupLearnerLead(leadId, parseBy(body.by));
       return json(200, { success: true, ...result });
     }
 

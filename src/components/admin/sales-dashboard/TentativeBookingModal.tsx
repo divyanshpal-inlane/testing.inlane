@@ -1,13 +1,16 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import React, { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { CrmLeadAutofill } from "@/components/admin/learner/CrmLeadAutofill";
+import { useCanSeeFullPhone } from "@/hooks/useCanSeeFullPhone";
 import type { BulkType } from "@/lib/sales-dashboard/bulkSlots";
 import { generateBulkSlots } from "@/lib/sales-dashboard/bulkSlots";
 import { minutesToTime, timeToMinutes } from "@/lib/sales-dashboard/validation";
 import { isValidPhone, normalizePhone } from "@/lib/sales-dashboard/validation";
 import { supabase } from "@/lib/supabaseClient";
 import { checkInstructorAvailability } from "@/queries/instructor";
+import { maskPhoneNumber } from "@/utils/phoneMasking";
 
 import { AddressAutocomplete } from "./AddressAutocomplete";
 
@@ -42,11 +45,18 @@ export interface SlotPick {
 export interface CustomerFormValues {
   customerName: string;
   customerPhone: string;
+  // True while customerPhone came from the CRM autofill. For accounts that may
+  // not see full phone numbers the field then shows it masked (read-only);
+  // the real number is still what gets saved.
+  phoneFromCrm?: boolean;
   salesAgent: string;
   paymentStatus: "unpaid" | "half_paid" | "full_paid";
   customerAddress: string;
   course: string;
 }
+
+// "None" in the course dropdown (a booking that is not tied to a course yet).
+export const NO_COURSE = "none";
 
 export const DEFAULT_CUSTOMER_FORM = (
   currentUserName = "",
@@ -57,7 +67,7 @@ export const DEFAULT_CUSTOMER_FORM = (
   salesAgent: currentUserName,
   paymentStatus: "unpaid",
   customerAddress: address,
-  course: "demo",
+  course: NO_COURSE,
 });
 
 interface TentativeBookingModalProps {
@@ -110,16 +120,50 @@ interface TentativeBookingModalProps {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const sb = supabase as any;
 
-const COURSES = [
-  { id: "demo", label: "Demo Class" },
-  { id: "course_4", label: "4-Class Course" },
-  { id: "course_5", label: "5-Class Course" },
-  { id: "course_6", label: "6-Class Course" },
-  { id: "course_10", label: "10-Class Course" },
-  { id: "course_15", label: "15-Class Course" },
-  { id: "course_20", label: "20-Class Course" },
+// Course values saved by earlier versions of this form. They are not in the
+// Courses table, so an old booking opened for editing still shows its value.
+const LEGACY_COURSE_LABELS: Record<string, string> = {
+  demo: "Demo Class",
+  course_4: "4-Class Course",
+  course_5: "5-Class Course",
+  course_6: "6-Class Course",
+  course_10: "10-Class Course",
+  course_15: "15-Class Course",
+  course_20: "20-Class Course",
+};
+
+// The dropdown lists the Courses table in this order; anything else in the
+// table follows, alphabetically. "Topup" is not a course row, so it is added
+// as the last option.
+const COURSE_ORDER = [
+  "Mini Course - Flyover",
+  "Mini Course - Parking + Flyover",
+  "Mini Course - Parking",
+  "Mini Course - Slopes + Parking",
+  "Mini Course - Slopes",
+  "Mini Course - Traffic + Flyover",
+  "Mini Course - Traffic + Flyover + Parking",
+  "Mini Course - Traffic + Parking",
+  "Mini Course - Traffic",
+  "Comprehensive/Beginner's course",
+  "Demo Class",
 ];
 
+// Value saved for the "Topup" option (same value Instructor Management uses).
+const TOPUP_COURSE = "topup";
+
+type CourseOption = { id: string; label: string };
+
+function sortCourses(rows: CourseOption[]): CourseOption[] {
+  const order = COURSE_ORDER.map((n) => n.toLowerCase());
+  const rank = (label: string) => {
+    const i = order.indexOf(label.trim().toLowerCase());
+    return i === -1 ? order.length : i;
+  };
+  return [...rows].sort(
+    (x, y) => rank(x.label) - rank(y.label) || x.label.localeCompare(y.label),
+  );
+}
 function formatSlotTime(startTime: string, endTime: string): string {
   try {
     return `${minutesToTime(timeToMinutes(startTime))}–${minutesToTime(timeToMinutes(endTime))}`;
@@ -162,6 +206,40 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
 }) => {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [successMessage, setSuccessMessage] = useState("");
+  // Course choices come from the Courses table (same rows Instructor
+  // Management's Course Selection lists), plus None and Topup.
+  const { data: dbCourses = [] } = useQuery({
+    queryKey: ["sales-booking-courses"],
+    enabled: isOpen,
+    staleTime: 5 * 60 * 1000,
+    queryFn: async (): Promise<CourseOption[]> => {
+      const { data, error } = await sb.from("Courses").select("id, name");
+      if (error) throw error;
+      return sortCourses(
+        ((data ?? []) as { id: string; name: string | null }[])
+          .filter((c) => c.name)
+          .map((c) => ({ id: String(c.id), label: String(c.name) })),
+      );
+    },
+  });
+  const courseOptions: CourseOption[] = [
+    { id: NO_COURSE, label: "None" },
+    ...dbCourses,
+    { id: TOPUP_COURSE, label: "Topup" },
+  ];
+  // An old booking may carry a value from before this list existed.
+  const legacyCourseLabel = LEGACY_COURSE_LABELS[formData.course];
+  if (
+    legacyCourseLabel &&
+    !courseOptions.some((c) => c.id === formData.course)
+  ) {
+    courseOptions.push({
+      id: formData.course,
+      label: `${legacyCourseLabel} (earlier option)`,
+    });
+  }
+  const canSeeFullPhone = useCanSeeFullPhone();
+  const maskCrmPhone = Boolean(formData.phoneFromCrm) && !canSeeFullPhone;
   // Bulk Add Schedules dialog state
   const [isBulkDialogOpen, setIsBulkDialogOpen] = useState(false);
   const [bulkType, setBulkType] = useState<BulkType>("single");
@@ -350,6 +428,8 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
         payment_status: formData.paymentStatus,
         address: formData.customerAddress,
         course: formData.course,
+        course_name:
+          courseOptions.find((c) => c.id === formData.course)?.label ?? null,
         // Groups every row written by one booking (a multi-class batch or a
         // single slot) so a later Edit can find all the rows booked together
         // without guessing from phone/name. Legacy rows created before this
@@ -370,6 +450,8 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
           payment_status: formData.paymentStatus,
           address: formData.customerAddress,
           course: formData.course,
+          course_name:
+            courseOptions.find((c) => c.id === formData.course)?.label ?? null,
           batch_id: batchId,
           updated_at: new Date().toISOString(),
         };
@@ -745,6 +827,32 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
             </div>
           </div>
 
+          {/* CRM autofill (new bookings only): fills name, phone, address and
+              payment status; every field stays editable. */}
+          {!editContext && (
+            <CrmLeadAutofill
+              target="sales"
+              onFill={(fill) => {
+                const payment =
+                  fill.payment === "Half paid"
+                    ? "half_paid"
+                    : fill.payment === "Full paid"
+                      ? "full_paid"
+                      : fill.payment === "Unpaid"
+                        ? "unpaid"
+                        : undefined;
+                onFormDataChange({
+                  ...formData,
+                  customerName: fill.name ?? formData.customerName,
+                  customerPhone: fill.phone ?? formData.customerPhone,
+                  customerAddress: fill.address ?? formData.customerAddress,
+                  paymentStatus: payment ?? formData.paymentStatus,
+                  phoneFromCrm: fill.phone ? true : formData.phoneFromCrm,
+                });
+              }}
+            />
+          )}
+
           {/* Customer Name */}
           <div>
             <label
@@ -785,7 +893,12 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                 type="tel"
                 inputMode="numeric"
                 maxLength={10}
-                value={formData.customerPhone}
+                value={
+                  maskCrmPhone
+                    ? maskPhoneNumber(formData.customerPhone)
+                    : formData.customerPhone
+                }
+                readOnly={maskCrmPhone}
                 onChange={(e) =>
                   set(
                     "customerPhone",
@@ -797,6 +910,21 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                   errors.customerPhone ? "border-destructive" : "border-input"
                 }`}
               />
+              {maskCrmPhone && (
+                <button
+                  type="button"
+                  className="mt-1 text-xs text-muted-foreground underline"
+                  onClick={() =>
+                    onFormDataChange({
+                      ...formData,
+                      customerPhone: "",
+                      phoneFromCrm: false,
+                    })
+                  }
+                >
+                  Enter a different number
+                </button>
+              )}
               {errors.customerPhone && (
                 <p className="mt-1 text-xs text-destructive">
                   {errors.customerPhone}
@@ -896,7 +1024,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                 errors.course ? "border-destructive" : "border-input"
               }`}
             >
-              {COURSES.map((c) => (
+              {courseOptions.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.label}
                 </option>
