@@ -3,7 +3,7 @@ import React, { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { CrmLeadAutofill } from "@/components/admin/learner/CrmLeadAutofill";
-import { useCanSeeFullPhone } from "@/hooks/useCanSeeFullPhone";
+import { useCanSeeCustomerPhone } from "@/hooks/useCanSeeCustomerPhone";
 import type { BulkType } from "@/lib/sales-dashboard/bulkSlots";
 import { generateBulkSlots } from "@/lib/sales-dashboard/bulkSlots";
 import { minutesToTime, timeToMinutes } from "@/lib/sales-dashboard/validation";
@@ -238,8 +238,13 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
       label: `${legacyCourseLabel} (earlier option)`,
     });
   }
-  const canSeeFullPhone = useCanSeeFullPhone();
+  const canSeeFullPhone = useCanSeeCustomerPhone();
+  // Without the permission the phone shows masked and read-only when it came
+  // from the CRM autofill (it can be re-entered) or when editing an existing
+  // booking (it is kept as-is and cannot be changed).
   const maskCrmPhone = Boolean(formData.phoneFromCrm) && !canSeeFullPhone;
+  const maskEditPhone = Boolean(editContext) && !canSeeFullPhone;
+  const maskPhoneField = maskCrmPhone || maskEditPhone;
   // Bulk Add Schedules dialog state
   const [isBulkDialogOpen, setIsBulkDialogOpen] = useState(false);
   const [bulkType, setBulkType] = useState<BulkType>("single");
@@ -591,8 +596,8 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
     if (!formData.customerName.trim()) {
       newErrors.customerName = "Customer name is required";
     }
-    if (editContext) {
-      // Phone is hidden and unchanged when editing.
+    if (editContext && !canSeeFullPhone) {
+      // Masked and read-only when editing: the booking keeps its phone.
     } else if (!formData.customerPhone.trim()) {
       newErrors.customerPhone = "Phone number is required";
     } else if (!isValidPhone(formData.customerPhone)) {
@@ -878,60 +883,57 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
             )}
           </div>
 
-          {/* Phone -- hidden when editing: agents never see an existing
-              customer's phone; the booking keeps the one it already has. */}
-          {!editContext && (
-            <div>
-              <label
-                htmlFor="customerPhone"
-                className="block text-sm font-medium text-foreground"
+          {/* Phone -- masked unless the account may see customer phones. */}
+          <div>
+            <label
+              htmlFor="customerPhone"
+              className="block text-sm font-medium text-foreground"
+            >
+              Phone Number *
+            </label>
+            <input
+              id="customerPhone"
+              type="tel"
+              inputMode="numeric"
+              maxLength={10}
+              value={
+                maskPhoneField
+                  ? maskPhoneNumber(formData.customerPhone)
+                  : formData.customerPhone
+              }
+              readOnly={maskPhoneField}
+              onChange={(e) =>
+                set(
+                  "customerPhone",
+                  e.target.value.replace(/\D/g, "").slice(0, 10),
+                )
+              }
+              placeholder="10-digit phone number"
+              className={`mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+                errors.customerPhone ? "border-destructive" : "border-input"
+              }`}
+            />
+            {maskCrmPhone && !editContext && (
+              <button
+                type="button"
+                className="mt-1 text-xs text-muted-foreground underline"
+                onClick={() =>
+                  onFormDataChange({
+                    ...formData,
+                    customerPhone: "",
+                    phoneFromCrm: false,
+                  })
+                }
               >
-                Phone Number *
-              </label>
-              <input
-                id="customerPhone"
-                type="tel"
-                inputMode="numeric"
-                maxLength={10}
-                value={
-                  maskCrmPhone
-                    ? maskPhoneNumber(formData.customerPhone)
-                    : formData.customerPhone
-                }
-                readOnly={maskCrmPhone}
-                onChange={(e) =>
-                  set(
-                    "customerPhone",
-                    e.target.value.replace(/\D/g, "").slice(0, 10),
-                  )
-                }
-                placeholder="10-digit phone number"
-                className={`mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
-                  errors.customerPhone ? "border-destructive" : "border-input"
-                }`}
-              />
-              {maskCrmPhone && (
-                <button
-                  type="button"
-                  className="mt-1 text-xs text-muted-foreground underline"
-                  onClick={() =>
-                    onFormDataChange({
-                      ...formData,
-                      customerPhone: "",
-                      phoneFromCrm: false,
-                    })
-                  }
-                >
-                  Enter a different number
-                </button>
-              )}
-              {errors.customerPhone && (
-                <p className="mt-1 text-xs text-destructive">
-                  {errors.customerPhone}
-                </p>
-              )}
-            </div>
-          )}
+                Enter a different number
+              </button>
+            )}
+            {errors.customerPhone && (
+              <p className="mt-1 text-xs text-destructive">
+                {errors.customerPhone}
+              </p>
+            )}
+          </div>
 
           {/* Sales Agent -- read-only, set to whoever is actually logged in
               (see currentUserName in SalesDashboard.tsx). This used to be

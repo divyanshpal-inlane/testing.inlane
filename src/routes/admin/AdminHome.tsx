@@ -221,6 +221,14 @@ const featureConfig: Record<
     link: "",
     color: "text-gray-500",
   },
+  view_unmasked_customer_phone_numbers: {
+    title: "View Unmasked Customer Phone Numbers",
+    description:
+      "View unmasked customer / lead phone numbers in Learner Management, Instructor Management (tentative bookings) and the Sales Dashboard",
+    icon: Users,
+    link: "",
+    color: "text-gray-500",
+  },
   view_unmasked_car_numbers: {
     title: "View Unmasked Car Numbers",
     description: "View unmasked vehicle registration numbers for instructors",
@@ -471,6 +479,7 @@ export default function AdminHome() {
       (perm) =>
         perm !== "admin_management" &&
         perm !== "view_unmasked_phone_numbers" &&
+        perm !== "view_unmasked_customer_phone_numbers" &&
         perm !== "view_unmasked_car_numbers",
     ) // Filter out admin_management, view_unmasked_phone_numbers and view_unmasked_car_numbers
     .map((perm) => {

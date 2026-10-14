@@ -22,7 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
-import { useCanSeeFullPhone } from "@/hooks/useCanSeeFullPhone";
+import { useCanSeeCustomerPhone } from "@/hooks/useCanSeeCustomerPhone";
 import { supabase } from "@/lib/supabaseClient";
 import { maskPhoneNumber } from "@/utils/phoneMasking";
 
@@ -70,7 +70,7 @@ type EditPlan = "full" | "half" | "custom";
 
 export function IncompletePaymentsCard() {
   // Admins and super admins see the number; "user" accounts see it masked.
-  const canSeeFullPhone = useCanSeeFullPhone();
+  const canSeeFullPhone = useCanSeeCustomerPhone();
   const showPhone = (phone: string | null | undefined) =>
     canSeeFullPhone ? (phone ?? "") : maskPhoneNumber(phone);
   const [incompletePayments, setIncompletePayments] = useState<any[]>([]);

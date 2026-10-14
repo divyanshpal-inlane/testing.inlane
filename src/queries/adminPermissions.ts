@@ -140,6 +140,13 @@ export const ADMIN_PERMISSIONS = {
       "View and edit unmasked phone numbers for instructors and learners",
     route: null,
   },
+  view_unmasked_customer_phone_numbers: {
+    key: "view_unmasked_customer_phone_numbers",
+    label: "View Unmasked Customer Phone Numbers",
+    description:
+      "View unmasked customer / lead phone numbers in Learner Management, Instructor Management (tentative bookings) and the Sales Dashboard",
+    route: null,
+  },
   view_unmasked_car_numbers: {
     key: "view_unmasked_car_numbers",
     label: "View Unmasked Car Numbers",

@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/use-toast";
-import { useCanSeeFullPhone } from "@/hooks/useCanSeeFullPhone";
+import { useCanSeeCustomerPhone } from "@/hooks/useCanSeeCustomerPhone";
 import { supabase } from "@/lib/supabaseClient";
 import { maskPhoneNumber } from "@/utils/phoneMasking";
 
@@ -41,7 +41,7 @@ interface HalfPaidEnrollment {
 }
 
 export function HalfPaidTracker() {
-  const canSeeFullPhone = useCanSeeFullPhone();
+  const canSeeFullPhone = useCanSeeCustomerPhone();
   const [enrollments, setEnrollments] = useState<HalfPaidEnrollment[]>([]);
   const [loading, setLoading] = useState(true);
   const { toast } = useToast();

@@ -45,6 +45,7 @@ import {
   Loader2,
   Map,
   MapPin,
+  Phone,
   Plus,
   PlusCircle,
   Search,
@@ -3464,11 +3465,15 @@ function WeeklyScheduleView({
       : schedules.filter((schedule) => {
           // console.log("Filtering schedule:", schedule, "with searchQuery:", searchQuery);
           let nameMatch = false;
+          let phoneMatch = false;
           if (!schedule?.isTentative) {
             nameMatch = schedule?.learner?.name
               ?.toLowerCase()
               .includes(searchQuery.toLowerCase());
-            return nameMatch;
+            phoneMatch = schedule?.learner?.phone
+              ?.toLowerCase()
+              .includes(searchQuery.toLowerCase());
+            return nameMatch || phoneMatch;
           } else {
             const tentativeDetails = schedule.tentative_details || {};
             // console.log("Filtering tentativeDetails:", tentativeDetails);
@@ -3479,10 +3484,13 @@ function WeeklyScheduleView({
               tentativeDetails?.leadName
                 ?.toLowerCase()
                 .includes(searchQuery.toLowerCase());
+            phoneMatch = tentativeDetails?.phone
+              ?.toLowerCase()
+              .includes(searchQuery.toLowerCase());
             const descriptionMatch = tentativeDetails?.description
               ?.toLowerCase()
               .includes(searchQuery.toLowerCase());
-            return nameMatch || descriptionMatch;
+            return nameMatch || phoneMatch || descriptionMatch;
           }
           return false;
         });
@@ -4014,6 +4022,13 @@ function WeeklyScheduleView({
                                       </div>
                                       <div className="text-xs">
                                         <span className="font-semibold">
+                                          Phone:
+                                        </span>{" "}
+                                        {schedule.tentative_details?.phone ||
+                                          "N/A"}
+                                      </div>
+                                      <div className="text-xs">
+                                        <span className="font-semibold">
                                           Desc:
                                         </span>{" "}
                                         {schedule.tentative_details
@@ -4049,6 +4064,12 @@ function WeeklyScheduleView({
                                           Learner:
                                         </span>{" "}
                                         {schedule.learner?.name || "N/A"}
+                                      </div>
+                                      <div className="text-xs">
+                                        <span className="font-semibold">
+                                          Phone:
+                                        </span>{" "}
+                                        {schedule.learner?.phone || "N/A"}
                                       </div>
 
                                       {/* Map Link */}
@@ -6456,7 +6477,13 @@ export const InstructorSchedulePage = () => {
     return instructor.schedules.filter((s) => {
       const name =
         (s.isTentative ? s.tentative_details?.name : s.learner?.name) || "";
-      return !searchQuery.trim() || name.toLowerCase().includes(q);
+      const phone =
+        (s.isTentative ? s.tentative_details?.phone : s.learner?.phone) || "";
+      return (
+        !searchQuery.trim() ||
+        name.toLowerCase().includes(q) ||
+        phone.includes(q)
+      );
     });
   }, [instructor, searchQuery]);
 
@@ -6835,6 +6862,20 @@ export const InstructorSchedulePage = () => {
                             <span className="text-xs font-black uppercase tracking-tight">
                               {format12Hour(schedule.start_time)} —{" "}
                               {format12Hour(schedule.end_time)}
+                            </span>
+                          </div>
+
+                          {/* 2b. PHONE -- arrives masked from the server unless
+                              the viewer holds "View Unmasked Customer Phone
+                              Numbers" (or is a super admin). */}
+                          <div className="flex items-center gap-2 text-slate-700">
+                            <Phone className="h-3.5 w-3.5 text-slate-400" />
+                            <span className="text-xs font-semibold tracking-tight">
+                              {display(
+                                isTentative
+                                  ? details.phone
+                                  : schedule.learner?.phone,
+                              )}
                             </span>
                           </div>
 
