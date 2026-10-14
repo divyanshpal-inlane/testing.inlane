@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Instructor Approval - Types and Mock Data
  * Handles document review and instructor approval workflow
  */
@@ -729,13 +729,6 @@ const getAvatarColorHelper = (name: string): string => {
 const transformApiDocumentToUI = (apiDoc: ApiDocumentDetail): DocumentReview => {
   const sides: Record<string, DocumentFile | undefined> = {};
 
-  // Log raw API document for debugging
-  console.log(`[TRANSFORM] Processing document: ${apiDoc.id} (${apiDoc.type})`, {
-    sidesCount: apiDoc.sides?.length || 0,
-    sidesData: apiDoc.sides,
-    label: apiDoc.label,
-  });
-
   // Track if we detect duplicate URLs (backend bug)
   const urlMap: Record<string, string> = {};
 
@@ -746,12 +739,7 @@ const transformApiDocumentToUI = (apiDoc: ApiDocumentDetail): DocumentReview => 
       
       // Check if this URL was already assigned to a different side
       if (urlMap.front === fileUrl && sideKey === "back") {
-        console.warn(
-          `[TRANSFORM] ⚠️ DUPLICATE URL DETECTED for ${apiDoc.label} (${apiDoc.id}):\n` +
-          `Front URL: ${urlMap.front}\n` +
-          `Back URL: ${fileUrl}\n` +
-          `Both sides have the SAME URL - This is a backend issue!`
-        );
+        // Duplicate URL detected - backend issue
       }
       
       urlMap[sideKey] = fileUrl;
@@ -763,17 +751,7 @@ const transformApiDocumentToUI = (apiDoc: ApiDocumentDetail): DocumentReview => 
         url: fileUrl,
         uploadedAt: side.uploaded_at,
       };
-      console.log(`[TRANSFORM] ✅ Added ${sideKey} side with URL: ${fileUrl}`);
     }
-  });
-
-  console.log(`[TRANSFORM] Final sides for ${apiDoc.id}:`, { 
-    sidesCount: Object.keys(sides).length, 
-    sides: Object.keys(sides),
-    hasFront: !!sides.front,
-    hasBack: !!sides.back,
-    frontUrl: sides.front?.url?.substring(0, 80) + "...",
-    backUrl: sides.back?.url?.substring(0, 80) + "...",
   });
 
   return {
@@ -799,8 +777,6 @@ export async function verifyDocument(instructorId: string, documentId: string): 
     throw new Error("No authentication token. Please login again.");
   }
 
-  console.log(`[VERIFY_DOC_API] Verifying document ${documentId} for instructor ${instructorId}`);
-
   const url = `${BACKEND_API}/admin/instructors/${instructorId}/documents/${documentId}/verify`;
 
   const response = await fetch(url, {
@@ -813,7 +789,15 @@ export async function verifyDocument(instructorId: string, documentId: string): 
   });
 
   if (!response.ok) {
-    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+    try {
+      const errorData = await response.json();
+      throw new Error(errorData.message || "Failed to verify document");
+    } catch (err) {
+      if (err instanceof Error) {
+        throw err;
+      }
+      throw new Error("Failed to verify document");
+    }
   }
 
   const apiData = await response.json();
@@ -821,9 +805,6 @@ export async function verifyDocument(instructorId: string, documentId: string): 
   if (!apiData.success) {
     throw new Error(apiData.message || "Failed to verify document");
   }
-
-  console.log(`[VERIFY_DOC_API] ✅ Document ${documentId} verified successfully`);
-  console.log("[VERIFY_DOC_API] Response:", apiData);
 
   return apiData;
 }
@@ -838,8 +819,6 @@ export async function verifyVideo(instructorId: string, documentId: string): Pro
     throw new Error("No authentication token. Please login again.");
   }
 
-  console.log(`[VERIFY_VIDEO_API] Verifying video ${documentId} for instructor ${instructorId}`);
-
   const url = `${BACKEND_API}/admin/instructors/${instructorId}/documents/${documentId}/verify`;
 
   const response = await fetch(url, {
@@ -852,7 +831,15 @@ export async function verifyVideo(instructorId: string, documentId: string): Pro
   });
 
   if (!response.ok) {
-    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+    try {
+      const errorData = await response.json();
+      throw new Error(errorData.message || "Failed to verify video");
+    } catch (err) {
+      if (err instanceof Error) {
+        throw err;
+      }
+      throw new Error("Failed to verify video");
+    }
   }
 
   const apiData = await response.json();
@@ -860,9 +847,6 @@ export async function verifyVideo(instructorId: string, documentId: string): Pro
   if (!apiData.success) {
     throw new Error(apiData.message || "Failed to verify video");
   }
-
-  console.log(`[VERIFY_VIDEO_API] ✅ Video ${documentId} verified successfully`);
-  console.log("[VERIFY_VIDEO_API] Response:", apiData);
 
   return apiData;
 }
@@ -876,9 +860,6 @@ export async function rejectDocument(instructorId: string, documentId: string, r
   if (!goAccessToken) {
     throw new Error("No authentication token. Please login again.");
   }
-
-  console.log(`[REJECT_DOC_API] Rejecting document ${documentId} for instructor ${instructorId}`);
-  console.log(`[REJECT_DOC_API] Reason: ${reason}, Message: ${message}`);
 
   const url = `${BACKEND_API}/admin/instructors/${instructorId}/documents/${documentId}/reject`;
 
@@ -895,7 +876,15 @@ export async function rejectDocument(instructorId: string, documentId: string, r
   });
 
   if (!response.ok) {
-    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+    try {
+      const errorData = await response.json();
+      throw new Error(errorData.message || "Failed to reject document");
+    } catch (err) {
+      if (err instanceof Error) {
+        throw err;
+      }
+      throw new Error("Failed to reject document");
+    }
   }
 
   const apiData = await response.json();
@@ -903,9 +892,6 @@ export async function rejectDocument(instructorId: string, documentId: string, r
   if (!apiData.success) {
     throw new Error(apiData.message || "Failed to reject document");
   }
-
-  console.log(`[REJECT_DOC_API] ✅ Document ${documentId} rejected successfully`);
-  console.log("[REJECT_DOC_API] Response:", apiData);
 
   return apiData;
 }
@@ -923,9 +909,6 @@ export async function rejectVideo(instructorId: string, videoId: string, reasonC
     throw new Error("No authentication token. Please login again.");
   }
 
-  console.log(`[REJECT_VIDEO_API] Rejecting video ${videoId} for instructor ${instructorId}`);
-  console.log(`[REJECT_VIDEO_API] Reason Code: ${reasonCode}, Message: ${message}`);
-
   const url = `${BACKEND_API}/admin/instructors/${instructorId}/pedal-videos/${videoId}/reject`;
 
   const response = await fetch(url, {
@@ -941,7 +924,15 @@ export async function rejectVideo(instructorId: string, videoId: string, reasonC
   });
 
   if (!response.ok) {
-    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+    try {
+      const errorData = await response.json();
+      throw new Error(errorData.message || "Failed to reject video");
+    } catch (err) {
+      if (err instanceof Error) {
+        throw err;
+      }
+      throw new Error("Failed to reject video");
+    }
   }
 
   const apiData = await response.json();
@@ -949,9 +940,6 @@ export async function rejectVideo(instructorId: string, videoId: string, reasonC
   if (!apiData.success) {
     throw new Error(apiData.message || "Failed to reject video");
   }
-
-  console.log(`[REJECT_VIDEO_API] ✅ Video ${videoId} rejected successfully`);
-  console.log("[REJECT_VIDEO_API] Response:", apiData);
 
   return apiData;
 }
@@ -969,8 +957,6 @@ export async function approveStage1Documents(instructorId: string): Promise<any>
     throw new Error("No authentication token. Please login again.");
   }
 
-  console.log(`[APPROVE_STAGE1_API] Approving all Stage 1 documents for instructor ${instructorId}`);
-
   const url = `${BACKEND_API}/admin/instructors/${instructorId}/documents/approve`;
 
   const response = await fetch(url, {
@@ -982,7 +968,15 @@ export async function approveStage1Documents(instructorId: string): Promise<any>
   });
 
   if (!response.ok) {
-    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+    try {
+      const errorData = await response.json();
+      throw new Error(errorData.message || "Failed to approve Stage 1 documents");
+    } catch (err) {
+      if (err instanceof Error) {
+        throw err;
+      }
+      throw new Error("Failed to approve Stage 1 documents");
+    }
   }
 
   const apiData = await response.json();
@@ -990,9 +984,6 @@ export async function approveStage1Documents(instructorId: string): Promise<any>
   if (!apiData.success) {
     throw new Error(apiData.message || "Failed to approve Stage 1 documents");
   }
-
-  console.log(`[APPROVE_STAGE1_API] ✅ Stage 1 documents approved successfully for instructor ${instructorId}`);
-  console.log("[APPROVE_STAGE1_API] Response:", apiData);
 
   return apiData;
 }
@@ -1009,8 +1000,6 @@ export async function approveStage2(instructorId: string): Promise<any> {
     throw new Error("No authentication token. Please login again.");
   }
 
-  console.log(`[APPROVE_STAGE2_API] Approving Stage 2 for instructor ${instructorId}`);
-
   const url = `${BACKEND_API}/admin/instructors/${instructorId}/approve`;
 
   const response = await fetch(url, {
@@ -1022,7 +1011,15 @@ export async function approveStage2(instructorId: string): Promise<any> {
   });
 
   if (!response.ok) {
-    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+    try {
+      const errorData = await response.json();
+      throw new Error(errorData.message || "Failed to approve Stage 2");
+    } catch (err) {
+      if (err instanceof Error) {
+        throw err;
+      }
+      throw new Error("Failed to approve Stage 2");
+    }
   }
 
   const apiData = await response.json();
@@ -1030,9 +1027,6 @@ export async function approveStage2(instructorId: string): Promise<any> {
   if (!apiData.success) {
     throw new Error(apiData.message || "Failed to approve Stage 2");
   }
-
-  console.log(`[APPROVE_STAGE2_API] ✅ Stage 2 approved successfully for instructor ${instructorId}`);
-  console.log("[APPROVE_STAGE2_API] Response:", apiData);
 
   return apiData;
 }
@@ -1049,8 +1043,6 @@ export async function rejectInstructor(instructorId: string): Promise<any> {
     throw new Error("No authentication token. Please login again.");
   }
 
-  console.log(`[REJECT_INSTRUCTOR_API] Rejecting instructor ${instructorId}`);
-
   const url = `${BACKEND_API}/admin/instructors/${instructorId}/reject`;
 
   const response = await fetch(url, {
@@ -1062,7 +1054,15 @@ export async function rejectInstructor(instructorId: string): Promise<any> {
   });
 
   if (!response.ok) {
-    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+    try {
+      const errorData = await response.json();
+      throw new Error(errorData.message || "Failed to reject instructor");
+    } catch (err) {
+      if (err instanceof Error) {
+        throw err;
+      }
+      throw new Error("Failed to reject instructor");
+    }
   }
 
   const apiData = await response.json();
@@ -1070,9 +1070,6 @@ export async function rejectInstructor(instructorId: string): Promise<any> {
   if (!apiData.success) {
     throw new Error(apiData.message || "Failed to reject instructor");
   }
-
-  console.log(`[REJECT_INSTRUCTOR_API] ✅ Instructor rejected successfully: ${instructorId}`);
-  console.log("[REJECT_INSTRUCTOR_API] Response:", apiData);
 
   return apiData;
 }
@@ -1150,10 +1147,6 @@ export const useFetchInstructorDocuments = (
         throw new Error("No authentication token. Please login again.");
       }
 
-      console.log(
-        `[APPROVAL API] Fetching documents for instructor ${instructorId} with stage=${stage}`
-      );
-
       const url = `${BACKEND_API}/admin/instructors/${instructorId}/documents?stage=${stage}`;
 
       const response = await fetch(url, {
@@ -1181,10 +1174,6 @@ export const useFetchInstructorDocuments = (
       if (isVideosStage && apiData.document_details) {
         videosData = apiData.document_details.map(apiDoc => {
           const videoUrl = apiDoc.sides?.[0]?.file_url || "";
-          console.log(
-            `[VIDEO-TRANSFORM] Processing video: ${apiDoc.id} (${apiDoc.label})\n` +
-            `URL: ${videoUrl}`
-          );
           return {
             id: apiDoc.id,
             title: apiDoc.label || "Pedal Video",
@@ -1199,13 +1188,7 @@ export const useFetchInstructorDocuments = (
           };
         });
       }
-
-      console.log(
-        `[APPROVAL API] ✅ Fetched ${isVideosStage ? videosData.length : apiData.document_details?.length || 0} items`
-      );
-      console.log("[APPROVAL API] Response:", apiData);
       if (isVideosStage) {
-        console.log("[APPROVAL API] Videos transformed:", videosData);
       }
 
       // Default verification checklist for Stage 2 (backend doesn't provide this)

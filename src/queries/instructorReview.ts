@@ -99,8 +99,7 @@ export const useReviewInstructors = (stage: "all" | "documents" | "pedal_videos"
         }
 
         const data = await response.json();
-        console.log(`[REVIEW API] ✅ Successfully fetched ${data.instructors?.length || 0} instructors for stage: ${stage}`);
-        console.log("[REVIEW API] Response data:", data);
+    
         
         return {
           counts: data.counts || {

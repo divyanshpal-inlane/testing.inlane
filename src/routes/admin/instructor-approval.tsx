@@ -23,6 +23,7 @@ import {
   type VideoViewMode,
 } from "@/queries/instructorApproval";
 import { formatDistanceToNow, parseISO } from "date-fns";
+import { showSuccessToast, showErrorToast } from "@/lib/toastNotification";
 
 /**
  * Generate initials from instructor name
@@ -137,18 +138,14 @@ export default function InstructorApprovalPage(): JSX.Element {
   useEffect(() => {
     const selectedReason = REJECTION_REASONS.find((r) => r.id === selectedRejectionReason);
     if (selectedReason) {
-      setRejectionMessage(selectedReason.suggestedMessage);
-      console.log(`[REJECTION_MODAL] Auto-filled message for reason: ${selectedReason.label}`);
-    }
+      setRejectionMessage(selectedReason.suggestedMessage); }
   }, [selectedRejectionReason]);
 
   // Auto-fill video rejection message based on selected reason
   useEffect(() => {
     const selectedReason = PEDAL_VIDEO_REJECTION_REASONS.find((r) => r.id === selectedVideoRejectionReason);
     if (selectedReason) {
-      setVideoRejectionMessage(selectedReason.suggestedMessage);
-      console.log(`[VIDEO_REJECTION_MODAL] Auto-filled message for reason: ${selectedReason.label}`);
-    }
+      setVideoRejectionMessage(selectedReason.suggestedMessage); }
   }, [selectedVideoRejectionReason]);
   
   // ? NOW we can have conditional returns AFTER all hooks
@@ -225,16 +222,13 @@ export default function InstructorApprovalPage(): JSX.Element {
     if (!id) return;
     
     try {
-      console.log(`[UI] Admin approving document ${docId}`);
       const response = await verifyDocument(id, docId);
-      console.log("[UI] Document verified successfully:", response);
       
       setDocumentStatuses((prev) => ({ ...prev, [docId]: "approved" }));
-      alert(`? Document approved and verified!`);
+      showSuccessToast("Document Verified Successfully!", "Document has been approved.");
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to approve document";
-      console.error("[UI] Error approving document:", errorMsg);
-      alert(`? Error: ${errorMsg}`);
+      showErrorToast("Error", errorMsg);
     }
   };
 
@@ -407,17 +401,14 @@ export default function InstructorApprovalPage(): JSX.Element {
     if (!id) return;
 
     try {
-      console.log("[REJECT_DOC] Rejecting document:", { docId, reason, message });
       const response = await rejectDocument(id, docId, backendTag, message);
-      console.log("[REJECT_DOC] API Response: :", response);
 
       // Update document status to rejected
       setDocumentStatuses((prev) => ({ ...prev, [docId]: "rejected" }));
-      alert(`? Document rejected! Instructor will be notified to re-upload.`);
+      showSuccessToast("Document Rejected!", "Instructor will be notified to re-upload.");
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to reject document";
-      console.error("[REJECT_DOC] Error:", errorMsg);
-      alert(`? Error: ${errorMsg}`);
+      showErrorToast("Error", errorMsg);
     } finally {
       // Close modal and reset states
       setIsRejectionModalOpen(false);
@@ -441,19 +432,15 @@ export default function InstructorApprovalPage(): JSX.Element {
     if (!id) return;
 
     try {
-      console.log("[UI] Admin rejecting video:", { videoId, reasonCode, message });
-      
       // Use the message as provided, or empty string if not provided
       const response = await rejectVideo(id, videoId, reasonCode, message);
-      console.log("[UI] Video rejected successfully:", response);
 
       // Update video status to rejected
       setVideoStatuses((prev) => ({ ...prev, [videoId]: "rejected" }));
-      alert(`✓ Video rejected! Instructor will be notified to re-upload.`);
+      showSuccessToast("Video Rejected!", "Instructor will be notified to re-upload.");
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to reject video";
-      console.error("[UI] Error rejecting video:", errorMsg);
-      alert(`✗ Error: ${errorMsg}`);
+      showErrorToast("Error", errorMsg);
     } finally {
       // Close modal and reset states
       setIsVideoRejectionModalOpen(false);
@@ -468,16 +455,13 @@ export default function InstructorApprovalPage(): JSX.Element {
     if (!id) return;
 
     try {
-      console.log(`[UI] Admin approving video ${videoId}`);
       const response = await verifyVideo(id, videoId);
-      console.log("[UI] Video verified successfully:", response);
 
       setVideoStatuses((prev) => ({ ...prev, [videoId]: "approved" }));
-      alert(`? Video approved and verified!`);
+      showSuccessToast("Video Verified Successfully!", "Video has been approved.");
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to approve video";
-      console.error("[UI] Error approving video:", errorMsg);
-      alert(`? Error: ${errorMsg}`);
+      showErrorToast("Error", errorMsg);
     }
   };
 
@@ -485,9 +469,7 @@ export default function InstructorApprovalPage(): JSX.Element {
     if (!id) return;
 
     try {
-      console.log(`[UI] Admin approving all Stage 1 documents for instructor ${id}`);
       const response = await approveStage1Documents(id);
-      console.log("[UI] Stage 1 documents approved successfully:", response);
 
       // Update all document statuses to approved
       const updatedStatuses: Record<string, ApprovalStatus> = {};
@@ -496,11 +478,15 @@ export default function InstructorApprovalPage(): JSX.Element {
       });
       setDocumentStatuses(updatedStatuses);
 
-      alert(`? All Stage 1 documents approved! Instructor marked as active for Stage 2.`);
+      showSuccessToast(
+         "All Stage 1 Documents Approved!",
+         "Instructor marked as active for Stage 2."
+       );
+      // Navigate back to the instructor review page 
+      navigate("/admin/instructors?tab=review");
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to approve Stage 1 documents";
-      console.error("[UI] Error approving Stage 1 documents:", errorMsg);
-      alert(`? Error: ${errorMsg}`);
+      showErrorToast("Error", errorMsg);
     }
   };
 
@@ -508,15 +494,17 @@ export default function InstructorApprovalPage(): JSX.Element {
     if (!id) return;
 
     try {
-      console.log(`[UI] Admin approving Stage 2 for instructor ${id}`);
       const response = await approveStage2(id);
-      console.log("[UI] Stage 2 approved successfully:", response);
 
-      alert(`✓ Stage 2 approved! Instructor is now enabled for matching.`);
+      showSuccessToast(
+         "Stage 2 Approved!",
+         "Instructor is now enabled for matching."
+       );
+      // Navigate back to the instructor review page 
+      navigate("/admin/instructors?tab=review");
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to approve Stage 2";
-      console.error("[UI] Error approving Stage 2:", errorMsg);
-      alert(`✗ Error: ${errorMsg}`);
+      showErrorToast("Error", errorMsg);
     }
   };
 
@@ -524,15 +512,17 @@ export default function InstructorApprovalPage(): JSX.Element {
     if (!id) return;
 
     try {
-      console.log(`[UI] Admin rejecting instructor ${id}`);
       const response = await rejectInstructor(id);
-      console.log("[UI] Instructor rejected successfully:", response);
 
-      alert(`✓ Instructor rejected! Status updated to rejected.`);
+      showSuccessToast(
+         "Instructor Rejected!",
+         "Status updated to rejected."
+       );
+      // Navigate back to the instructor review page 
+      navigate("/admin/instructors?tab=review");
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to reject instructor";
-      console.error("[UI] Error rejecting instructor:", errorMsg);
-      alert(`✗ Error: ${errorMsg}`);
+      showErrorToast("Error", errorMsg);
     }
   };
 
@@ -735,13 +725,15 @@ export default function InstructorApprovalPage(): JSX.Element {
                             className="max-w-full max-h-full object-contain drop-shadow-lg"
                             onLoad={() => {
                               console.log(
-                                `[IMAGE] ? Successfully loaded ${selectedSide} for ${getDocumentDisplayName(currentDocument.type)}\n` +
+                                `[IMAGE] ? Successfully loaded ${selectedSide} for ${getDocumentDisplayName(currentDocument.type)}
+` +
                                 `URL: ${currentDocumentSide.url}`
                               );
                             }}
                             onError={(e) => {
                               console.error(
-                                `[IMAGE] ? Failed to load ${selectedSide} for ${getDocumentDisplayName(currentDocument.type)}\n` +
+                                `[IMAGE] ? Failed to load ${selectedSide} for ${getDocumentDisplayName(currentDocument.type)}
+` +
                                 `URL: ${currentDocumentSide.url}`,
                                 e
                               );
