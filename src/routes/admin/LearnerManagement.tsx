@@ -24,7 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
-import { useCanSeeFullPhone } from "@/hooks/useCanSeeFullPhone";
+import { useCanSeeCustomerPhone } from "@/hooks/useCanSeeCustomerPhone";
 import { supabase } from "@/lib/supabaseClient";
 import { useCourses } from "@/queries/payment";
 import { maskPhoneNumber } from "@/utils/phoneMasking";
@@ -254,7 +254,7 @@ export default function LearnerManagement() {
   // "user" accounts the field only shows it masked, admins / super admins see
   // it in full.
   const [phoneFromCrm, setPhoneFromCrm] = useState(false);
-  const canSeeFullPhone = useCanSeeFullPhone();
+  const canSeeFullPhone = useCanSeeCustomerPhone();
   const maskCrmPhone = phoneFromCrm && !canSeeFullPhone;
   const [isPaymentDialogOpen, setIsPaymentDialogOpen] = useState(false);
   const { toast } = useToast();

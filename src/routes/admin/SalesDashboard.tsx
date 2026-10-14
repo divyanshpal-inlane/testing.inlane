@@ -33,6 +33,7 @@ import {
   TentativeBookingModal,
 } from "@/components/admin/sales-dashboard/TentativeBookingModal";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { useCanSeeCustomerPhone } from "@/hooks/useCanSeeCustomerPhone";
 import type {
   BlockDetail,
   InstructorRow,
@@ -72,6 +73,7 @@ import { supabase } from "@/lib/supabaseClient";
 import { cn } from "@/lib/utils";
 import { useCurrentAdmin } from "@/queries/adminPermissions";
 import { useCurrentUser } from "@/queries/userManagement";
+import { maskPhoneNumber } from "@/utils/phoneMasking";
 
 const LocationSearch = lazy(
   () => import("@/components/admin/sales-dashboard/LocationSearch"),
@@ -725,6 +727,9 @@ function buildSlotCard(row: {
   instructor: string;
   learner: string;
   lessonNumber: number | null;
+  // Already masked (or not) by the caller according to the viewer's
+  // "View Unmasked Customer Phone Numbers" permission.
+  phone: string;
   location: string;
   course: string;
   description: string;
@@ -742,6 +747,7 @@ function buildSlotCard(row: {
     },
     { label: "Instructor", value: row.instructor || "N/A" },
     { label: "Learner", value: learnerWithClass || "N/A" },
+    { label: "Phone", value: row.phone || "N/A" },
     { label: "Location", value: row.location || "N/A" },
     { label: "Course", value: row.course || "N/A" },
     { label: "Description", value: row.description || "N/A" },
@@ -1442,6 +1448,14 @@ export default function SalesDashboard() {
     useCurrentAdmin();
   const { data: currentUser, isLoading: currentUserLoading } = useCurrentUser();
   const currentUserName = currentAdmin?.name || currentUser?.name || "";
+  // Customer phones show masked unless this account holds "View Unmasked
+  // Customer Phone Numbers" (or is a super admin).
+  const canSeeCustomerPhone = useCanSeeCustomerPhone();
+  const displayPhone = useCallback(
+    (phone: string) =>
+      phone ? (canSeeCustomerPhone ? phone : maskPhoneNumber(phone)) : "",
+    [canSeeCustomerPhone],
+  );
   const rosterIdentityReady = !currentAdminLoading && !currentUserLoading;
   const rosterOwner = currentAdmin?.id
     ? `admin:${currentAdmin.id}`
@@ -3174,6 +3188,7 @@ export default function SalesDashboard() {
                   instructor: name,
                   learner: cover.learnerName,
                   lessonNumber: cover.lessonNumber,
+                  phone: displayPhone(cover.learnerPhone),
                   location: cover.area,
                   course: cover.courseName,
                   // Real classes carry no tentative-only fields — Instructor
@@ -3223,6 +3238,7 @@ export default function SalesDashboard() {
                     instructor: name,
                     learner: cover.learnerName,
                     lessonNumber: cover.lessonNumber,
+                    phone: displayPhone(cover.learnerPhone),
                     location: cover.area,
                     course: cover.courseName,
                     description: "",
@@ -3316,6 +3332,7 @@ export default function SalesDashboard() {
               instructor: name,
               learner: cover.learnerName,
               lessonNumber: cover.lessonNumber,
+              phone: displayPhone(cover.learnerPhone),
               location: cover.area,
               // Instructor Management's tentative card shows the hold's
               // description (not a course) plus its lead and payment info.
@@ -3447,6 +3464,7 @@ export default function SalesDashboard() {
     addingSlotMode,
     replacingSlotIndex,
     currentUserName,
+    displayPhone,
     timeStarts,
   ]);
 

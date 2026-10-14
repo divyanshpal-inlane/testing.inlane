@@ -547,11 +547,12 @@ async function validateSlots(instructorId: string, rawSlots: unknown) {
 }
 
 // Instructor Management schedule read. Returns the same shape the module's old
-// `fetchAdminSchedules` call produced, but with phone stripped server-side from
-// BOTH the joined learner and the `tentative_details` JSON, so learner/customer
-// phone numbers never leave the server for this module.
+// `fetchAdminSchedules` call produced. The phone of the joined learner and the
+// one inside the `tentative_details` JSON are masked server-side unless the
+// caller may see customer phones (see getCaller), so an unpermitted browser
+// never receives a real number.
 const SCHEDULE_PAGE_SIZE = 1000;
-async function fetchSchedules(instructorId: string) {
+async function fetchSchedules(instructorId: string, canSeePhones: boolean) {
   const rows: Record<string, unknown>[] = [];
   for (let from = 0; ; from += SCHEDULE_PAGE_SIZE) {
     const { data, error } = await supabase
@@ -561,7 +562,7 @@ async function fetchSchedules(instructorId: string) {
         Lesson(id, number),
         Instructor(id_instructor, name),
         Courses(id, name, total_lessons),
-        learner:learner_id(id, name, pick_up_location, address_lat, address_lng)`,
+        learner:learner_id(id, name, phone, pick_up_location, address_lat, address_lng)`,
       )
       .eq("instructor_id", instructorId)
       .order("date", { ascending: true })
@@ -579,16 +580,18 @@ async function fetchSchedules(instructorId: string) {
   }
 
   const sanitized = rows.map((row) => {
-    const { tentative_details: details, ...rest } = row;
+    const { tentative_details: details, learner, ...rest } = row;
     let safeDetails = details;
-    if (details && typeof details === "object") {
-      const { phone: _phone, ...withoutPhone } = details as Record<
-        string,
-        unknown
-      >;
-      safeDetails = withoutPhone;
+    if (!canSeePhones && details && typeof details === "object") {
+      const d = details as Record<string, unknown>;
+      safeDetails = d.phone ? { ...d, phone: maskPhone(d.phone) } : d;
     }
-    return { ...rest, tentative_details: safeDetails };
+    let safeLearner = learner;
+    if (!canSeePhones && learner && typeof learner === "object") {
+      const l = learner as Record<string, unknown>;
+      safeLearner = l.phone ? { ...l, phone: maskPhone(l.phone) } : l;
+    }
+    return { ...rest, learner: safeLearner, tentative_details: safeDetails };
   });
 
   return { rows: sanitized };
@@ -815,18 +818,35 @@ async function updateTentativeSchedule(body: {
 }
 
 // Only users with an Admin record may read CRM data or validate booking slots.
+// Permission (managed in User / Admin Management, like "View Unmasked Phone
+// Numbers" which is for the ops team and is not touched here) that allows
+// seeing customer / lead phone numbers unmasked.
+const CUSTOMER_PHONE_PERMISSION = "view_unmasked_customer_phone_numbers";
+
+// Same format the app uses everywhere: nine X's and the last two digits.
+function maskPhone(value: unknown): string {
+  const digits = String(value ?? "").replace(/\D/g, "");
+  return digits.length < 2 ? "XXXXXXXXXX" : `XXXXXXXXX${digits.slice(-2)}`;
+}
+
 // Any logged-in staff account may use this function: an "Admin" row (which
 // includes super admins, flagged is_super_admin) or a "User" row (team members
 // created by an admin). Learners and instructors are not staff and are refused.
 // Phones are stored in several formats, so match on every common variant.
-async function isAuthorized(authHeader: string | null) {
-  if (!authHeader?.startsWith("Bearer ")) return false;
+// `canSeePhones` is true for super admins and for accounts that were granted
+// CUSTOMER_PHONE_PERMISSION; everyone else gets masked numbers from this
+// function, so an unpermitted browser never receives a real number.
+async function getCaller(
+  authHeader: string | null,
+): Promise<{ authorized: boolean; canSeePhones: boolean }> {
+  const denied = { authorized: false, canSeePhones: false };
+  if (!authHeader?.startsWith("Bearer ")) return denied;
   const token = authHeader.replace("Bearer ", "");
   const {
     data: { user },
     error: authError,
   } = await supabase.auth.getUser(token);
-  if (authError || !user?.phone) return false;
+  if (authError || !user?.phone) return denied;
 
   const digits = user.phone.replace(/\D/g, "");
   const last10 = digits.slice(-10);
@@ -834,15 +854,50 @@ async function isAuthorized(authHeader: string | null) {
     ...new Set([user.phone, digits, last10, `91${last10}`, `+91${last10}`]),
   ];
 
-  for (const table of ["Admin", "User"] as const) {
-    const { data, error } = await supabase
-      .from(table)
-      .select("id")
-      .in("phone", variants)
-      .limit(1);
-    if (!error && data && data.length > 0) return true;
+  let authorized = false;
+  let canSeePhones = false;
+
+  const { data: admins } = await supabase
+    .from("Admin")
+    .select("id, is_super_admin")
+    .in("phone", variants)
+    .limit(1);
+  const admin = admins?.[0];
+  if (admin) {
+    authorized = true;
+    if (admin.is_super_admin) {
+      canSeePhones = true;
+    } else {
+      const { data: perms } = await supabase
+        .from("admin_permissions")
+        .select("permission")
+        .eq("admin_id", admin.id)
+        .eq("permission", CUSTOMER_PHONE_PERMISSION)
+        .limit(1);
+      if (perms && perms.length > 0) canSeePhones = true;
+    }
   }
-  return false;
+
+  const { data: users } = await supabase
+    .from("User")
+    .select("id")
+    .in("phone", variants)
+    .limit(1);
+  const staffUser = users?.[0];
+  if (staffUser) {
+    authorized = true;
+    if (!canSeePhones) {
+      const { data: perms } = await supabase
+        .from("user_permissions")
+        .select("permission")
+        .eq("user_id", staffUser.id)
+        .eq("permission", CUSTOMER_PHONE_PERMISSION)
+        .limit(1);
+      if (perms && perms.length > 0) canSeePhones = true;
+    }
+  }
+
+  return { authorized, canSeePhones };
 }
 
 serve(async (req) => {
@@ -855,8 +910,8 @@ serve(async (req) => {
       return json(405, { error: "Method Not Allowed" });
     }
 
-    const authorized = await isAuthorized(req.headers.get("Authorization"));
-    if (!authorized) {
+    const caller = await getCaller(req.headers.get("Authorization"));
+    if (!caller.authorized) {
       return json(401, { error: "Unauthorized" });
     }
 
@@ -920,7 +975,7 @@ serve(async (req) => {
         });
       }
       if (action === "schedules") {
-        const result = await fetchSchedules(instructorId);
+        const result = await fetchSchedules(instructorId, caller.canSeePhones);
         if (result.error) {
           return json(400, { success: false, ...result });
         }

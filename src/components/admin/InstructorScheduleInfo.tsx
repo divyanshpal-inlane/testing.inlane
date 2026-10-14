@@ -30,6 +30,9 @@ type ScheduleInfoData = {
   isTentative: boolean;
   tentative_details?: {
     name?: string;
+    // Masked by the edge function unless the viewer holds "View Unmasked
+    // Customer Phone Numbers".
+    phone?: string;
     description?: string;
     paid_info?: string;
     leadName?: string;
@@ -61,8 +64,8 @@ export const SearchInstructorScheduleInfo: React.FC<
   const { data: scheduleData, isLoading } = useQuery({
     queryKey: ["Schedule", instructorId],
     queryFn: async () => {
-      // Phone-free read path: the edge function strips learner and tentative
-      // phone numbers before the browser ever sees them.
+      // Read path through the edge function: learner and tentative phone
+      // numbers arrive masked unless the viewer may see them unmasked.
       const rows = await fetchInstructorModuleSchedules(instructorId);
       return rows as unknown as ScheduleInfoData[];
     },
@@ -92,6 +95,7 @@ export const SearchInstructorScheduleInfo: React.FC<
       schedule.tentative_details?.paid_info
         ?.toLowerCase()
         .includes(searchQuery.toLowerCase()) ||
+      schedule.tentative_details?.phone?.includes(searchQuery) ||
       schedule.tentative_details?.pickup_location
         ?.toLowerCase()
         .includes(searchQuery.toLowerCase()) ||
@@ -183,6 +187,10 @@ export const SearchInstructorScheduleInfo: React.FC<
                           </p>
                         </div>
                         <div>
+                          <p className="text-sm">
+                            <span className="font-medium">Phone:</span>{" "}
+                            {schedule.tentative_details?.phone || "N/A"}
+                          </p>
                           <p className="text-sm">
                             <span className="font-medium">Lead Name:</span>{" "}
                             {schedule.tentative_details?.leadName || "N/A"}

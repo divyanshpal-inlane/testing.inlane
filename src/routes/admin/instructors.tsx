@@ -3464,11 +3464,15 @@ function WeeklyScheduleView({
       : schedules.filter((schedule) => {
           // console.log("Filtering schedule:", schedule, "with searchQuery:", searchQuery);
           let nameMatch = false;
+          let phoneMatch = false;
           if (!schedule?.isTentative) {
             nameMatch = schedule?.learner?.name
               ?.toLowerCase()
               .includes(searchQuery.toLowerCase());
-            return nameMatch;
+            phoneMatch = schedule?.learner?.phone
+              ?.toLowerCase()
+              .includes(searchQuery.toLowerCase());
+            return nameMatch || phoneMatch;
           } else {
             const tentativeDetails = schedule.tentative_details || {};
             // console.log("Filtering tentativeDetails:", tentativeDetails);
@@ -3479,10 +3483,13 @@ function WeeklyScheduleView({
               tentativeDetails?.leadName
                 ?.toLowerCase()
                 .includes(searchQuery.toLowerCase());
+            phoneMatch = tentativeDetails?.phone
+              ?.toLowerCase()
+              .includes(searchQuery.toLowerCase());
             const descriptionMatch = tentativeDetails?.description
               ?.toLowerCase()
               .includes(searchQuery.toLowerCase());
-            return nameMatch || descriptionMatch;
+            return nameMatch || phoneMatch || descriptionMatch;
           }
           return false;
         });
@@ -4014,6 +4021,13 @@ function WeeklyScheduleView({
                                       </div>
                                       <div className="text-xs">
                                         <span className="font-semibold">
+                                          Phone:
+                                        </span>{" "}
+                                        {schedule.tentative_details?.phone ||
+                                          "N/A"}
+                                      </div>
+                                      <div className="text-xs">
+                                        <span className="font-semibold">
                                           Desc:
                                         </span>{" "}
                                         {schedule.tentative_details
@@ -4049,6 +4063,12 @@ function WeeklyScheduleView({
                                           Learner:
                                         </span>{" "}
                                         {schedule.learner?.name || "N/A"}
+                                      </div>
+                                      <div className="text-xs">
+                                        <span className="font-semibold">
+                                          Phone:
+                                        </span>{" "}
+                                        {schedule.learner?.phone || "N/A"}
                                       </div>
 
                                       {/* Map Link */}
