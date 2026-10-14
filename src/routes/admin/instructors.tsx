@@ -45,6 +45,7 @@ import {
   Loader2,
   Map,
   MapPin,
+  Phone,
   Plus,
   PlusCircle,
   Search,
@@ -6476,7 +6477,13 @@ export const InstructorSchedulePage = () => {
     return instructor.schedules.filter((s) => {
       const name =
         (s.isTentative ? s.tentative_details?.name : s.learner?.name) || "";
-      return !searchQuery.trim() || name.toLowerCase().includes(q);
+      const phone =
+        (s.isTentative ? s.tentative_details?.phone : s.learner?.phone) || "";
+      return (
+        !searchQuery.trim() ||
+        name.toLowerCase().includes(q) ||
+        phone.includes(q)
+      );
     });
   }, [instructor, searchQuery]);
 
@@ -6855,6 +6862,20 @@ export const InstructorSchedulePage = () => {
                             <span className="text-xs font-black uppercase tracking-tight">
                               {format12Hour(schedule.start_time)} —{" "}
                               {format12Hour(schedule.end_time)}
+                            </span>
+                          </div>
+
+                          {/* 2b. PHONE -- arrives masked from the server unless
+                              the viewer holds "View Unmasked Customer Phone
+                              Numbers" (or is a super admin). */}
+                          <div className="flex items-center gap-2 text-slate-700">
+                            <Phone className="h-3.5 w-3.5 text-slate-400" />
+                            <span className="text-xs font-semibold tracking-tight">
+                              {display(
+                                isTentative
+                                  ? details.phone
+                                  : schedule.learner?.phone,
+                              )}
                             </span>
                           </div>
 

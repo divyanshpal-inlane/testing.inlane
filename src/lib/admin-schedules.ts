@@ -48,8 +48,10 @@ export type AdminSchedule = Awaited<
 >[number];
 
 // Instructor-module reads go through the slot-booking edge function instead of
-// fetchAdminSchedules: it strips learner phone numbers (and tentative_details
-// .phone) server-side, so no customer phone number ever reaches the browser.
+// fetchAdminSchedules: it masks learner phone numbers (and tentative_details
+// .phone) server-side unless the caller is a super admin or holds "View
+// Unmasked Customer Phone Numbers", so an unpermitted browser never receives a
+// real number.
 export async function fetchInstructorModuleSchedules(
   instructorId: string,
   signal?: AbortSignal,
