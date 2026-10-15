@@ -363,11 +363,12 @@ export default function InstructorApprovalPage(): JSX.Element {
         reuploadBackFileInputRef.current.value = "";
       }
 
+      showSuccessToast("Document Reuploaded Successfully");
       setIsReuploadLoading(false);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to reupload document";
       console.error("Reupload error:", errorMsg);
-      alert(`Error: ${errorMsg}`);
+      showErrorToast("Error", errorMsg);
       setIsReuploadLoading(false);
     }
   };
