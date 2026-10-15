@@ -137,7 +137,7 @@
 .shell {
   max-width: 1820px;
   margin: 0 auto;
-  padding: 20px 24px 64px;
+  padding: 8px 12px 64px;
 }
 
 /* --- Two-column body: calendar + slot panel -------------------------------
@@ -149,6 +149,8 @@
   display: flex;
   align-items: flex-start;
   gap: 20px;
+  /* Breathing room between the sticky top bar and the content below it. */
+  margin-top: 10px;
 }
 
 .shell-main {
@@ -459,10 +461,20 @@
   top: 0;
   z-index: 30;
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  background: linear-gradient(var(--gc-bg) 78%, rgba(255, 255, 255, 0));
-  padding: 8px 0 18px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  /* Opaque (was a fade-out gradient): the transparent bottom fifth let the
+     timetable scrolling underneath show through as a strip right above the
+     sticky instructor nameplate. */
+  background: var(--gc-bg);
+  padding: 4px 0 6px;
+  /* Soft shadow along the bottom edge so the bar reads as floating above the
+     timetables scrolling beneath it. */
+  box-shadow: 0 3px 6px -2px rgba(0, 0, 0, 0.12);
+  --gc-control-h: 28px;
 }
 
 /* Holds the Back button, month nav, and all the filter/search/theme
@@ -471,7 +483,8 @@
 .topbar-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
+  flex: none;
   gap: 20px;
   flex-wrap: wrap;
 }
@@ -495,6 +508,14 @@
   letter-spacing: -0.3px;
   color: var(--gc-text);
   text-align: center;
+}
+
+/* Date navigation: left side of the single-row top bar; the legend and
+   filter controls (.topbar-row) take the remaining width on the right. */
+.topbar-title-row {
+  display: flex;
+  align-items: center;
+  flex: none;
 }
 
 .cal-nav {
@@ -567,7 +588,7 @@
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 8px;
+  gap: 4px;
 }
 
 .controls-row {
@@ -581,10 +602,12 @@
    above the filter/theme/reset/help controls. */
 .topbar-legend {
   display: flex;
+  flex: 1;
+  min-width: 0;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: center;
   align-items: center;
-  gap: 4px 12px;
+  gap: 2px 10px;
 }
 
 .search {
@@ -829,7 +852,9 @@
      scroll container, so the Main Grid never grows an internal vertical
      scrollbar. `overflow: auto` is kept for horizontal timeline scrolling and
      the sticky Instructor column. Do not reintroduce a max-height here. */
-  overflow: auto;
+  /* `clip`, not `auto`: an auto/hidden overflow would make this the sticky
+     scroll container, so the nameplates below would never stick to the page. */
+  overflow: clip;
   min-height: 55vh;
   border: 1px solid var(--gc-border);
   border-radius: 12px;
@@ -1021,6 +1046,57 @@
 .row-select:hover {
   border-color: var(--gc-blue);
   background: var(--gc-blue-bg);
+}
+
+/* One <td> per instructor holds the nameplate and its timetable, so the
+   sticky nameplate is bounded by its own group: it stays pinned while this
+   instructor's timetable scrolls and is pushed out by the next nameplate. */
+.grid tr.instr-group > td {
+  padding: 0 !important;
+  text-align: left;
+}
+
+.instr-plate {
+  --sd-plate-h: 52px;
+  box-sizing: border-box;
+  height: var(--sd-plate-h);
+  display: flex;
+  align-items: center;
+  position: sticky;
+  top: var(--sd-topbar-h, 0px);
+  z-index: 5;
+  background: var(--gc-bg);
+  border-top: 1px solid var(--gc-grid-line-strong);
+  border-bottom: 1px solid var(--gc-grid-line-strong);
+}
+
+.instr-plate .instructor-cell {
+  position: static;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+}
+
+.instr-plate .instructor-cell-inner {
+  flex: 1;
+}
+
+/* The timetable's day-header row (and the blank corner above the time axis)
+   stay pinned directly beneath the sticky nameplate. */
+.instr-group .week-day-head,
+.instr-group .week-axis-corner {
+  position: sticky;
+  top: calc(var(--sd-topbar-h, 0px) + 52px);
+  /* Above the booking-card layer (z-20) inside the cells, which otherwise
+     painted over the date labels while scrolling underneath. */
+  z-index: 30;
+  box-shadow: 0 2px 3px -2px rgba(0, 0, 0, 0.15);
+}
+
+.instr-plate.row-selected {
+  box-shadow: inset 0 0 0 2px var(--gc-blue);
 }
 
 .row-selected td {
@@ -1316,10 +1392,11 @@
   background-size: 8px 8px;
 }
 
-/* Subtle alternating tint per hour (2 columns) for cells with no other
-   state (busy/plain) -- makes it easier to scan which hour a column
-   belongs to without competing with the free/tentative/booked/pending
-   colors, which all take priority over this class (see SlotCellInner). */
+/* Busy tone for every non-free cell with no other state (unavailable, paused,
+   buffer, outside hours). Applied to ALL of them, never on alternating hours:
+   free cells are white, so any unshaded busy cell reads as bookable. The
+   free/tentative/booked/pending colors take priority over this class (see
+   SlotCellInner). */
 .cell-band {
   background: var(--gc-band-bg);
 }
@@ -1428,7 +1505,7 @@
   left: 0;
   width: var(--gc-viewport-w, 100%);
   max-width: var(--gc-viewport-w, 100%);
-  overflow: hidden;
+  overflow: clip; /* not hidden: keeps the day header sticky to the page */
   overflow-anchor: none;
   background: var(--gc-detail);
   border-top: 1px solid var(--gc-border);
@@ -1904,7 +1981,7 @@
 }
 
 .swatch.busy {
-  background: var(--gc-bg);
+  background: var(--gc-band-bg);
   border: 1px solid var(--gc-border);
 }
 
@@ -2423,4 +2500,8 @@
 
 .slot-toast-success .slot-toast-close:hover {
   background: var(--gc-green-hover);
+}
+
+.sales-dashboard-root[data-theme="dark"] .topbar {
+  box-shadow: 0 3px 6px -2px rgba(0, 0, 0, 0.5);
 }
