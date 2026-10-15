@@ -24,57 +24,7 @@ interface LocationSearchProps {
   onRetryZones?: () => void;
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
-  theme?: "light" | "dark";
 }
-
-// Google Maps renders its own tiles/UI and ignores page CSS entirely, so the
-// map stays a bright default even inside an otherwise dark-themed page
-// unless a style array is applied explicitly. Standard "night mode" palette.
-const DARK_MAP_STYLE: google.maps.MapTypeStyle[] = [
-  { elementType: "geometry", stylers: [{ color: "#1d2129" }] },
-  { elementType: "labels.text.stroke", stylers: [{ color: "#1d2129" }] },
-  { elementType: "labels.text.fill", stylers: [{ color: "#9aa0a6" }] },
-  {
-    featureType: "administrative",
-    elementType: "geometry",
-    stylers: [{ color: "#3c4043" }],
-  },
-  {
-    featureType: "poi",
-    elementType: "geometry",
-    stylers: [{ color: "#2a2f38" }],
-  },
-  {
-    featureType: "poi.park",
-    elementType: "geometry",
-    stylers: [{ color: "#233326" }],
-  },
-  {
-    featureType: "road",
-    elementType: "geometry",
-    stylers: [{ color: "#38414e" }],
-  },
-  {
-    featureType: "road",
-    elementType: "geometry.stroke",
-    stylers: [{ color: "#212a37" }],
-  },
-  {
-    featureType: "road.highway",
-    elementType: "geometry",
-    stylers: [{ color: "#4b5566" }],
-  },
-  {
-    featureType: "transit",
-    elementType: "geometry",
-    stylers: [{ color: "#2a2f38" }],
-  },
-  {
-    featureType: "water",
-    elementType: "geometry",
-    stylers: [{ color: "#17263c" }],
-  },
-];
 
 interface OverlaySet {
   marker: google.maps.Marker | null;
@@ -108,7 +58,6 @@ export default function LocationSearch({
   onRetryZones,
   collapsed = false,
   onToggleCollapsed,
-  theme = "light",
 }: LocationSearchProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const mapElRef = useRef<HTMLDivElement>(null);
@@ -264,15 +213,6 @@ export default function LocationSearch({
     }
   };
 
-  // The map object above is created once and reused -- toggling the page
-  // theme afterward doesn't recreate it, so its styles need updating live
-  // via setOptions rather than only being set at construction time.
-  useEffect(() => {
-    mapObjRef.current?.setOptions({
-      styles: theme === "dark" ? DARK_MAP_STYLE : [],
-    });
-  }, [theme]);
-
   useEffect(() => {
     if (!maps) return;
     if (collapsed) {
@@ -288,7 +228,6 @@ export default function LocationSearch({
         mapTypeControl: false,
         streetViewControl: false,
         fullscreenControl: false,
-        styles: theme === "dark" ? DARK_MAP_STYLE : [],
       });
     }
     const map = mapObjRef.current;
@@ -398,17 +337,7 @@ export default function LocationSearch({
       map.setCenter(point);
       map.setZoom(13);
     }
-  }, [
-    maps,
-    point,
-    zones,
-    matchedNames,
-    resultLabel,
-    via,
-    zoneInfo,
-    collapsed,
-    theme,
-  ]);
+  }, [maps, point, zones, matchedNames, resultLabel, via, zoneInfo, collapsed]);
 
   const clearLocal = (): void => {
     selectedPlaceRef.current = null;

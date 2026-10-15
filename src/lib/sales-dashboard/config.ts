@@ -13,6 +13,12 @@ export interface BookingFlowConfig {
   max_slots_per_booking: number;
   booking_days_ahead: number;
   view_days_ahead: number | null;
+  // Optional dashboard-only setting: how far (km) outside an instructor's
+  // service polygon still counts as "nearby" in a location search. Not part of
+  // the required set, so a missing/invalid value never disables booking.
+  nearby_radius_km: number | null;
+  // Optional: max nearby instructors added to a location search (closest first).
+  nearby_max_results: number | null;
   excluded_schedule_statuses: string[] | null;
   slotStart: string;
   slotEnd: string;
@@ -53,6 +59,15 @@ export function readBookingFlowConfig(raw: unknown): BookingFlowConfig {
   const slotDurationMinutes = intInRange(v.slot_duration_minutes, 15, 240);
   const instructor_gap_minutes = intInRange(v.instructor_gap_minutes, 0, 240);
   const view_days_ahead = intInRange(v.view_days_ahead, 1, 730);
+  const nearby_max_results = intInRange(v.nearby_max_results, 1, 50);
+  const nearbyRaw = Number(v.nearby_radius_km);
+  const nearby_radius_km =
+    v.nearby_radius_km != null &&
+    Number.isFinite(nearbyRaw) &&
+    nearbyRaw > 0 &&
+    nearbyRaw <= 50
+      ? nearbyRaw
+      : null;
   const excluded_schedule_statuses =
     Array.isArray(v.excluded_schedule_statuses) &&
     v.excluded_schedule_statuses.length > 0 &&
@@ -103,6 +118,8 @@ export function readBookingFlowConfig(raw: unknown): BookingFlowConfig {
     female_instructor_mode: female_instructor_mode ?? "off",
     installment_modes: installment_modes ?? [],
     view_days_ahead,
+    nearby_radius_km,
+    nearby_max_results,
     excluded_schedule_statuses,
   };
 }

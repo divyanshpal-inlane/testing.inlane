@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
-  buildDisplayFreeGrid,
   buildInstructorFreeGrid,
   candidateStartMinutes,
   type InstructorLike,
@@ -161,7 +160,6 @@ export interface SalesData {
   names: Map<string, string>;
   errors: Record<string, string>;
   freeGrid: Map<string, Map<string, number[]>>;
-  displayGrid: Map<string, Map<string, number[]>>;
   blocks: BlockDetail[];
 }
 
@@ -274,7 +272,6 @@ function toInstructorLike(i: InstructorRow): InstructorLike {
 interface Store {
   instructors: Map<string, InstructorRow>;
   grid: Map<string, Map<string, number[]>>;
-  displayGrid: Map<string, Map<string, number[]>>;
   blocks: BlockDetail[];
   loading: Set<string>;
   // Display name per loading/errored instructor id. The roster grid renders
@@ -305,7 +302,6 @@ export function useSalesData() {
   const storeRef = useRef<Store>({
     instructors: new Map(),
     grid: new Map(),
-    displayGrid: new Map(),
     blocks: [],
     loading: new Set(),
     names: new Map(),
@@ -340,7 +336,6 @@ export function useSalesData() {
       names: s.names,
       errors: { ...s.errors },
       freeGrid: s.grid,
-      displayGrid: s.displayGrid,
       blocks: s.blocks,
     });
   }, []);
@@ -664,14 +659,8 @@ export function useSalesData() {
             ? buildInstructorFreeGrid(baseInput, engineInstructors)
             : new Map<string, Map<string, number[]>>();
 
-        const displayGrid =
-          engineInstructors.length > 0 && datesRef.current.length > 0
-            ? buildDisplayFreeGrid(baseInput, engineInstructors)
-            : new Map<string, Map<string, number[]>>();
-
         for (const info of infos.values()) s.instructors.set(info.id, info);
         for (const [id, perDate] of grid) s.grid.set(id, perDate);
-        for (const [id, perDate] of displayGrid) s.displayGrid.set(id, perDate);
         // Replace, don't append: a silent refresh (or removing then re-adding
         // an instructor) re-fetches the same window, and blind push would leave
         // duplicate BlockDetail rows for every refreshed instructor.
@@ -713,7 +702,6 @@ export function useSalesData() {
       const s = storeRef.current;
       s.instructors.delete(id);
       s.grid.delete(id);
-      s.displayGrid.delete(id);
       s.blocks = s.blocks.filter((b) => b.instructorId !== id);
       s.loading.delete(id);
       s.names.delete(id);
@@ -845,7 +833,6 @@ export function useSalesData() {
     storeRef.current = {
       instructors: new Map(),
       grid: new Map(),
-      displayGrid: new Map(),
       blocks: [],
       loading: new Set(),
       names: new Map(),
@@ -986,6 +973,9 @@ export function useSalesData() {
   );
 
   useEffect(() => {
+    // The Set is created once and never reassigned, so it is safe to hold it
+    // for the cleanup below.
+    const pendingIds = realtimePendingRef.current;
     const channel = sb
       .channel("sales-dashboard-schedule-sync")
       .on(
@@ -1013,7 +1003,7 @@ export function useSalesData() {
       // once. Otherwise just flush whatever was queued while hidden.
       if (wasHiddenFor >= HIDDEN_CATCHUP_MS) {
         queueRealtimeRefresh([...storeRef.current.instructors.keys()]);
-      } else if (realtimePendingRef.current.size > 0) {
+      } else if (pendingIds.size > 0) {
         queueRealtimeRefresh([]);
       }
     };
@@ -1025,7 +1015,7 @@ export function useSalesData() {
         window.clearTimeout(realtimeTimerRef.current);
         realtimeTimerRef.current = null;
       }
-      realtimePendingRef.current.clear();
+      pendingIds.clear();
       void sb.removeChannel(channel);
     };
   }, [instructorsAffectedBy, queueRealtimeRefresh]);

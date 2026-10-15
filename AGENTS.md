@@ -4,23 +4,28 @@ Compact reference for agents working in this repo. Only non-obvious, high-signal
 
 ## Commands
 
-| Task                                                 | Command                |
-| ---------------------------------------------------- | ---------------------- |
-| Install                                              | `pnpm install`         |
-| Dev server (proxies `/go-api` → `localhost:8080/v1`) | `pnpm run dev`         |
-| Build                                                | `pnpm run build`       |
-| Preview build                                        | `pnpm run serve`       |
-| Lint + format                                        | `pnpm run lint`        |
-| Format only                                          | `pnpm run lint:format` |
-| ESLint only                                          | `pnpm run lint:fix`    |
-| Type check                                           | `pnpm run type-check`  |
+| Task                                                 | Command                                                |
+| ---------------------------------------------------- | ------------------------------------------------------ |
+| Install                                              | `pnpm install`                                         |
+| Dev server (proxies `/go-api` → `localhost:8080/v1`) | `pnpm run dev`                                         |
+| Build                                                | `pnpm run build`                                       |
+| Preview build                                        | `pnpm run serve`                                       |
+| Lint + format                                        | `pnpm run lint`                                        |
+| Format only                                          | `pnpm run lint:format`                                 |
+| ESLint only                                          | `pnpm run lint:fix`                                    |
+| Type check                                           | `pnpm run type-check`                                  |
+| E2E (Playwright)                                     | `npx playwright test`                                  |
+| Backend suite (needs anon key)                       | `node tests/backend-suite.mjs`                         |
+| Unit tests                                           | `node --test tests/<suite>/<file>.test.mjs` (per file) |
 
-**Required order**: `lint` → `type-check` → `build` (CI runs these)
+**Required order**: `lint` → `type-check` → `build` (Vercel gates deploys on build; lint/type-check are pre-commit, not in CI)
+
+**Tests exist** — `tests/playwright/*.spec.ts` (9 specs, incl. `sales-dashboard.spec.ts`, `instructor-zone-*.spec.ts`), `tests/backend-suite.mjs`, and 13 `*.test.mjs` unit suites. `playwright.config.ts` builds and serves the **production** bundle on `:4173` (`pnpm run build && pnpm run serve`), so `import.meta.env.DEV` is false under test.
 
 ## Environment
 
 - `.env` from `.env.example` — needs `VITE_SUPABASE_KEY` (anon key)
-- **Dev**: Vite proxy rewrites `/go-api` → `http://localhost:8080/v1` and `/go-api/internal` → `http://localhost:8080/internal` (see `vite.config.ts:14-32`)
+- **Dev**: Vite proxy rewrites `/go-api` → `http://localhost:8080/v1` and `/go-api/internal` → `http://localhost:8080/internal` (see `vite.config.ts:18-38`; `/go-api/internal` must be declared first — first-match wins)
 - **Prod**: `VITE_BACKEND_API` sets real Go service URL (e.g., `https://api.inlane.in/v1`); no proxy
 - Env vars baked at build time — redeploy to change
 
@@ -29,16 +34,23 @@ Compact reference for agents working in this repo. Only non-obvious, high-signal
 ```
 src/
   app/           # Feature pages (instructor, learner flows)
-  components/    # Reusable UI (ui/, layout/, lesson/, admin/sales-dashboard/)
+  components/    # Reusable UI (ui/, layout/, lesson/, admin/sales-dashboard/, instructor-zones/, admin/learner/)
   routes/        # Route trees per role: admin/, instructor/, learner/
   context/       # AuthContext, PhoneVisibilityProvider
-  hooks/         # Custom React hooks
-  queries/       # TanStack Query hooks by domain (instructor.ts, learner.ts, etc.)
-  lib/           # supabaseClient, calendarUtils, geoUtils, availability.ts (sales)
+  hooks/         # Custom React hooks (useCanSeeCustomerPhone, useSalesData, …)
+  queries/       # TanStack Query hooks by domain (instructor.ts, learner.ts, userManagement.ts, adminPermissions.ts)
+  lib/           # supabaseClient, calendarUtils, geoUtils, learner-service, admin-schedules,
+                 # admin-learner-list, scheduling-requests, learner-schedule-onboarding,
+                 # sales-dashboard/ (availability, conflict, resilience, zones-db, bulkSlots, …)
   services/      # featureFlagService.ts
   types/         # TypeScript types
   constants/     # App constants (courses.ts has payment completion logic)
-  utils/         # Shared utils (normalizePhone, maskPhoneNumber, etc.)
+  utils/         # Shared utils (normalizePhone, maskPhoneNumber, googleMaps, …)
+
+tests/           # playwright/, backend-suite.mjs, plus */<name>.test.mjs unit suites
+docs/            # admin-schedule-consistency.md, onboarding-scheduling-queue.md, Game_Analytics.md
+scripts/         # verify/backfill/clean-instructor-service-zones.mjs, generate-learning-catalog.mjs
+sql/             # Manual-install SQL (e.g. override_tentative_slot.sql)
 ```
 
 **Path alias**: `@/*` → `./src/*` (tsconfig.json + vite.config.ts)
@@ -68,26 +80,28 @@ supabase functions deploy <name>       # e.g., process-payment
 
 Run from up-to-date `main` checkout (bundles from local working dir).
 
-Key functions: `create-razorpay-order`, `verify-razorpay-payment`, `process-payment` (Orange PG), `payment-callback`, `send-message` (WhatsApp), `send-schedule-emails`, `masked-call` (Exotel), `fetch-calendar-events`, `sync-google-calendar`, direct booking (`get-booking-config`, `get-booking-slots`, `create-booking`, `change-booking-slot`, `confirm-booking`).
+Key functions: `create-razorpay-order`, `verify-razorpay-payment`, `process-payment` (Orange PG), `payment-callback`, `send-message` (WhatsApp), `send-schedule-emails`, `masked-call` (Exotel), `fetch-calendar-events`, `sync-google-calendar`, `instructor-slot-booking` (Cratio lead lookup for Instructor Management's tentative-booking forms), `create-learner-and-enrollment`.
+
+**The "Direct Booking" functions do NOT exist in this repo** (`get-booking-config`, `get-booking-slots`, `create-booking`, `change-booking-slot`, `confirm-booking`). They live outside version control — see "Live read path" below. Do not add them to the table or assume you can change them from here.
 
 ### Core Function Categories
 
-| Category           | Functions                                                                                                                                                      |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Payments**       | `create-razorpay-order`, `verify-razorpay-payment`, `process-payment` (Orange PG v2 HMAC-SHA256), `payment-callback`, `recover-razorpay-payment`               |
-| **Messaging**      | `send-message` (WhatsApp dispatcher, 40+ templates), `send-schedule-emails` (ICS), `send-payment-link-email`, `send-admin-email`, `send-course-feedback-email` |
-| **Reminders**      | `learner-daily-schedule`, `instructor-daily-schedule`, `send-signup-reminders`, `ll-flow-reminders` (cron)                                                     |
-| **User/Auth**      | `create-user`, `create-admin-user`, `delete-user`, `get-current-user`, `password-reset-otp`                                                                    |
-| **Calls**          | `masked-call` (Exotel learner↔instructor), `msg91-masked-call` (instructor↔KAM)                                                                                |
-| **Calendar**       | `fetch-calendar-events`, `sync-google-calendar`, `remove-google-calendar-sync`                                                                                 |
-| **Direct Booking** | `get-booking-config`, `get-booking-slots`, `create-booking`, `change-booking-slot`, `confirm-booking`                                                          |
+| Category          | Functions                                                                                                                                                      |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Payments**      | `create-razorpay-order`, `verify-razorpay-payment`, `process-payment` (Orange PG v2 HMAC-SHA256), `payment-callback`, `recover-razorpay-payment`               |
+| **Messaging**     | `send-message` (WhatsApp dispatcher, 40+ templates), `send-schedule-emails` (ICS), `send-payment-link-email`, `send-admin-email`, `send-course-feedback-email` |
+| **Reminders**     | `learner-daily-schedule`, `instructor-daily-schedule`, `send-signup-reminders`, `ll-flow-reminders` (cron)                                                     |
+| **User/Auth**     | `create-user`, `create-admin-user`, `delete-user`, `get-current-user`, `password-reset-otp`                                                                    |
+| **Calls**         | `masked-call` (Exotel learner↔instructor), `msg91-masked-call` (instructor↔KAM)                                                                              |
+| **Calendar**      | `fetch-calendar-events`, `sync-google-calendar`, `remove-google-calendar-sync`                                                                                 |
+| **CRM / Learner** | `instructor-slot-booking` (Cratio lookup: `lookup` / `lookupLearner`), `create-learner-and-enrollment` (+ `validation.ts`, `validation.test.ts`)               |
 
 ## Key Gotchas
 
 1. **Vercel deploy author gate**: Only commits authored by Vercel team members trigger deploys. Fix: merge as authorized user, or click **Redeploy** in Vercel dashboard. Details in `DEPLOYMENT.md`.
 2. **Go backend must run locally** for dev API calls (`http://localhost:8080`).
 3. **Phone normalization inconsistency**: DB stores phones in 4 variants (raw 10-digit, `+91…`, etc.); queries match all formats. Use `normalizePhone()` utility.
-4. **Phone visibility**: Masked via `PhoneVisibilityProvider` — check context if adding phone display. Permission: `view_unmasked_phone_numbers`.
+4. **Phone visibility — there are TWO distinct permissions now.** Ops/Instructor-side phone: `PhoneVisibilityProvider` + `view_unmasked_phone_numbers`. **Customer/lead phone** (Learner Management, CRM autofill, Sales Dashboard booking form, Instructor Management timetable side panel): permission `view_unmasked_customer_phone_numbers`, consumed by `useCanSeeCustomerPhone()` (`src/hooks/useCanSeeCustomerPhone.ts`, backed by `useCurrentUser()` in `queries/userManagement.ts`). Super admins bypass; unpermitted viewers see `maskPhoneNumber()` output but the **real** number is still what gets saved. Before adding any phone display, decide which of the two applies.
 5. **Payment completion logic exists in 3 places** — keep in sync: `payment-callback` edge function, `src/constants/courses.ts`, `_shared/complete-payment.ts`.
 6. **pnpm strict mode**: New deps with build scripts need entry in `pnpm-workspace.yaml:allowBuilds` or Vercel fails with `ERR_PNPM_IGNORED_BUILDS`.
 7. **No-show fee**: ₹300 if rescheduling <10h before; appeals allow waiver/reversal by admin.
@@ -100,35 +114,37 @@ Key functions: `create-razorpay-order`, `verify-razorpay-payment`, `process-paym
     - Unmount abort guard: closing the dialog mid-flight unwinds everything.
     - Previously: auth failure carried on (inverse orphan: Instructor with no auth); zone failure warned only (half-written set); phone column empty on email fallback; no unmount guard.
     - Rollback is all-or-nothing: one `unwind()` helper deletes in reverse order (zone via instructor FK cascade → Instructor → auth user).
-11. **LocationSearch lazy-loaded**: Separate chunk (~7kB); manual lat/lng inputs work via `Input.insertText` in automation (React 19 value tracker defeats programmatic `.value` sets).
+11. **LocationSearch lazy-loaded**: Separate chunk (~7kB); manual lat/lng inputs work via `Input.insertText` in automation (React's input value tracker defeats programmatic `.value` sets — the app is React 18.3.1, not 19).
 12. **`instructor_service_zones` polygons are the _only_ area source**: the Sales Availability location search loads polygons from Postgres via `src/lib/sales-dashboard/zones-db.ts` (module cache + in-flight dedupe, `invalidateDbZoneCache()` on zone write) and matches by `instructor_id`, not by name. `SalesDashboard.locMatch` ray-casts each polygon with `pointInPolygon()` and returns `via: "polygon" | "none"`. **Decided 2026-09-29: polygon-only, no proximity fallback** — the 3 km centroid fallback (`matchLocation`, `PROXIMITY_RADIUS_KM`) is intentionally dead; the dotted 3 km ring + its legend were deleted from `LocationSearch.tsx` because they told the user a proximity search happened when it never does. `public/instructors.kml` is **backfill input only**. `Instructor.areas`/`radius` are legacy and only read as a fallback in `availability.ts` (shared with out-of-repo edge functions — do not strip). See "Instructor Service-Area Polygons".
 13. **Google Maps: one script, no legacy Loader**: `src/utils/googleMaps.ts` injects the Maps script itself and resolves by polling for real constructors. Do **not** reintroduce `@googlemaps/js-api-loader`'s `Loader` — its v1 `__onCallback` never fires on the `v=weekly` bootstrap, so it re-injects forever (we measured 18 script tags, "loaded multiple times", `Loader.provide not called by module 'poly'`). Also note `window.google.maps` exists as an _empty_ namespace before classes attach, so readiness must check `typeof gm.Map === "function"`. Components needing extra classes pass them: `loadMaps(["Polygon", "Circle"])`.
 14. **On-break instructors**: Excluded from default roster but appear with real slots if matched by location search — no break badge, free slots counted.
 15. **Sticky grid z-index**: Don't break `position: sticky` on `.instructor-cell`/`.col-instructor` or collisions with slot popover z-index.
 16. **Empty default grid**: Shows "No instructors loaded yet" — search by name or location to load on-demand.
-17. **Mock HTML demo**: `mock.html` is standalone demo (no server/build deps) — update in parallel for core grid changes.
+17. **`mock.html` no longer exists** — the standalone no-build demo was removed (it has no history in this repo either). Ignore any older note telling you to "update mock.html in parallel for core grid changes"; the real coverage is `tests/playwright/sales-dashboard*.spec.ts`.
 18. **Company instructors are Ops-assigned backups, never auto-matched**: `Amanulla Khan` (`62610a49-fb31-4bcc-80bb-f61a78414008`) and `Krupakar Daniel Dennish` (`b3781798-a800-4ce1-9f57-1b97e62a228e`; spelling against the DB, not `Kruopakar`) must never come back from automatic area matching. **Authoritative**: `Instructor.is_company_instructor` (migration `supabase/migrations/20260929_100000_add_company_instructor_flag.sql`, manual apply only — the Raw SQL RPC is unavailable). `zones-db.fetchCompanyInstructorIds()` reads the flagged ids **tolerantly**: until the migration is applied PostgREST rejects the select, so it resolves to an empty set and callers fall back to the normalized-name list in `src/lib/sales-dashboard/company-instructors.ts`. That makes a pending migration safe to deploy ahead of the DB change. Two guards keep them out of automatic matching: (a) `SalesDashboard.locMatch` filters by company id **and** name before ray-casting — currently the only guard that executes in the web app — plus `warnOnCompanyInstructorZones()` developer warning if a backup ever gets a polygon, and (b) `availability.ts:instructorServesArea()` returns `false` up front for `isCompany`/`isCompanyInstructor()` — currently **unreached in this repo**; it guards `evaluateSlot`/`pickBestInstructor`/`computeAvailableSlots`/`computeCoursePlan`/`computeFeasibleFirstSlots`, none of which `useSalesData` or `SalesDashboard` import, and it is a _different file_ from the out-of-repo `supabase/functions/_shared/availability.ts`, so porting that edge function will NOT inherit it. Both still carry legacy `areas` + `radius` (`Amanulla` `["hsr"]`/7, `Krupakar` `["Indiranagar"]`/8), so the deprecated `hasArea()`/`withinRadius()` fallback would leak them into any path that passes a real learner area/lat-lng — the flag+id guard is the reliable barrier (survives renames; the name list covers pre-migration). Neither has a zone row today, so a total guard failure would cause zero wrong assignments; the risk becomes real only if someone draws a polygon for a backup, which `warnOnCompanyInstructorZones()` flags in dev. Flagged flags → regression test: `node scripts/test-company-instructors.mjs` (13/13, covers rename-proof id check + name fallback + empty-set safety). Note: `CreateLearnerSchedule.tsx` was deleted (unreferenced, queried nonexistent lowercase `learners`/`instructors` tables).
 19. **Quote string-literal keys in object literals**: `edit` does fuzzy matching, so an `oldString` that differs only by quoting can silently rewrite the existing line. Editing `KML_ALIASES` with `bhanu sir: ...` instead of `"bhanu sir": ...` stripped the quotes and produced a syntax error. Always `git diff` after editing files with quoted keys, and run a build to confirm.
 
 ## Sales Dashboard (Admin Route: `/admin/sales-dashboard`)
 
-- Live instructor availability grid (30-min slots, color-coded free/booked)
-- **Double-click free slot** → `TentativeBookingModal` → creates `Schedule` row with `isTentative=true`, `status='hold'`, customer details in `tentative_details` JSON
-- Validates 1-hour block via `validateOneHourBlock()` in `src/lib/sales-dashboard/availability.ts`
+- Live instructor availability grid (30-min slots). **White = free**, and nothing else. Grey = every non-free cell (unavailable / paused / travel-gap buffer / outside hours). Yellow = tentative, purple = booked, blue = already in the in-progress batch
+- **Every cell click is single-click** → the left-hand **slot panel** shows a taken slot's details, or the booking form for a free one (after a 1-hour check via `validateOneHourBlock()`). There is no hover popover and no double-click anywhere anymore
+- Booking creates a `Schedule` row with `isTentative=true`, `status='hold'`, customer details in `tentative_details` JSON. **Never a confirmed booking** — Operations converts it
 - Startup fetches only `app_settings` (key=`booking_flow`) + light instructor index — **no Schedule queries on load**
 - Geospatial filtering via **Postgres polygons** (`instructor_service_zones`) — ray-casting against each instructor's ring, resolved by `instructor_id`. This is the live read path; `public/instructors.kml` is backfill input only
 - On-break instructors excluded by default but appear with real slots if matched by location
-- Config in `app_settings` table: `booking_days_ahead`, `view_days_ahead`, `slotStart`, `slotEnd`, `gridMinutes`, `instructor_gap_minutes`, `excluded_schedule_statuses`
+- Config in `app_settings` table (key `booking_flow`, **snake_case** in the DB): `booking_days_ahead`, `view_days_ahead`, `slot_start`, `slot_end`, `slot_grid_minutes`, `slot_duration_minutes`, `instructor_gap_minutes`, `excluded_schedule_statuses`. `src/lib/sales-dashboard/config.ts` re-maps them to camelCase (`slotStart`, `slotEnd`, `gridMinutes`, `slotDurationMinutes`) and **fails closed** (`enabled:false`) if any required field is missing/invalid — no hardcoded fallbacks
 
 ### Tentative Slot Booking Feature (Production)
 
-**Workflow**: Single-click → slot info popup; **Double-click FREE slot** → `TentativeBookingModal` with form (customer name, phone, sales agent, payment status, address, course). On submit: creates `Schedule{isTentative:true, status:'hold', tentative_details:{...}}` → toast 1.5s → grid reloads.
+**Workflow**: **Single click** a free slot → slot panel shows the booking form (`TentativeBookingModal`, `variant="panel"`) with customer name, phone, sales agent, payment status, address, course. On submit: creates `Schedule{isTentative:true, status:'hold', tentative_details:{...}}` → dashboard silently refreshes (no skeleton flicker). Opening a booking **auto-opens that instructor's Schedule view and hides every other instructor**, so the first class and all later ones are picked from the same timetable.
 
-**Component prop chain**: `SalesDashboard.handleSlotDoubleClick` (useCallback) → `AvailabilityGrid.onDoubleClick` → `InstructorRowGroup.onDoubleClick` → `SlotCell.onDoubleClick` / `MiniRow.onDoubleClick` → `SlotCell.onDoubleClick`. Handler validates via `validateOneHourBlock()` (O(1) Map lookup) before opening modal.
+**Component prop chain**: the grid, its rows and its cells are all **defined inline in `src/routes/admin/SalesDashboard.tsx`** — `AvailabilityGrid`, `InstructorRowGroup`, `SlotCell`, `MiniRow` are NOT separate files (older docs reference `src/components/admin/sales-dashboard/AvailabilityGrid.tsx` and `src/components/admin/SlotCell.tsx`; both are gone). `SalesDashboard.handleSlotSelect` (useCallback) → `GridProps.onSelect` → `SlotCell.onSelect(instrId, date, minute, free, info)`.
 
-**Modal**: `src/components/admin/sales-dashboard/TentativeBookingModal.tsx` — renders only when open; uses existing `normalizePhone()`, phone masking respects `view_unmasked_phone_numbers` permission. No new API/edge function — direct Supabase insert.
+**Modal**: `src/components/admin/sales-dashboard/TentativeBookingModal.tsx` — renders only when open, in either `"modal"` or `"panel"` variant; `currentUserName` pre-fills the sales agent. Phone masking respects the **`view_unmasked_customer_phone_numbers`** permission (not `view_unmasked_phone_numbers`) via `useCanSeeCustomerPhone()`. No API/edge function — direct Supabase insert.
 
-**Dual free grids** (buffer fix): `freeGrid` (60-min class starts for booking engine) + `displayGrid` (30-min slots for display). `useSalesData.ts` builds both; dashboard uses `displayGrid` for cells, totals, popovers. Buffer popover shows "Buffer for Booked/Completed class".
+**Dual free grids** (buffer fix): `freeGrid` (60-min class starts for booking engine) + `displayGrid` (30-min slots for display). `useSalesData.ts` builds both; the dashboard uses `displayGrid` for cells and totals. Buffer cells read "Buffer for Booked/Completed class".
+
+**Visible columns are bounded by the configured window**, not a 24-hour day: `timeStartsRef.current = candidateStartMinutes(config)` in `useSalesData.ts` yields 06:00…21:00 for `slotStart 06:00` / `slotEnd 22:00` (last column is `slotEnd - slotDurationMinutes`). A commit that made them span 00:00–23:30 was **reverted** the same day (`03d73ca`), so do not "restore" it.
 
 ### Implementation Details (Slot Booking + Tentative Blocks)
 
@@ -138,31 +154,49 @@ Key functions: `create-razorpay-order`, `verify-razorpay-payment`, `process-paym
 - Fast startup (~450-900ms): loads only `app_settings` (key=`booking_flow`) + light instructor index (`id, name, status, enabled`)
 - On-demand `loadInstructors(ids)` fetches full `Instructor` rows + `Schedule` rows (paginated 1000-row chunks, 60 IDs per batch)
 - `buildInstructorFreeGrid()` / `buildDisplayFreeGrid()` from `availability.ts` compute free slots per instructor per date
-- `blockDetails` array built from Schedule rows with `tentative_details` for popovers
+- `blockDetails` array built from Schedule rows with `tentative_details` (feeds the slot panel, not popovers)
 - `displayGrid` used for UI rendering (30-min granularity), `freeGrid` for booking validation (60-min)
+- **Fetches have a 20s abort/timeout** and return a retryable error instead of a permanent skeleton. Post-booking and realtime updates do a **silent refresh** (no skeleton flicker); the realtime stream is debounced
+- **Realtime `postgres_changes` events are classified locally**: only a row the dashboard actually shows (by id) or a new row inside the loaded window triggers a fetch, and a `DELETE` (primary-key-only payload) refreshes **just that instructor** rather than the whole roster. Events for instructors never loaded cost zero requests
 
 **Availability Engine** (`src/lib/sales-dashboard/availability.ts`):
 
 - Pure TypeScript port of Supabase edge function `_shared/availability.ts`
 - `validateOneHourBlock(instructorId, date, startMinute, freeGrid)` — O(1) check that both 30-min slots are free
 - `isTimeUnavailable()` handles instructor unavailability JSON (all-day, recurring, date-range, time-specific)
-- `instructorServesArea()` matches instructors via `areas[]` or Haversine radius
+- `instructorServesArea()` matches **polygons first** via `zoneContainsPoint()` → `pointInPolygon()`; the legacy `areas[]` / Haversine `radius` path is fallback-only (see "Instructor Service-Area Polygons")
 - `blockCoversCandidate()` checks schedule conflicts with configurable `gapMinutes` travel buffer
-- `candidateStartMinutes()` generates time grid from config
+- `candidateStartMinutes()` generates the time grid from config — this also sets the **visible columns**
+- `classifySlotConflict()` (`src/lib/sales-dashboard/conflict.ts`) sorts a conflict into `free` | `direct` | `buffer`; `bufferWaivedForCustomer()` waives a **buffer-only** conflict when every conflicting hold's phone matches the customer being booked (nulls never waive)
 
 **Slot Interaction**:
 
-- Single-click: hover → `SlotCell` shows `slot-pop` with `resolveInfo()` details (free/booked/unavailable/buffer)
-- Double-click: `handleSlotDoubleClick` → validates 1-hour block → opens `TentativeBookingModal`
+- **Single click** on any cell: `setSelectedSlot(...)`; the slot panel then renders either that slot's details (taken) or the booking form (free). Taken slots are inert — no validation, no notice, and they never disturb an in-progress booking
+- No hover `slot-pop` popover and no double-click remain in the grid
 
 **Tentative Booking Modal** (`src/components/admin/sales-dashboard/TentativeBookingModal.tsx`):
 
 - Form fields: customer name, phone (normalized), sales agent, payment status (unpaid/half_paid/full_paid), address, course
-- Courses: demo, 4/5/6/10/15/20-class courses
+- **Courses are loaded from the `Courses` table** (`useQuery` → `sb.from("Courses").select("id, name")`), not hardcoded. The list is `"None"` + the `Mini Course - …` rows, in a fixed display order. `tentative_details.course` holds the Courses **id** (or `"none"`) and `course_name` keeps the readable label. A booking saved with an older value (`demo`, `course_4`, …) still opens in Edit shown as **"(earlier option)"**; new bookings default to **None**, not Demo
+- **CRM autofill** (`CrmLeadAutofill`, `target="sales"`, stacked layout, no e-mail/course) sits at the top for **new** bookings only. Fills name, phone, address and payment status from a Cratio Lead ID / e-mail via the `instructor-slot-booking` edge function. All fields stay editable; **Edit mode has no autofill and hides the phone**
 - On submit: inserts into `Schedule` table with `isTentative=true`, `status='hold'`, `tentative_details` JSON
 - `learner_id`, `course_id`, `lesson_id` set to `null` (sales creates hold only, Operations confirms later)
 - Uses `normalizePhone()` from `validation.ts`
-- TanStack Query `useMutation` for insert, auto-closes on success, triggers dashboard `reload()`
+- TanStack Query `useMutation` for insert; the parent's `reload()`/silent refresh keeps the grid in sync
+- **Nested-form double submission is a fixed, load-bearing bug**: see "Sales Dashboard E2E flake (23P01)" below. Submit goes through an explicit `onClick` path so implicit submission can never reach an outer `<form>`
+
+**Multi-class batch** (`pendingSlots: SlotPick[]` + `customerFormData: CustomerFormValues`, both owned by **`SalesDashboard`, not the modal** — the form must hide, not unmount, while the next class is picked):
+
+- **"+ Add another class"** arms `addingSlotMode`, shows a banner and a pulsing border on `.grid-wrap`, and the next free slot is appended after a real **interval-overlap** check
+- Selected classes show blue (`.cell-pending`) across their full 1-hour span; a slot that would overlap one shows `.cell-pending-blocked`
+- **Submit is all-or-nothing**: every slot is re-validated fresh (`validateSlotFresh`), then one multi-row `.insert([...])` lets the `schedule_no_overlap_new_rows` exclusion constraint roll back the batch atomically
+- **A discard warning guards 2+ picked classes**: clicking another free slot, editing another booking, or closing the form (X / Cancel / Esc / click-away) asks first. "Keep my classes" changes nothing. Editing an existing booking is exempt
+
+**Edit / delete rules** (`0ee5943` — this **replaced** the retired "Override Slot"):
+
+- The **creator** can edit their own tentative slot at any payment status; **anyone** can edit an **unpaid** one (that is how a hold gets handed to a learner who is now paying)
+- Delete is **creator-only**; the original creator is preserved when another agent edits
+- **Override Slot is gone from the Sales Dashboard** (`override`, `handleOverrideClick`, the modal's override mode and its help text were all removed). The RPC still exists as `sql/override_tentative_slot.sql` and is still used by **Instructor Management** (`src/routes/admin/instructors.tsx`) — do not delete the file
 
 **Existing Tentative Schedule Reuse**:
 
@@ -232,7 +266,7 @@ Replaces legacy `Instructor.areas` (name list) + `radius` + lat/lng centroid cov
 
 - `Instructor.status` (`active` / `on_break` / `inactive`) is the canonical signal; `enabled === false` is the legacy fallback. Use `resolveInstructorStatus()` from `src/constants/instructorStatus.ts` — never re-derive this per screen
 - **Inactive**: **listed in the Zone Map sidebar AND drawn by default**, gated by the `Show Inactive instructors` toggle. They are still excluded from sales/customer booking. Their rows and polygons are **kept** in the DB, so reactivating restores the area. The roster query is deliberately unfiltered — the sidebar needs everyone. `allRosterZones` is now just `rosterZoneRows` (it no longer drops inactive); the toggle filters both the drawn set and the sidebar lists
-- **Sidebar "Mapped" must not be gated by the rough toggle.** `listedZones` is built from `rosterZoneRows` filtered only by `statusVisible` — mode-agnostic — while the map's `zones` is rough-exclusive. Gating both by rough mode was a real bug: an instructor whose polygon the mode hid left "Mapped" *and* left "Not mapped" (which skips anyone in `zoneByInstructor`), so they vanished from the sidebar entirely. With one rough row it dropped exactly one on_break instructor (sidebar showed 10 badges for 11), and switching rough mode ON emptied the sidebar of all ~67 verified owners. "N of M instructors mapped" reads `zoneByInstructor.size`, so the sidebar and the header agree
+- **Sidebar "Mapped" must not be gated by the rough toggle.** `listedZones` is built from `rosterZoneRows` filtered only by `statusVisible` — mode-agnostic — while the map's `zones` is rough-exclusive. Gating both by rough mode was a real bug: an instructor whose polygon the mode hid left "Mapped" _and_ left "Not mapped" (which skips anyone in `zoneByInstructor`), so they vanished from the sidebar entirely. With one rough row it dropped exactly one on_break instructor (sidebar showed 10 badges for 11), and switching rough mode ON emptied the sidebar of all ~67 verified owners. "N of M instructors mapped" reads `zoneByInstructor.size`, so the sidebar and the header agree
 - **Status tags in the Zone Map sidebar** (`ZoneStatusTag` in `InstructorZoneMap.tsx`): `On Break` / `Inactive` only, never `Active` — a chip on ~120 rows would bury the two states that change behaviour. Tagged on **both** columns, since an inactive instructor lands in "Mapped" when they have a polygon and "Not mapped" when they don't. The tag renders **after the name**, inside the name button, so it reads as a qualification of that instructor rather than a separate control stacked beside them. Inactive rows keep the per-layer visibility checkbox, since their polygon IS a layer now
 - **Sidebar status toggles** (`statusFilter`): three independent switches — `Show Active / On Break / Inactive instructors` — below the rough toggle, each with its own live count. All three default **on**. They gate the sidebar lists _and_ the drawn set, and are a **view filter only**: they never write to `Instructor`. Turning one off IS reversible — restoring the switch brings the rows and polygons straight back
 - **Promoting/demoting a rough polygon** (`promoteZone` / `demoteZone` in `InstructorZoneMap.tsx`): the info card shows **Make normal polygon** for a rough zone and **Make rough polygon** for a verified one, each a single `UPDATE ... SET is_rough = …` on the existing row. Deliberately a flag flip, not a re-save: `UNIQUE(instructor_id)` means the row already exists, and restating `coordinates` would risk altering an Ops-drawn ring during what is only a verification. `updateZoneById` therefore takes `coordinates` as **optional** and omits the key entirely when it is not supplied — the one place that must not be "helpfully" filled back in
@@ -335,22 +369,34 @@ Enforced by `simple-import-sort` (ESLint):
 
 ## Testing
 
-No test framework configured. To add: Vitest (unit/integration), React Testing Library (component), Playwright/Cypress (E2E).
+Three suites exist — do **not** re-add Vitest/Cypress.
+
+| Suite              | Command                                                                  | Needs                                                             |
+| ------------------ | ------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| Playwright E2E     | `npx playwright test`                                                    | `playwright.config.ts` builds + serves the prod bundle on `:4173` |
+| Backend suite      | `node tests/backend-suite.mjs`                                           | anon key in `.env`                                                |
+| Unit (`node:test`) | `node --test <file>` (per file — each file's header has its own command) | nothing (transpiles TS with the `typescript` package)             |
+
+- E2E specs (`tests/playwright/`): `sales-dashboard.spec.ts`, `sales-dashboard-edit-highlight.spec.ts`, `sales-dashboard-resilience.spec.ts`, `instructor-management.spec.ts`, `instructor-zone-map.spec.ts`, `instructor-zone-drawing.spec.ts`, `bulk-add-schedules.spec.ts`, `change-slot.spec.ts`, `learner-management.spec.ts`
+- Unit suites: `tests/*.test.mjs` (3) plus `tests/learning-analytics/` (2), `tests/routing/` (3), `tests/scheduling/` (5)
+- E2E runs against **production** Supabase with the anon key, so a test that writes to `instructor_service_zones` **cannot undo itself** — intercept the request instead (see gotcha 18)
+- `tests.md` is the manual/automated checklist for the sales tentative-booking system
 
 ## Supabase Schema (Core Tables)
 
-| Table                            | Purpose                                                                                      |
-| -------------------------------- | -------------------------------------------------------------------------------------------- |
-| `Learner`                        | Student profile (phone, name, address, LL status)                                            |
-| `Instructor`                     | Instructor (DL, vehicle, unavailability JSON, Google Calendar sync)                          |
-| `instructor_service_zones`       | Service-area polygons — one row per instructor, `UNIQUE(instructor_id)`, `coordinates` jsonb |
-| `Schedule`                       | Lessons (instructor_id, learner_id, date, start/end, status, isTentative, tentative_details) |
-| `enrollment`                     | Course progress                                                                              |
-| `payment`                        | Payment records (gateway: icici/razorpay)                                                    |
-| `ll_applications`                | LL journey tracking                                                                          |
-| `no_show_fee` / `no_show_appeal` | Penalties & appeals                                                                          |
-| `instructor_earning_adjustment`  | Bonuses/corrections                                                                          |
-| `app_settings`                   | Feature flags + config (JSON)                                                                |
+| Table                            | Purpose                                                                                                                                                                                                                                                                 |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Learner`                        | Student profile (phone, name, address, LL status)                                                                                                                                                                                                                       |
+| `Instructor`                     | Instructor (DL, vehicle, unavailability JSON, Google Calendar sync)                                                                                                                                                                                                     |
+| `instructor_service_zones`       | Service-area polygons — one row per instructor, `UNIQUE(instructor_id)`, `coordinates` jsonb                                                                                                                                                                            |
+| `Schedule`                       | Lessons (instructor_id, learner_id, date, start/end, status, isTentative, tentative_details)                                                                                                                                                                            |
+| `enrollment`                     | Course progress — also `case_type` (`classes_only`/`rto_only`/`lessons_with_rto`), `two_wheeler_requirement`/`four_wheeler_requirement` (`ll`/`dl`/`ll_and_dl`/`not_required`), `rto_fee`, `rto_address_change_required`, `vehicle_type` (`two_wheeler`/`four_wheeler`) |
+| `payment`                        | Payment records (gateway: icici/razorpay)                                                                                                                                                                                                                               |
+| `ll_applications`                | LL journey tracking                                                                                                                                                                                                                                                     |
+| `no_show_fee` / `no_show_appeal` | Penalties & appeals                                                                                                                                                                                                                                                     |
+| `instructor_earning_adjustment`  | Bonuses/corrections                                                                                                                                                                                                                                                     |
+| `password_reset_challenges`      | OTP / reset tokens stored as **hashes**; service-role only (`20260929000100_…`)                                                                                                                                                                                         |
+| `app_settings`                   | Feature flags + config (JSON)                                                                                                                                                                                                                                           |
 
 ## Third-Party Integrations (24 services)
 
@@ -361,7 +407,7 @@ No test framework configured. To add: Vitest (unit/integration), React Testing L
 - **Maps**: Google Maps JS API (Places autocomplete + geocoding)
 - **Analytics**: GA4 (Measurement Protocol)
 - **AI**: OpenAI (gpt-4o-mini)
-- **CRM**: Cratio (webhook), Cal.com, Gmail SMTP
+- **CRM**: Cratio (webhook **and** server-side lead lookup via the `instructor-slot-booking` edge function; env `CRATIO_LEAD_LOOKUP_URL` / `CRATIO_API_TOKEN`), Cal.com, Gmail SMTP
 
 ## Sales Dashboard E2E flake (23P01 "already booked") — FIXED
 
@@ -370,7 +416,7 @@ warning about the failure MODE rather than an open item. Do not "re-fix" it by
 adding retries — the cause is understood and it was never test pollution.
 
 **Symptom (historical).** `tests/playwright/sales-dashboard.spec.ts`, test
-`"double-clicking a free slot, filling the form, and submitting creates a
+`"clicking a free slot, filling the form, and submitting creates a
 tentative booking"`, failed roughly 1 in 5 repetitions. The modal showed the
 app's optimistic-lock text `"This slot was just booked by another sales agent.
 Please close this and pick a different time."`, i.e. `TentativeBookingModal` saw
@@ -420,14 +466,14 @@ matches all three (success / `23P01` / client-side re-validation).
 
 ## Performance Baselines
 
-| Metric                  | Target                                                                        |
-| ----------------------- | ----------------------------------------------------------------------------- |
-| Dashboard startup       | ~450–900 ms (config + light instructor index only; **zero Schedule queries**) |
-| First instructor load   | ~1–2 s (depends on Schedule volume)                                           |
-| Double-click validation | O(1) via `freeGrid` Map lookup                                                |
-| Modal render            | Zero cost when closed (conditional render)                                    |
+| Metric                | Target                                                                        |
+| --------------------- | ----------------------------------------------------------------------------- |
+| Dashboard startup     | ~450–900 ms (config + light instructor index only; **zero Schedule queries**) |
+| First instructor load | ~1–2 s (depends on Schedule volume)                                           |
+| Cell-click validation | O(1) via `freeGrid` Map lookup                                                |
+| Modal render          | Zero cost when closed (panel/modal renders only when open)                    |
 
-Verification: `pnpm run lint` → `pnpm run type-check` → `pnpm run build`. No test framework configured.
+Verification: `pnpm run lint` → `pnpm run type-check` → `pnpm run build`, plus `npx playwright test` for the sales grid (see Testing). `type-check` currently fails in unrelated files (`schedule.tsx`, `startLesson.tsx`).
 
 ## Deployment
 

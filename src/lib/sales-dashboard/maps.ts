@@ -58,14 +58,3 @@ export async function geocodeText(
     });
   });
 }
-
-const BENGALURU = { lat: 12.9716, lng: 77.5946 };
-
-export function centerFor(pt: {
-  lat: number;
-  lng: number;
-}): google.maps.LatLngLiteral {
-  return isFinite(pt.lat) && isFinite(pt.lng)
-    ? { lat: pt.lat, lng: pt.lng }
-    : { lat: BENGALURU.lat, lng: BENGALURU.lng };
-}
