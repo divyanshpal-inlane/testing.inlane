@@ -22,13 +22,14 @@ import {
 } from "@/components/admin/learner/enrollmentActions";
 import { PaidInfoDialog } from "@/components/admin/learner/PaidInfoDialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/use-toast";
 import { normalizePhone } from "@/lib/sales-dashboard/validation";
 import { supabase } from "@/lib/supabaseClient";
 
 export interface SlotCustomer {
   name: string;
-  /** Real number as saved on the booking (never shown unmasked here). */
+  /** Real number as saved on the booking (never shown unmasked here); may be empty. */
   phone: string;
   /** E-mail saved on the booking (from the CRM autofill), if any. */
   email?: string;
@@ -53,7 +54,12 @@ interface LearnerLookup {
  * Learner Management page uses.
  */
 export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
-  const phone10 = normalizePhone(customer.phone);
+  // The learner is matched by PHONE NUMBER only. A booking made in Instructor
+  // Management carries no phone, so Sales can type one to check.
+  const savedPhone10 = normalizePhone(customer.phone);
+  const [enteredPhone, setEnteredPhone] = useState("");
+  const [checkedPhone, setCheckedPhone] = useState<string | null>(null);
+  const phone10 = savedPhone10 ?? normalizePhone(checkedPhone);
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const lookupKey = ["slot-learner-lookup", phone10];
@@ -103,7 +109,8 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: lookupKey });
 
-  const enrollment = lookup.data?.enrollment ?? null;
+  const found = lookup.data ?? null;
+  const enrollment = found?.enrollment ?? null;
 
   const handleSend = async () => {
     if (!enrollment) return;
@@ -124,7 +131,6 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
   };
 
   const handleDelete = async () => {
-    const found = lookup.data;
     if (!found) return;
     setIsDeleting(true);
     try {
@@ -196,10 +202,43 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
   let body: React.ReactNode;
   if (phone10 === null) {
     body = (
-      <p className="slot-panel-learner-note">
-        No valid phone number is saved on this booking, so the learner
-        can&apos;t be checked.
-      </p>
+      <>
+        <p className="slot-panel-learner-note">
+          {customer.phone
+            ? "The phone number on this booking isn't valid."
+            : "This booking has no phone number."}{" "}
+          Enter one to check for a learner.
+        </p>
+        <form
+          className="slot-panel-learner-phone"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setCheckedPhone(enteredPhone);
+          }}
+        >
+          <Input
+            value={enteredPhone}
+            onChange={(e) => setEnteredPhone(e.target.value)}
+            placeholder="10-digit phone"
+            inputMode="numeric"
+            className="h-8 text-xs"
+          />
+          <Button
+            type="submit"
+            variant="outline"
+            size="sm"
+            disabled={normalizePhone(enteredPhone) === null}
+            className="whitespace-nowrap"
+          >
+            Check
+          </Button>
+        </form>
+        {checkedPhone !== null && normalizePhone(checkedPhone) === null && (
+          <p className="slot-panel-learner-note">
+            Enter a valid 10-digit number.
+          </p>
+        )}
+      </>
     );
   } else if (lookup.isLoading) {
     body = <p className="slot-panel-learner-note">Checking learner…</p>;
@@ -220,8 +259,8 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
         </Button>
       </>
     );
-  } else if (lookup.data) {
-    const { learner } = lookup.data;
+  } else if (found) {
+    const { learner } = found;
     const fullyPaid = enrollment?.payment_status === "full_paid";
     // RTO-only learners created here have no payable course enrollment.
     const noLink =
@@ -246,7 +285,7 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
         )}
 
         <div className="slot-panel-learner-actions">
-          {enrollment && !fullyPaid && !noLink && (
+          {enrollment && !noLink && (
             <Button
               variant="outline"
               size="sm"
@@ -262,7 +301,7 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
               Send Payment Link
             </Button>
           )}
-          {enrollment && !fullyPaid && (
+          {enrollment && (
             <Button
               variant="outline"
               size="sm"
@@ -273,7 +312,7 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
               Edit
             </Button>
           )}
-          {enrollment && !fullyPaid && (
+          {enrollment && (
             <Button
               variant="outline"
               size="sm"

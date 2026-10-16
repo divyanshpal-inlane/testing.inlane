@@ -2065,3 +2065,36 @@
   width: 100%;
   justify-content: center;
 }
+
+/* Small screens: keep the × (and the other nameplate controls) on screen. The
+   nameplate is no longer forced to the measured width of the longest name (that
+   made the plate wider than the grid, so the × was clipped off the right edge);
+   the name shrinks with an ellipsis instead, and the chip drops into the flow
+   rather than sitting centred over the name. */
+.instr-plate .instructor-cell {
+  min-width: 0;
+}
+
+.instr-plate .instructor-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.instr-plate .remove-instr {
+  flex: none;
+}
+
+@media (max-width: 900px) {
+  .instr-plate .loc-tag {
+    position: static;
+    transform: none;
+  }
+}
+
+.slot-panel-learner-phone {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+}

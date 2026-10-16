@@ -14,6 +14,7 @@ import {
   memo,
   Suspense,
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -535,6 +536,19 @@ interface WeekTimetableProps {
   ) => SlotInfo;
 }
 
+interface TimetableCell {
+  h0: number;
+  h1: number;
+  free0: boolean;
+  free1: boolean;
+  info0: SlotInfo;
+  info1: SlotInfo;
+  blocks: {
+    block: NonNullable<SlotInfo["scheduleBlock"]>;
+    kind: SlotInfo["kind"];
+  }[];
+}
+
 function WeekTimetable({
   instrId,
   weekDates,
@@ -549,31 +563,53 @@ function WeekTimetable({
   // Every cell's slot info is derived once per data change. Hovering only
   // changes hoveredRow/hoveredCol, so without this each mouse move re-ran
   // resolveInfo for all ~250 cells of every open timetable.
-  const cells = useMemo(
-    () =>
-      TT_HOURS.map((h) =>
-        weekDates.map((d) => {
-          const h0 = h * 60;
-          const h1 = h0 + 30;
-          const free0 = dayFree?.get(d)?.includes(h0) ?? false;
-          const free1 = dayFree?.get(d)?.includes(h1) ?? false;
-          const info0 = resolveInfo(instrId, d, h0, free0);
-          const info1 = resolveInfo(instrId, d, h1, free1);
-          const blocks: {
-            block: NonNullable<SlotInfo["scheduleBlock"]>;
-            kind: SlotInfo["kind"];
-          }[] = [];
-          if (info0.scheduleBlock) {
-            blocks.push({ block: info0.scheduleBlock, kind: info0.kind });
-          }
-          if (info1.scheduleBlock) {
-            blocks.push({ block: info1.scheduleBlock, kind: info1.kind });
-          }
-          return { h0, h1, free0, free1, info0, info1, blocks };
-        }),
-      ),
-    [instrId, weekDates, dayFree, resolveInfo],
-  );
+  //
+  // Computed per DAY COLUMN and kept while the data is unchanged, so moving the
+  // week by one day only builds the one new column instead of all seven.
+  const columnCacheRef = useRef<{
+    resolveInfo: unknown;
+    dayFree: unknown;
+    instrId: string;
+    columns: Map<string, TimetableCell[]>;
+  } | null>(null);
+  const cells = useMemo(() => {
+    let cache = columnCacheRef.current;
+    if (
+      !cache ||
+      cache.resolveInfo !== resolveInfo ||
+      cache.dayFree !== dayFree ||
+      cache.instrId !== instrId
+    ) {
+      cache = { resolveInfo, dayFree, instrId, columns: new Map() };
+      columnCacheRef.current = cache;
+    }
+    const buildColumn = (d: string): TimetableCell[] =>
+      TT_HOURS.map((h) => {
+        const h0 = h * 60;
+        const h1 = h0 + 30;
+        const free0 = dayFree?.get(d)?.includes(h0) ?? false;
+        const free1 = dayFree?.get(d)?.includes(h1) ?? false;
+        const info0 = resolveInfo(instrId, d, h0, free0);
+        const info1 = resolveInfo(instrId, d, h1, free1);
+        const blocks: TimetableCell["blocks"] = [];
+        if (info0.scheduleBlock) {
+          blocks.push({ block: info0.scheduleBlock, kind: info0.kind });
+        }
+        if (info1.scheduleBlock) {
+          blocks.push({ block: info1.scheduleBlock, kind: info1.kind });
+        }
+        return { h0, h1, free0, free1, info0, info1, blocks };
+      });
+    const columns = weekDates.map((d) => {
+      let column = cache.columns.get(d);
+      if (!column) {
+        column = buildColumn(d);
+        cache.columns.set(d, column);
+      }
+      return column;
+    });
+    return TT_HOURS.map((_, rowIdx) => columns.map((col) => col[rowIdx]));
+  }, [instrId, weekDates, dayFree, resolveInfo]);
   return (
     <div className="week-timetable flex flex-row font-sans">
       {/* TIME AXIS */}
@@ -1367,6 +1403,9 @@ export default function SalesDashboard() {
     const start = Math.max(0, windowDates.indexOf(panelAnchor));
     return windowDates.slice(start, start + 7);
   }, [windowDates, panelAnchor]);
+  // The arrows and the date label update immediately; the (heavy) timetables
+  // catch up in a lower-priority render so a click never waits on them.
+  const deferredWeekDates = useDeferredValue(weekDates);
   const panelRangeLabel = useMemo(
     () => formatPanelRange(weekDates),
     [weekDates],
@@ -3051,33 +3090,35 @@ export default function SalesDashboard() {
                 }
               : null,
             scheduleBlock: scheduleBlock("Tentative"),
-            customer:
-              typeof cover.rawTentativeDetails?.phone === "string" &&
-              cover.rawTentativeDetails.phone
-                ? {
-                    name:
-                      typeof cover.rawTentativeDetails.name === "string" &&
-                      cover.rawTentativeDetails.name
-                        ? cover.rawTentativeDetails.name
-                        : cover.learnerName,
-                    phone: cover.rawTentativeDetails.phone,
-                    course: tentativeCourseLabel || cover.courseName,
-                    courseId:
-                      typeof cover.rawTentativeDetails.course === "string" &&
-                      cover.rawTentativeDetails.course !== NO_COURSE
-                        ? cover.rawTentativeDetails.course
-                        : undefined,
-                    email:
-                      typeof cover.rawTentativeDetails.email === "string"
-                        ? cover.rawTentativeDetails.email
-                        : undefined,
-                    paymentStatus:
-                      paymentStatus === "half_paid" ||
-                      paymentStatus === "full_paid"
-                        ? paymentStatus
-                        : "unpaid",
-                  }
-                : undefined,
+            // Every tentative hold gets the Learner section. Holds made in
+            // Instructor Management carry no phone, so the section then looks
+            // the learner up by name instead.
+            customer: {
+              name:
+                typeof cover.rawTentativeDetails?.name === "string" &&
+                cover.rawTentativeDetails.name
+                  ? cover.rawTentativeDetails.name
+                  : cover.learnerName,
+              phone:
+                typeof cover.rawTentativeDetails?.phone === "string" &&
+                cover.rawTentativeDetails.phone
+                  ? cover.rawTentativeDetails.phone
+                  : cover.learnerPhone,
+              course: tentativeCourseLabel || cover.courseName,
+              courseId:
+                typeof cover.rawTentativeDetails?.course === "string" &&
+                cover.rawTentativeDetails.course !== NO_COURSE
+                  ? cover.rawTentativeDetails.course
+                  : undefined,
+              email:
+                typeof cover.rawTentativeDetails?.email === "string"
+                  ? cover.rawTentativeDetails.email
+                  : undefined,
+              paymentStatus:
+                paymentStatus === "half_paid" || paymentStatus === "full_paid"
+                  ? paymentStatus
+                  : "unpaid",
+            },
           };
         }
         if (cover.status === "paused") {
@@ -3123,9 +3164,41 @@ export default function SalesDashboard() {
         };
       }
 
-      // Nothing real (class, buffer, instructor unavailability) explains this
-      // cell, so it carries no reason and is not shaded grey -- grey is
-      // reserved for buffers and the Instructor table's unavailability.
+      // The cell itself is clear, yet it is not free: a full class starting here
+      // would run into the next booking, its travel-gap buffer, or the
+      // instructor's own unavailability. That is still a buffer / unavailability
+      // reason, so it is grey and says so -- white means free, nothing else.
+      if (config?.slotStart && config?.slotEnd) {
+        const openMin = timeToMinutes(config.slotStart);
+        const closeMin = timeToMinutes(config.slotEnd);
+        const classMin = config.slotDurationMinutes ?? 60;
+        if (minute >= openMin && minute + classMin <= closeMin) {
+          const conflict = classifySlotConflict(
+            instrId,
+            date,
+            minute,
+            g,
+            blocksIndex,
+          );
+          return {
+            title: "Not enough time for a full class",
+            detail: [
+              timeLabel,
+              `Instructor: ${name}`,
+              conflict.kind === "direct"
+                ? `A ${classMin}-minute class starting here would overlap another booking.`
+                : conflict.kind === "buffer"
+                  ? `A ${classMin}-minute class starting here would run into the ${g}-minute travel gap around another booking.`
+                  : `A ${classMin}-minute class starting here would run into the instructor's unavailable time.`,
+            ],
+            kind: "default",
+            deleteAction: null,
+          };
+        }
+      }
+
+      // Outside the bookable window (or no config): no reason to show, and not
+      // shaded.
       return {
         title: "Not bookable",
         detail: [timeLabel, `Instructor: ${name}`],
@@ -3710,7 +3783,7 @@ export default function SalesDashboard() {
                 windowTotals={windowTotals}
                 dates={visibleDates}
                 selectedDate={selectedDate}
-                weekDates={weekDates}
+                weekDates={deferredWeekDates}
                 slotStart={config.slotStart}
                 slotEnd={config.slotEnd}
                 collapsed={collapsedForRender}
