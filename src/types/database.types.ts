@@ -799,6 +799,7 @@ export type Database = {
           two_hour_days?: string | null;
           signed_up: string | null;
           start_date: string | null;
+          terms_policy_accepted: boolean;
           unavailability: Json | null;
         };
         Insert: {
@@ -857,6 +858,7 @@ export type Database = {
           two_hour_days?: string | null;
           signed_up?: string | null;
           start_date?: string | null;
+          terms_policy_accepted?: boolean;
           unavailability?: Json | null;
         };
         Update: {
@@ -915,6 +917,7 @@ export type Database = {
           two_hour_days?: string | null;
           signed_up?: string | null;
           start_date?: string | null;
+          terms_policy_accepted?: boolean;
           unavailability?: Json | null;
           has_lesson10_booked: boolean | null;
         };

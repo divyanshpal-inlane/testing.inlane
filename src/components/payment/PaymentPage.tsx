@@ -4,6 +4,7 @@ import { useSearchParams } from "react-router-dom";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -51,6 +52,7 @@ function PaymentPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isPrefilled, setIsPrefilled] = useState(false);
+  const [termsPolicyAccepted, setTermsPolicyAccepted] = useState(false);
   const { data: courses, isLoading: coursesLoading } = useCourses();
   const { data: gatewayMode, isLoading: gatewayModeLoading } =
     usePaymentGatewayMode();
@@ -666,6 +668,31 @@ function PaymentPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
+    if (!termsPolicyAccepted) {
+      setError("Please accept the Terms & Conditions and Terms Policy.");
+      return;
+    }
+
+    if (!paymentDetails.learnerId) {
+      setError("Learner details are unavailable. Please try again.");
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    const { error: acceptanceError } = await supabase
+      .from("Learner")
+      .update({ terms_policy_accepted: true })
+      .eq("id", paymentDetails.learnerId);
+
+    if (acceptanceError) {
+      console.error("Terms policy acceptance error:", acceptanceError);
+      setError("Could not save your acceptance. Please try again.");
+      setIsLoading(false);
+      return;
+    }
+
     // Check gateway mode setting
     if (gatewayMode === "icici") {
       // ICICI only - go directly to ICICI
@@ -674,9 +701,11 @@ function PaymentPage() {
       // Razorpay only - go directly to Razorpay
       setSelectedGateway("razorpay");
       setShowRazorpayCheckout(true);
+      setIsLoading(false);
     } else {
       // Both gateways - show selection dialog
       setShowGatewayDialog(true);
+      setIsLoading(false);
     }
   };
 
@@ -1347,12 +1376,54 @@ function PaymentPage() {
                 </AlertDescription>
               </Alert>
             )}
+            <div className="mt-6 text-center text-sm">
+              <span className="text-black">
+                By continuing, you agree to our
+              </span>
+              <div className="mt-1 flex justify-center gap-3">
+                <a
+                  href="https://inlane.in/terms-and-conditions"
+                  className="text-gray-500 hover:text-blue-500 hover:underline"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Terms of Service
+                </a>
+                <a
+                  href="https://inlane.in/privacy-policy"
+                  className="text-gray-500 hover:text-blue-500 hover:underline"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Privacy Policies
+                </a>
+              </div>
+              <label
+                htmlFor="terms-policy-acceptance"
+                className="mt-4 flex cursor-pointer items-start gap-2 text-left"
+              >
+                <Checkbox
+                  id="terms-policy-acceptance"
+                  checked={termsPolicyAccepted}
+                  onCheckedChange={(checked) =>
+                    setTermsPolicyAccepted(checked === true)
+                  }
+                  aria-required="true"
+                  className="mt-0.5 rounded-none"
+                />
+                <span>
+                  I have read and agree to the Terms &amp; Conditions and Terms
+                  Policy.
+                </span>
+              </label>
+            </div>
             <div className="sticky bottom-0 z-10 -mx-6 border-t bg-white px-6 py-4">
               <Button
                 type="submit"
                 className="w-full"
                 disabled={
                   isLoading ||
+                  !termsPolicyAccepted ||
                   // A prefilled course is locked by the admin — its course /
                   // modules / amount are already set, so never gate the button
                   // on picking them (the picker isn't even shown).
@@ -1383,27 +1454,6 @@ function PaymentPage() {
               </Button>
             </div>
           </form>
-          <div className="mt-6 text-center text-sm">
-            <span className="text-black">By continuing, you agree to our</span>
-            <div className="mt-1 flex justify-center gap-3">
-              <a
-                href="https://inlane.in/terms-and-conditions"
-                className="text-gray-500 hover:text-blue-500 hover:underline"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Terms of Service
-              </a>
-              <a
-                href="https://inlane.in/privacy-policy"
-                className="text-gray-500 hover:text-blue-500 hover:underline"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Privacy Policies
-              </a>
-            </div>
-          </div>
         </CardContent>
       </Card>
 
