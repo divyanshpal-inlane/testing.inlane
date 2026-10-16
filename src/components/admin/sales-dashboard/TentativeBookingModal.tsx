@@ -40,6 +40,9 @@ export interface CustomerFormValues {
   paymentStatus: "unpaid" | "half_paid" | "full_paid";
   customerAddress: string;
   course: string;
+  // From the CRM autofill, when it had one. Not shown in the form; saved with
+  // the booking so creating the learner later can start with it filled in.
+  customerEmail?: string;
 }
 
 // "None" in the course dropdown (a booking that is not tied to a course yet).
@@ -433,6 +436,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
         course: formData.course,
         course_name:
           courseOptions.find((c) => c.id === formData.course)?.label ?? null,
+        ...(formData.customerEmail ? { email: formData.customerEmail } : {}),
         // Groups every row written by one booking (a multi-class batch or a
         // single slot) so a later Edit can find all the rows booked together
         // without guessing from phone/name. Legacy rows created before this
@@ -455,6 +459,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
           course: formData.course,
           course_name:
             courseOptions.find((c) => c.id === formData.course)?.label ?? null,
+          ...(formData.customerEmail ? { email: formData.customerEmail } : {}),
           batch_id: batchId,
           updated_at: new Date().toISOString(),
         };
@@ -877,6 +882,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                   customerAddress: fill.address ?? formData.customerAddress,
                   paymentStatus: payment ?? formData.paymentStatus,
                   phoneFromCrm: fill.phone ? true : formData.phoneFromCrm,
+                  customerEmail: fill.email ?? formData.customerEmail,
                 });
               }}
             />
