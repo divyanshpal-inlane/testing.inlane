@@ -24,6 +24,7 @@ import {
 } from "react";
 
 import type { LocateStatus } from "@/components/admin/sales-dashboard/LocationSearch";
+import { SendSlotsWhatsApp } from "@/components/admin/sales-dashboard/SendSlotsWhatsApp";
 import {
   SlotCustomer,
   SlotLearnerActions,
@@ -69,6 +70,7 @@ import {
   istTodayISO,
   minutesTo12Hour,
   minutesToTime,
+  normalizePhone,
   timeToMinutes,
 } from "@/lib/sales-dashboard/validation";
 import type { InstructorWorkingHours } from "@/lib/sales-dashboard/workingHours";
@@ -1170,9 +1172,20 @@ export default function SalesDashboard() {
   // survive the modal hiding/reopening while Sales picks each additional
   // class on the grid (see handleAddAnotherSlot / addingSlotMode below).
   const [pendingSlots, setPendingSlots] = useState<SlotPick[]>([]);
+  // The booking that was just saved, kept (name, REAL phone, classes) after the
+  // form clears so the slot panel can offer "Send Tentative Slots on WhatsApp".
+  // Dropped as soon as the agent starts another booking.
+  const [justBooked, setJustBooked] = useState<{
+    name: string;
+    phone: string;
+    slots: { date: string; startTime: string; endTime: string }[];
+  } | null>(null);
   const [customerFormData, setCustomerFormData] = useState<CustomerFormValues>(
     () => DEFAULT_CUSTOMER_FORM(currentUserName),
   );
+  useEffect(() => {
+    if (tentativeModalOpen) setJustBooked(null);
+  }, [tentativeModalOpen]);
   // currentUserName resolves asynchronously (a real DB/edge-function call),
   // so it's almost always still empty at the lazy-init above -- keep
   // salesAgent synced to it as soon as it resolves, and again if it ever
@@ -1333,6 +1346,15 @@ export default function SalesDashboard() {
     // reason. Targeted refresh keeps this to a brief per-row skeleton on
     // just the affected instructor(s).
     const affectedIds = [...new Set(pendingSlots.map((s) => s.instructorId))];
+    setJustBooked({
+      name: customerFormData.customerName,
+      phone: customerFormData.customerPhone,
+      slots: pendingSlots.map((p) => ({
+        date: p.date,
+        startTime: p.startTime,
+        endTime: p.endTime,
+      })),
+    });
     setTentativeModalOpen(false);
     setPendingSlots([]);
     setCustomerFormData(DEFAULT_CUSTOMER_FORM(currentUserName));
@@ -1343,6 +1365,7 @@ export default function SalesDashboard() {
     refreshInstructors,
     editContext,
     pendingSlots,
+    customerFormData,
     currentUserName,
     showSuccessNotice,
   ]);
@@ -3560,6 +3583,27 @@ export default function SalesDashboard() {
                 onFormDataChange={setCustomerFormData}
                 editContext={editContext}
               />
+            ) : justBooked && justBooked.slots.length > 0 ? (
+              <div className="slot-panel-detail">
+                <div className="slot-panel-detail-top">
+                  <span className="slot-panel-badge slot-panel-badge-tentative">
+                    Booking saved
+                  </span>
+                  <button
+                    type="button"
+                    className="slot-panel-detail-close"
+                    onClick={() => setJustBooked(null)}
+                    aria-label="Dismiss"
+                  >
+                    ×
+                  </button>
+                </div>
+                <SendSlotsWhatsApp
+                  customerName={justBooked.name}
+                  phone={justBooked.phone}
+                  slots={justBooked.slots}
+                />
+              </div>
             ) : selectedSlot ? (
               <div className="slot-panel-detail">
                 <div className="slot-panel-detail-top">
@@ -3646,6 +3690,45 @@ export default function SalesDashboard() {
                     )}
                   </div>
                 )}
+                {selectedSlot.info.kind === "tentative" &&
+                  selectedSlot.info.customer &&
+                  (() => {
+                    const c = selectedSlot.info.customer;
+                    const key = normalizePhone(c.phone);
+                    const picked = {
+                      date: selectedSlot.date,
+                      startTime: minutesToTime(selectedSlot.minute),
+                      endTime: minutesToTime(selectedSlot.minute + 60),
+                    };
+                    // Same phone => same customer: send every upcoming hold,
+                    // not just the one clicked. No phone => just this slot.
+                    const siblings: (typeof picked)[] = [];
+                    if (key) {
+                      for (const perDate of blocksIndex.values())
+                        for (const list of perDate.values())
+                          for (const b of list) {
+                            const bp = normalizePhone(
+                              typeof b.rawTentativeDetails?.phone === "string"
+                                ? b.rawTentativeDetails.phone
+                                : "",
+                            );
+                            if (b.isTentative && bp === key && b.date >= today)
+                              siblings.push({
+                                date: b.date,
+                                startTime: minutesToTime(b.startMinute),
+                                endTime: minutesToTime(b.endMinute),
+                              });
+                          }
+                    }
+                    return (
+                      <SendSlotsWhatsApp
+                        key={`wa-${selectedSlot.instrId}-${selectedSlot.date}-${selectedSlot.minute}`}
+                        customerName={c.name}
+                        phone={c.phone}
+                        slots={siblings.length > 0 ? siblings : [picked]}
+                      />
+                    );
+                  })()}
                 {selectedSlot.info.customer && (
                   <SlotLearnerActions
                     key={`${selectedSlot.instrId}-${selectedSlot.date}-${selectedSlot.minute}-${selectedSlot.info.customer.phone}`}
