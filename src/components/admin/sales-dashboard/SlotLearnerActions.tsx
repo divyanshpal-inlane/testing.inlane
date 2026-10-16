@@ -1,11 +1,27 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  ArrowBigLeft,
+  Delete,
+  Pencil,
+  RefreshCcw,
+  Send,
+  UserPlus,
+} from "lucide-react";
 import { useState } from "react";
 
 import {
   CreatedLearnerInfo,
   CreateLearnerDialog,
 } from "@/components/admin/learner/CreateLearnerDialog";
-import { sendPaymentLink } from "@/components/admin/learner/sendPaymentLink";
+import { EditPlanDialog } from "@/components/admin/learner/EditPlanDialog";
+import {
+  deleteLearnerCascade,
+  ENROLLMENT_SELECT,
+  EnrollmentRecord,
+  sendEnrollmentPaymentLink,
+} from "@/components/admin/learner/enrollmentActions";
+import { PaidInfoDialog } from "@/components/admin/learner/PaidInfoDialog";
+import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/use-toast";
 import { normalizePhone } from "@/lib/sales-dashboard/validation";
 import { supabase } from "@/lib/supabaseClient";
@@ -23,81 +39,56 @@ export interface SlotCustomer {
   paymentStatus: "unpaid" | "half_paid" | "full_paid";
 }
 
-interface ExistingEnrollment {
-  id: string;
-  installment_mode: string | null;
-  amount: number | null;
-  installment1_amount: number | null;
-  installment2_amount: number | null;
-  payment_status: string | null;
-  Courses: { name: string | null; duration: number | null } | null;
-  payment: {
-    payment_type: string | null;
-    amount: number | null;
-    total_amount: number | null;
-  } | null;
-}
-
-// Same rules as Incomplete Payments' getPayableAmount().
-function payableAmount(e: ExistingEnrollment): number {
-  const paymentAmount = e.payment?.total_amount || e.payment?.amount || 0;
-  if (e.installment_mode === "full") return e.amount || paymentAmount;
-  if (
-    e.installment_mode === "first_half" ||
-    e.installment_mode === "installment"
-  )
-    return e.installment1_amount || paymentAmount;
-  if (e.installment_mode === "second_half")
-    return e.installment2_amount || paymentAmount;
-  return paymentAmount || e.amount || 0;
-}
-
-// Same rules as Incomplete Payments' getCourseName().
-function enrollmentCourseName(e: ExistingEnrollment): string {
-  if (e.Courses?.name) return e.Courses.name;
-  if (e.payment?.payment_type === "demo") return "Demo Class";
-  if (e.payment?.payment_type === "custom") return "Custom Course";
-  return "Unknown";
+interface LearnerLookup {
+  learner: { id: string; name: string | null; phone: string | null };
+  /** Their latest enrollment, if they have one. */
+  enrollment: EnrollmentRecord | null;
 }
 
 /**
  * Shown in the slot panel for a tentative slot: is the customer already a
- * Learner, and if not, create them (same form and edge function as Learner
- * Management) and then send the payment link (same calls as well).
+ * Learner? If not, create them (same form and edge function as Learner
+ * Management). Once they exist: send the payment link, edit the plan, add paid
+ * info or delete the learner -- all through the same dialogs and calls the
+ * Learner Management page uses.
  */
 export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
   const phone10 = normalizePhone(customer.phone);
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [createOpen, setCreateOpen] = useState(false);
-  const [created, setCreated] = useState<CreatedLearnerInfo | null>(null);
-  const [isSending, setIsSending] = useState(false);
-  const [linkSent, setLinkSent] = useState(false);
+  const lookupKey = ["slot-learner-lookup", phone10];
 
-  const lookup = useQuery({
-    queryKey: ["slot-learner-lookup", phone10],
+  const [createOpen, setCreateOpen] = useState(false);
+  // Set when the learner was created from this panel (changes the wording and
+  // hides the payment link for RTO-only cases, which have no payable course).
+  const [created, setCreated] = useState<CreatedLearnerInfo | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [paidInfoOpen, setPaidInfoOpen] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  const lookup = useQuery<LearnerLookup | null>({
+    queryKey: lookupKey,
     enabled: phone10 !== null,
-    // Always fresh: the learner may have been created elsewhere since.
+    // Always fresh: the learner may have been created or changed elsewhere.
     staleTime: 0,
     queryFn: async () => {
       // The Learner table stores phones in several formats.
       const variants = [phone10!, `91${phone10}`, `+91${phone10}`];
       const { data, error } = await supabase
         .from("Learner")
-        .select("id, name, email, phone")
+        .select("id, name, phone")
         .in("phone", variants)
         .limit(1);
       if (error) throw error;
       const learner = data?.[0];
       if (!learner) return null;
 
-      // Their latest enrollment, for the payment link (same data the
-      // Incomplete Payments card sends from).
+      // Their latest enrollment (same select as Incomplete Payments).
       const { data: enrollments, error: enrollmentError } = await supabase
         .from("enrollment")
-        .select(
-          "id, installment_mode, amount, installment1_amount, installment2_amount, payment_status, Courses(name, duration), payment(payment_type, amount, total_amount)",
-        )
+        .select(ENROLLMENT_SELECT)
         .eq("learner_id", learner.id)
         .order("created_at", { ascending: false })
         .limit(1);
@@ -105,91 +96,105 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
       return {
         learner,
         enrollment: (enrollments?.[0] ??
-          null) as unknown as ExistingEnrollment | null,
+          null) as unknown as EnrollmentRecord | null,
       };
     },
   });
 
+  const refresh = () => queryClient.invalidateQueries({ queryKey: lookupKey });
+
+  const enrollment = lookup.data?.enrollment ?? null;
+
   const handleSend = async () => {
-    if (!created?.enrollmentId) return;
+    if (!enrollment) return;
     setIsSending(true);
     try {
-      await sendPaymentLink(
-        {
-          id: created.learnerId,
-          name: created.name,
-          email: created.email,
-          phone: created.phone,
-        },
-        { name: created.courseName, duration: created.totalLessons },
-        created.paymentAmount,
-        created.enrollmentId,
-        toast,
-        created.courseType,
-      );
-      setLinkSent(true);
+      await sendEnrollmentPaymentLink(enrollment, toast);
+    } catch (err) {
+      toast({
+        title: "Error",
+        description:
+          (err as { message?: string } | null)?.message ||
+          "Failed to send payment link",
+        variant: "destructive",
+      });
     } finally {
       setIsSending(false);
     }
   };
 
-  const handleSendExisting = async () => {
+  const handleDelete = async () => {
     const found = lookup.data;
-    if (!found?.enrollment) return;
-    const { learner, enrollment } = found;
-    setIsSending(true);
+    if (!found) return;
+    setIsDeleting(true);
     try {
-      await sendPaymentLink(
-        {
-          id: learner.id,
-          name: learner.name ?? "",
-          email: learner.email ?? "",
-          phone: learner.phone ?? "",
-        },
-        {
-          name: enrollmentCourseName(enrollment),
-          duration: enrollment.Courses?.duration || 1,
-        },
-        payableAmount(enrollment),
-        enrollment.id,
-        toast,
-        enrollment.payment?.payment_type === "demo" ? "demo" : undefined,
-      );
-      setLinkSent(true);
+      await deleteLearnerCascade(found.learner.id, found.learner.phone);
+      toast({
+        title: "Success",
+        description: "Deleted learner.",
+      });
+      setCreated(null);
+      setConfirmingDelete(false);
+      await refresh();
+    } catch (err) {
+      toast({
+        title: "Error",
+        description:
+          (err as { message?: string } | null)?.message ||
+          "Failed to delete the learner.",
+        variant: "destructive",
+      });
     } finally {
-      setIsSending(false);
+      setIsDeleting(false);
     }
   };
+
+  // Delete with an explicit confirm step, like the Learner Management card.
+  const deleteControls = (
+    <>
+      {confirmingDelete ? (
+        <>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={isDeleting}
+            onClick={() => void handleDelete()}
+            className="whitespace-nowrap"
+          >
+            {isDeleting ? (
+              <RefreshCcw size={14} className="mr-1 animate-spin" />
+            ) : (
+              <Delete size={14} className="mr-1" />
+            )}
+            Confirm
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={isDeleting}
+            onClick={() => setConfirmingDelete(false)}
+            className="whitespace-nowrap"
+          >
+            <ArrowBigLeft size={14} className="mr-1" />
+            Cancel
+          </Button>
+        </>
+      ) : (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setConfirmingDelete(true)}
+          className="whitespace-nowrap"
+        >
+          <Delete size={14} className="mr-1" />
+          Delete
+        </Button>
+      )}
+    </>
+  );
 
   let body: React.ReactNode;
-  if (created) {
-    const canSend = Boolean(
-      created.enrollmentId && created.caseType === "classes_only",
-    );
-    body = (
-      <>
-        <p className="slot-panel-learner-status ok">✓ Learner created</p>
-        {canSend ? (
-          <button
-            type="button"
-            className="slot-pop-edit-btn"
-            disabled={isSending}
-            onClick={() => void handleSend()}
-          >
-            {isSending
-              ? "Sending…"
-              : linkSent
-                ? "Resend Payment Link"
-                : "Send Payment Link"}
-          </button>
-        ) : (
-          <p className="slot-panel-learner-note">
-            No payment link for this case type.
-          </p>
-        )}
-      </>
-    );
-  } else if (phone10 === null) {
+  if (phone10 === null) {
     body = (
       <p className="slot-panel-learner-note">
         No valid phone number is saved on this booking, so the learner
@@ -204,55 +209,102 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
         <p className="slot-panel-learner-note">
           Couldn&apos;t check the learner.
         </p>
-        <button
-          type="button"
-          className="slot-pop-edit-btn"
+        <Button
+          variant="outline"
+          size="sm"
           onClick={() => void lookup.refetch()}
+          className="whitespace-nowrap"
         >
+          <RefreshCcw size={14} className="mr-1" />
           Retry
-        </button>
+        </Button>
       </>
     );
   } else if (lookup.data) {
-    const { learner, enrollment } = lookup.data;
+    const { learner } = lookup.data;
     const fullyPaid = enrollment?.payment_status === "full_paid";
+    // RTO-only learners created here have no payable course enrollment.
+    const noLink =
+      created !== null &&
+      (created.caseType !== "classes_only" || !created.enrollmentId);
     body = (
       <>
         <p className="slot-panel-learner-status ok">
-          ✓ Learner already created
+          {created ? "✓ Learner created" : "✓ Learner already created"}
           {learner.name ? ` (${learner.name})` : ""}
         </p>
-        {!enrollment ? (
+
+        {enrollment ? (
           <p className="slot-panel-learner-note">
-            No enrollment found, so there is no payment link to send.
+            Payment: {enrollment.payment_status ?? "pending"}
+            {fullyPaid ? " — already fully paid." : ""}
           </p>
-        ) : fullyPaid ? (
-          <p className="slot-panel-learner-note">Already fully paid.</p>
         ) : (
-          <button
-            type="button"
-            className="slot-pop-edit-btn"
-            disabled={isSending}
-            onClick={() => void handleSendExisting()}
-          >
-            {isSending
-              ? "Sending…"
-              : linkSent
-                ? "Resend Payment Link"
-                : "Send Payment Link"}
-          </button>
+          <p className="slot-panel-learner-note">
+            No enrollment found, so there is no payment to send or edit.
+          </p>
+        )}
+
+        <div className="slot-panel-learner-actions">
+          {enrollment && !fullyPaid && !noLink && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={isSending}
+              onClick={() => void handleSend()}
+              className="whitespace-nowrap"
+            >
+              {isSending ? (
+                <RefreshCcw size={14} className="mr-1 animate-spin" />
+              ) : (
+                <Send size={14} className="mr-1" />
+              )}
+              Send Payment Link
+            </Button>
+          )}
+          {enrollment && !fullyPaid && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setEditOpen(true)}
+              className="whitespace-nowrap"
+            >
+              <Pencil size={14} className="mr-1" />
+              Edit
+            </Button>
+          )}
+          {enrollment && !fullyPaid && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPaidInfoOpen(true)}
+              className="whitespace-nowrap"
+            >
+              <Send size={14} className="mr-1" />
+              Add paid info
+            </Button>
+          )}
+          {deleteControls}
+        </div>
+        {confirmingDelete && (
+          <p className="slot-panel-learner-note">
+            This permanently deletes the learner and all of their enrollments
+            and payments.
+          </p>
         )}
       </>
     );
   } else {
     body = (
-      <button
-        type="button"
-        className="slot-pop-edit-btn"
+      <Button
+        variant="outline"
+        size="sm"
         onClick={() => setCreateOpen(true)}
+        className="whitespace-nowrap"
       >
+        <UserPlus size={14} className="mr-1" />
         Create New Learner
-      </button>
+      </Button>
     );
   }
 
@@ -273,11 +325,20 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
         }}
         onCreated={(info) => {
           setCreated(info);
-          setLinkSent(false);
-          void queryClient.invalidateQueries({
-            queryKey: ["slot-learner-lookup", phone10],
-          });
+          void refresh();
         }}
+      />
+      <EditPlanDialog
+        open={editOpen}
+        onOpenChange={setEditOpen}
+        enrollment={enrollment}
+        onSaved={() => void refresh()}
+      />
+      <PaidInfoDialog
+        open={paidInfoOpen}
+        onOpenChange={setPaidInfoOpen}
+        enrollment={enrollment}
+        onSaved={() => void refresh()}
       />
     </div>
   );
