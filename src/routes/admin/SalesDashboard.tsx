@@ -23,6 +23,10 @@ import {
 } from "react";
 
 import type { LocateStatus } from "@/components/admin/sales-dashboard/LocationSearch";
+import {
+  SlotCustomer,
+  SlotLearnerActions,
+} from "@/components/admin/sales-dashboard/SlotLearnerActions";
 import type {
   CustomerFormValues,
   SlotPick,
@@ -173,6 +177,9 @@ interface SlotInfo {
   // lost when `card` takes over (e.g. a tentative hold's delete
   // notes). The popover never reads this.
   panelDetail?: string[];
+  // Who a tentative hold is for, so the panel can offer "Create New Learner" /
+  // "Send Payment Link". Only set when the booking has a phone number.
+  customer?: SlotCustomer;
 }
 
 type SortKey = "distance" | "freeDesc" | "freeAsc" | "alpha";
@@ -2587,6 +2594,7 @@ export default function SalesDashboard() {
         customerAddress: typeof td.address === "string" ? td.address : "",
         course:
           typeof td.course === "string" && td.course ? td.course : NO_COURSE,
+        customerEmail: typeof td.email === "string" ? td.email : undefined,
       });
       setSelectedSlot(null);
       setTentativeModalOpen(true);
@@ -2933,6 +2941,11 @@ export default function SalesDashboard() {
           // for a real tentative row, but favors allowing the edit over
           // silently hiding it).
           const paymentStatus = cover.paymentStatus ?? "unpaid";
+          const tentativeCourseLabel =
+            typeof cover.rawTentativeDetails?.course_name === "string" &&
+            cover.rawTentativeDetails.course_name !== "None"
+              ? cover.rawTentativeDetails.course_name
+              : "";
           const isUnpaid = paymentStatus === "unpaid";
           // Same fields (and the same cover.learnerName/area/courseName
           // already computed from tentative_details) the "booked" branch
@@ -3002,9 +3015,9 @@ export default function SalesDashboard() {
               lessonNumber: cover.lessonNumber,
               phone: displayPhone(cover.learnerPhone),
               location: cover.area,
-              // Instructor Management's tentative card shows the hold's
-              // description (not a course) plus its lead and payment info.
-              course: "",
+              // Sales saves the chosen course as `course_name`; a description
+              // (Instructor Management holds) is shown on its own row.
+              course: tentativeCourseLabel,
               description: cover.courseName,
               lead: cover.rawTentativeDetails?.leadName
                 ? String(cover.rawTentativeDetails.leadName)
@@ -3038,6 +3051,33 @@ export default function SalesDashboard() {
                 }
               : null,
             scheduleBlock: scheduleBlock("Tentative"),
+            customer:
+              typeof cover.rawTentativeDetails?.phone === "string" &&
+              cover.rawTentativeDetails.phone
+                ? {
+                    name:
+                      typeof cover.rawTentativeDetails.name === "string" &&
+                      cover.rawTentativeDetails.name
+                        ? cover.rawTentativeDetails.name
+                        : cover.learnerName,
+                    phone: cover.rawTentativeDetails.phone,
+                    course: tentativeCourseLabel || cover.courseName,
+                    courseId:
+                      typeof cover.rawTentativeDetails.course === "string" &&
+                      cover.rawTentativeDetails.course !== NO_COURSE
+                        ? cover.rawTentativeDetails.course
+                        : undefined,
+                    email:
+                      typeof cover.rawTentativeDetails.email === "string"
+                        ? cover.rawTentativeDetails.email
+                        : undefined,
+                    paymentStatus:
+                      paymentStatus === "half_paid" ||
+                      paymentStatus === "full_paid"
+                        ? paymentStatus
+                        : "unpaid",
+                  }
+                : undefined,
           };
         }
         if (cover.status === "paused") {
@@ -3532,6 +3572,12 @@ export default function SalesDashboard() {
                       </button>
                     )}
                   </div>
+                )}
+                {selectedSlot.info.customer && (
+                  <SlotLearnerActions
+                    key={`${selectedSlot.instrId}-${selectedSlot.date}-${selectedSlot.minute}-${selectedSlot.info.customer.phone}`}
+                    customer={selectedSlot.info.customer}
+                  />
                 )}
               </div>
             ) : (
