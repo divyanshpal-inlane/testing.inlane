@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 
 import type { GeoPoint, KmlZone } from "@/lib/sales-dashboard/kml";
 import { geocodeText, loadMapsApi } from "@/lib/sales-dashboard/maps";
@@ -7,7 +7,8 @@ import { googleMapsLoader } from "@/utils/googleMaps";
 export type LocateStatus = "idle" | "loading" | "found" | "none";
 
 interface LocationSearchProps {
-  zones: KmlZone[] | null;
+  // `instructorId` is present on DB zones; it powers the map's "Add" button.
+  zones: (KmlZone & { instructorId?: string })[] | null;
   zonesError: string | null;
   status: LocateStatus;
   resultLabel: string | null;
@@ -24,6 +25,10 @@ interface LocationSearchProps {
   onRetryZones?: () => void;
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
+  /** Adds this instructor's timetable to the dashboard (polygon popup). */
+  onAddInstructor?: (instructorId: string) => void;
+  /** Instructors already on the dashboard, so the popup can say so. */
+  dashboardInstructorIds?: ReadonlySet<string>;
 }
 
 interface OverlaySet {
@@ -31,7 +36,6 @@ interface OverlaySet {
   ring: google.maps.Polyline | null;
   polygons: google.maps.Polygon[];
   points: google.maps.Marker[];
-  labels: google.maps.Marker[];
 }
 
 const EMPTY_OVERLAYS: OverlaySet = {
@@ -39,12 +43,11 @@ const EMPTY_OVERLAYS: OverlaySet = {
   ring: null,
   polygons: [],
   points: [],
-  labels: [],
 };
 const DEFAULT_MAP_CENTER = { lat: 12.9716, lng: 77.5946 };
 const DEFAULT_MAP_ZOOM = 11;
 
-export default function LocationSearch({
+function LocationSearch({
   zones,
   zonesError,
   status,
@@ -58,12 +61,44 @@ export default function LocationSearch({
   onRetryZones,
   collapsed = false,
   onToggleCollapsed,
+  onAddInstructor,
+  dashboardInstructorIds,
 }: LocationSearchProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const mapElRef = useRef<HTMLDivElement>(null);
   const autoRef = useRef<google.maps.places.Autocomplete | null>(null);
   const mapObjRef = useRef<google.maps.Map | null>(null);
   const overlaysRef = useRef<OverlaySet>(EMPTY_OVERLAYS);
+  const infoWindowRef = useRef<google.maps.InfoWindow | null>(null);
+  // The polygon the user clicked (highlighted while its popup is open). Kept in
+  // a ref, not state, so selecting never re-runs the overlay effect.
+  const selectedRef = useRef<{
+    polygon: google.maps.Polygon | null;
+    key: string;
+  } | null>(null);
+  const baseStyleRef = useRef(
+    new WeakMap<google.maps.Polygon, google.maps.PolygonOptions>(),
+  );
+  const onAddRef = useRef(onAddInstructor);
+  const dashboardIdsRef = useRef(dashboardInstructorIds);
+  useEffect(() => {
+    onAddRef.current = onAddInstructor;
+    dashboardIdsRef.current = dashboardInstructorIds;
+  });
+  // Off: the map shows only the matched (Area + Nearby) polygons. On: every
+  // instructor polygon is drawn too, in neutral grey.
+  const [showAllZones, setShowAllZones] = useState(false);
+  // Full-screen map, for focusing on the polygons alone.
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setExpanded(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expanded]);
   const selectedPlaceRef = useRef<{
     lat: number;
     lng: number;
@@ -76,9 +111,6 @@ export default function LocationSearch({
   );
   const [places, setPlaces] = useState<google.maps.PlacesLibrary | null>(null);
   const [geoError, setGeoError] = useState<string | null>(null);
-  const [manualOpen, setManualOpen] = useState(false);
-  const [manualLat, setManualLat] = useState("");
-  const [manualLng, setManualLng] = useState("");
 
   const applyResolvedLocation = useCallback(
     (selection: { lat: number; lng: number; label: string }) => {
@@ -112,7 +144,7 @@ export default function LocationSearch({
         if (active) setPlaces(lib);
       })
       .catch(() => {
-        // Degrade to the manual lat/lng entry path below.
+        // Autocomplete is unavailable; the Search button (geocoding) still works.
       });
     return () => {
       active = false;
@@ -159,8 +191,6 @@ export default function LocationSearch({
     if (point !== null) return;
     selectedPlaceRef.current = null;
     setGeoError(null);
-    setManualLat("");
-    setManualLng("");
     if (inputRef.current) inputRef.current.value = "";
   }, [point]);
 
@@ -183,7 +213,7 @@ export default function LocationSearch({
       // produced no feedback at all.
       setGeoError(
         maps === null
-          ? "Google Maps isn't configured — use the Coordinates button instead."
+          ? "Google Maps isn't configured, so location search is unavailable."
           : "Still loading the map — try again in a moment.",
       );
       return;
@@ -198,20 +228,16 @@ export default function LocationSearch({
     }
   };
 
-  const applyManual = (): void => {
-    const lat = parseFloat(manualLat);
-    const lng = parseFloat(manualLng);
-    if (Number.isFinite(lat) && Number.isFinite(lng)) {
-      setGeoError(null);
-      applyResolvedLocation({
-        lat,
-        lng,
-        label: `${lat.toFixed(5)}, ${lng.toFixed(5)}`,
-      });
-    } else {
-      setGeoError("Enter valid latitude and longitude numbers.");
-    }
-  };
+  // The container changes size when expanded/collapsed; Google Maps must be
+  // told. Only on that change, not on every overlay redraw.
+  useEffect(() => {
+    const map = mapObjRef.current;
+    if (!map || !maps) return;
+    // Full screen: plain scroll zooms and one finger pans, like Google Maps.
+    // Inline in the page, keep Ctrl+scroll so the page can still scroll past.
+    map.setOptions({ gestureHandling: expanded ? "greedy" : "auto" });
+    maps.event.trigger(map, "resize");
+  }, [maps, expanded]);
 
   useEffect(() => {
     if (!maps) return;
@@ -228,6 +254,16 @@ export default function LocationSearch({
         mapTypeControl: false,
         streetViewControl: false,
         fullscreenControl: false,
+        cameraControl: false,
+      });
+      mapObjRef.current.addListener("click", () => {
+        const sel = selectedRef.current;
+        if (sel?.polygon) {
+          const base = baseStyleRef.current.get(sel.polygon);
+          if (base) sel.polygon.setOptions(base);
+        }
+        selectedRef.current = null;
+        infoWindowRef.current?.close();
       });
     }
     const map = mapObjRef.current;
@@ -236,22 +272,119 @@ export default function LocationSearch({
     overlays.ring?.setMap(null);
     for (const p of overlays.polygons) p.setMap(null);
     for (const p of overlays.points) p.setMap(null);
-    for (const l of overlays.labels) l.setMap(null);
     overlaysRef.current = {
       marker: null,
       ring: null,
       polygons: [],
       points: [],
-      labels: [],
     };
+
+    const matchedSet = new Set(matchedNames);
+    const bounds = new maps.LatLngBounds();
+    let matchedDrawn = 0;
+
+    const HIGHLIGHT: google.maps.PolygonOptions = {
+      strokeColor: "#2563eb",
+      strokeOpacity: 1,
+      strokeWeight: 3,
+      fillColor: "#2563eb",
+      fillOpacity: 0.3,
+      zIndex: 5,
+    };
+    const unhighlight = (): void => {
+      const sel = selectedRef.current;
+      if (!sel?.polygon) return;
+      const base = baseStyleRef.current.get(sel.polygon);
+      if (base) sel.polygon.setOptions(base);
+    };
+    // Makes a polygon clickable: highlights it and opens a popup with the
+    // instructor's name and an "Add to dashboard" button.
+    const makeClickable = (
+      polygon: google.maps.Polygon,
+      z: { name: string; instructorId?: string },
+      base: google.maps.PolygonOptions,
+    ): void => {
+      baseStyleRef.current.set(polygon, base);
+      // The overlays are rebuilt on redraws; keep the clicked one highlighted.
+      if (selectedRef.current?.key === z.name) {
+        polygon.setOptions(HIGHLIGHT);
+        selectedRef.current.polygon = polygon;
+      }
+      polygon.addListener("click", (e: google.maps.PolyMouseEvent) => {
+        if (!e.latLng) return;
+        unhighlight();
+        polygon.setOptions(HIGHLIGHT);
+        selectedRef.current = { polygon, key: z.name };
+
+        const el = document.createElement("div");
+        el.className = "loc-info";
+        const title = document.createElement("div");
+        title.className = "loc-info-name";
+        title.textContent = z.name;
+        el.appendChild(title);
+        const instructorId = z.instructorId;
+        if (instructorId && onAddRef.current) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "loc-add-btn";
+          if (dashboardIdsRef.current?.has(instructorId)) {
+            btn.textContent = "✓ In dashboard";
+            btn.disabled = true;
+          } else {
+            btn.textContent = "＋ Add to dashboard";
+            btn.addEventListener("click", () => {
+              onAddRef.current?.(instructorId);
+              btn.textContent = "✓ Added";
+              btn.disabled = true;
+            });
+          }
+          el.appendChild(btn);
+        }
+        if (!infoWindowRef.current) {
+          const created = new maps.InfoWindow();
+          // Registered once: the popup is reused for every polygon.
+          created.addListener("closeclick", () => {
+            unhighlight();
+            selectedRef.current = null;
+          });
+          infoWindowRef.current = created;
+        }
+        const info = infoWindowRef.current;
+        info.setContent(el);
+        info.setPosition(e.latLng);
+        info.open(map);
+      });
+    };
+
+    // Every other instructor polygon, grey and underneath the matched ones.
+    // Not added to `bounds`, so the map still frames the matches.
+    if (showAllZones) {
+      for (const z of zones ?? []) {
+        if (z.kind !== "polygon") continue;
+        if (point && via === "polygon" && matchedSet.has(z.name)) continue;
+        const greyStyle: google.maps.PolygonOptions = {
+          strokeColor: "#6b7280",
+          strokeWeight: 1,
+          strokeOpacity: 0.7,
+          fillColor: "#9ca3af",
+          fillOpacity: 0.08,
+          zIndex: 1,
+        };
+        const polygon = new maps.Polygon({
+          map,
+          paths: z.coords.map((c) => ({ lat: c.lat, lng: c.lng })),
+          ...greyStyle,
+        });
+        makeClickable(polygon, z, greyStyle);
+        overlaysRef.current.polygons.push(polygon);
+      }
+    }
 
     if (!point) {
       map.setCenter(DEFAULT_MAP_CENTER);
       map.setZoom(DEFAULT_MAP_ZOOM);
       return;
     }
-    const matchedSet = new Set(matchedNames);
-    const bounds = new maps.LatLngBounds();
 
     for (const z of zones ?? []) {
       const info = zoneInfo[z.name];
@@ -262,41 +395,19 @@ export default function LocationSearch({
         info
       ) {
         const path = z.coords.map((c) => ({ lat: c.lat, lng: c.lng }));
-        const polygon = new maps.Polygon({
-          map,
-          paths: path,
+        const matchedStyle: google.maps.PolygonOptions = {
           strokeColor: info.color,
+          strokeOpacity: 1,
           strokeWeight: 1.5,
           fillColor: info.color,
           fillOpacity: 0.12,
-        });
+          zIndex: 2,
+        };
+        const polygon = new maps.Polygon({ map, paths: path, ...matchedStyle });
+        makeClickable(polygon, z, matchedStyle);
         overlaysRef.current.polygons.push(polygon);
+        matchedDrawn++;
         for (const c of path) bounds.extend(c);
-        const cx = path.reduce((sum, p) => sum + p.lat, 0) / path.length;
-        const cy = path.reduce((sum, p) => sum + p.lng, 0) / path.length;
-        const label = new maps.Marker({
-          map,
-          position: { lat: cx, lng: cy },
-          clickable: false,
-          zIndex: 100,
-          icon: {
-            path: maps.SymbolPath.CIRCLE,
-            scale: 0,
-            fillOpacity: 0,
-            strokeOpacity: 0,
-          },
-          title: info.rawName,
-          label: {
-            text:
-              info.instructorName.length > 20
-                ? `${info.instructorName.slice(0, 20)}…`
-                : info.instructorName,
-            color: "#1e1e1e",
-            fontSize: "11.5px",
-            fontWeight: "600",
-          },
-        });
-        overlaysRef.current.labels.push(label);
       } else if (
         via === "point" &&
         z.kind === "point" &&
@@ -317,6 +428,7 @@ export default function LocationSearch({
           },
         });
         overlaysRef.current.points.push(marker);
+        matchedDrawn++;
         bounds.extend(z.coords[0]);
       }
     }
@@ -328,16 +440,24 @@ export default function LocationSearch({
     });
     bounds.extend(point);
 
-    const hasZones =
-      overlaysRef.current.polygons.length > 0 ||
-      overlaysRef.current.points.length > 0;
-    if (hasZones) {
+    if (matchedDrawn > 0) {
       map.fitBounds(bounds, { top: 48, right: 48, bottom: 48, left: 48 });
     } else {
       map.setCenter(point);
       map.setZoom(13);
     }
-  }, [maps, point, zones, matchedNames, resultLabel, via, zoneInfo, collapsed]);
+  }, [
+    maps,
+    point,
+    zones,
+    matchedNames,
+    resultLabel,
+    via,
+    zoneInfo,
+    collapsed,
+    showAllZones,
+    expanded,
+  ]);
 
   const clearLocal = (): void => {
     selectedPlaceRef.current = null;
@@ -345,6 +465,20 @@ export default function LocationSearch({
     if (inputRef.current) inputRef.current.value = "";
     onClear();
   };
+
+  // Round expand/close button, styled like Google's own map controls and
+  // floated over the map's top-right corner.
+  const expandButton = (
+    <button
+      type="button"
+      className="loc-expand-btn loc-expand-float"
+      onClick={() => setExpanded((v) => !v)}
+      aria-label={expanded ? "Exit full-screen map" : "Expand map"}
+      title={expanded ? "Exit full screen (Esc)" : "Expand map"}
+    >
+      <span aria-hidden="true">{expanded ? "✕" : "⤢"}</span>
+    </button>
+  );
 
   return (
     <section className="loc-search" aria-label="Search by location">
@@ -404,45 +538,12 @@ export default function LocationSearch({
             >
               Search
             </button>
-            <button
-              type="button"
-              className="loc-manual-btn"
-              onClick={() => setManualOpen((o) => !o)}
-            >
-              Coordinates
-            </button>
             {point && (
               <button type="button" className="loc-clear" onClick={clearLocal}>
                 Clear location
               </button>
             )}
           </div>
-
-          {manualOpen && (
-            <div
-              className="loc-manual"
-              role="group"
-              aria-label="Enter coordinates manually"
-            >
-              <input
-                className="loc-manual-input"
-                inputMode="decimal"
-                placeholder="Latitude (e.g. 12.9352)"
-                value={manualLat}
-                onChange={(e) => setManualLat(e.target.value)}
-              />
-              <input
-                className="loc-manual-input"
-                inputMode="decimal"
-                placeholder="Longitude (e.g. 77.6245)"
-                value={manualLng}
-                onChange={(e) => setManualLng(e.target.value)}
-              />
-              <button type="button" className="loc-btn" onClick={applyManual}>
-                Apply coordinates
-              </button>
-            </div>
-          )}
 
           {zonesError && (
             <p className="loc-status error">
@@ -466,14 +567,7 @@ export default function LocationSearch({
           {maps === null && (
             <p className="loc-status">
               Google Maps isn&apos;t configured, so place search is disabled.
-              Add <code>VITE_GOOGLE_MAPS_API_KEY</code> to enable it — or use
-              the Coordinates button instead.
-            </p>
-          )}
-          {maps && status === "found" && (
-            <p className="loc-status ok">
-              Found instructors near “{resultLabel}”. The grid below now shows
-              only them.
+              Add <code>VITE_GOOGLE_MAPS_API_KEY</code> to enable it.
             </p>
           )}
           {maps && status === "none" && (
@@ -483,13 +577,32 @@ export default function LocationSearch({
           )}
           {maps && (
             <div
-              className="loc-map"
-              ref={mapElRef}
-              aria-label="Map of matched instructor areas"
-            />
+              className={expanded ? "loc-map-wrap expanded" : "loc-map-wrap"}
+            >
+              <div className="loc-map-tools">
+                <label className="loc-toggle">
+                  <input
+                    type="checkbox"
+                    checked={showAllZones}
+                    onChange={(e) => setShowAllZones(e.target.checked)}
+                  />
+                  Show all polygons
+                </label>
+              </div>
+              <div
+                className="loc-map"
+                ref={mapElRef}
+                aria-label="Map of matched instructor areas"
+              />
+              {expandButton}
+            </div>
           )}
         </>
       )}
     </section>
   );
 }
+
+// Memoized: the dashboard re-renders often (instructor loads, realtime), and the
+// map must only redraw when its own inputs change.
+export default memo(LocationSearch);

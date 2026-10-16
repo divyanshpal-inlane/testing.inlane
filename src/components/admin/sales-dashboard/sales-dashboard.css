@@ -1559,11 +1559,12 @@
 
 .loc-input {
   flex: 1;
-  min-width: 240px;
-  padding: 8px 14px;
+  min-width: 200px;
+  height: 30px;
+  padding: 4px 10px;
   border: 1px solid var(--gc-border);
-  border-radius: 10px;
-  font-size: 13.5px;
+  border-radius: 8px;
+  font-size: 12px;
   font-family: "Glancyr", sans-serif;
   background: var(--gc-bg);
   color: var(--gc-text);
@@ -1577,12 +1578,13 @@
 }
 
 .loc-btn {
-  padding: 8px 16px;
+  height: 30px;
+  padding: 0 12px;
   border: 1px solid var(--gc-blue);
   background: var(--gc-blue);
   color: var(--gc-blue-contrast);
-  border-radius: 10px;
-  font-size: 13px;
+  border-radius:  8px;
+  font-size:  12px;
   font-family: "Glancyr", sans-serif;
   font-weight: 500;
   white-space: nowrap;
@@ -1597,27 +1599,14 @@
   cursor: default;
 }
 
-.loc-manual-btn {
-  padding: 8px 12px;
-  border: 1px solid var(--gc-border);
-  background: var(--gc-bg);
-  color: var(--gc-text-2);
-  border-radius: 10px;
-  font-size: 13px;
-  font-family: "Glancyr", sans-serif;
-}
-
-.loc-manual-btn:hover {
-  background: var(--gc-hover);
-}
-
 .loc-clear {
-  padding: 8px 12px;
+  height: 30px;
+  padding: 0 10px;
   border: 1px solid var(--gc-border);
   background: var(--gc-red-bg);
   color: var(--gc-red-text);
-  border-radius: 10px;
-  font-size: 13px;
+  border-radius:  8px;
+  font-size:  12px;
   font-family: "Glancyr", sans-serif;
   font-weight: 500;
 }
@@ -1646,30 +1635,6 @@
   background: var(--gc-hover);
   border-radius: 4px;
   padding: 1px 5px;
-}
-
-.loc-manual {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-}
-
-.loc-manual-input {
-  width: 160px;
-  padding: 7px 12px;
-  border: 1px solid var(--gc-border);
-  border-radius: 10px;
-  font-size: 12.5px;
-  font-family: "Glancyr", sans-serif;
-  background: var(--gc-bg);
-  color: var(--gc-text);
-  outline: none;
-}
-
-.loc-manual-input:focus {
-  border-color: var(--gc-blue);
 }
 
 .loc-map {
@@ -1840,6 +1805,13 @@
 /* Location-search tag on the instructor nameplate. */
 .loc-tag {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  text-align: center;
+  line-height: 1;
+  min-height: 20px;
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.3px;
@@ -1853,4 +1825,193 @@
 .loc-tag-nearby {
   color: var(--gc-blue, #1d4ed8);
   background: var(--gc-blue-bg, #dbeafe);
+}
+
+/* Centre the Area/Nearby chip on the whole nameplate (the plate spans the full
+   timetable width), independent of the name and the × on either side. */
+.instr-plate .loc-tag {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+/* Left slot panel: one step smaller text than the rest of the dashboard.
+   Covers the booking form (Tailwind text sizes) and the slot-detail view. */
+.slot-panel .text-xs {
+  font-size: 10.5px;
+  line-height: 14px;
+}
+
+.slot-panel .text-sm {
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.slot-panel .text-lg {
+  font-size: 15px;
+  line-height: 22px;
+}
+
+.slot-panel .text-xl {
+  font-size: 17px;
+  line-height: 24px;
+}
+
+.slot-panel-empty-title,
+.slot-panel-detail-title {
+  font-size: 15px;
+}
+
+.slot-panel-empty-hint,
+.slot-panel-detail-when,
+.slot-panel-detail-row {
+  font-size: 11.5px;
+}
+
+/* "Show all polygons" switch above the location map. */
+.loc-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--gc-text-2);
+  cursor: pointer;
+  user-select: none;
+}
+
+.loc-toggle input {
+  cursor: pointer;
+}
+
+/* Map toolbar (polygon toggle + expand) and the full-screen state. */
+.loc-map-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.loc-map-tools .loc-toggle {
+  margin: 0;
+}
+
+.loc-map-tools + .loc-map {
+  margin-top: 6px;
+}
+
+.loc-expand-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--gc-border);
+  border-radius: 8px;
+  background: var(--gc-bg);
+  color: var(--gc-text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.loc-expand-btn:hover {
+  background: var(--gc-hover);
+}
+
+.loc-map-wrap.expanded {
+  position: fixed;
+  inset: 12px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--gc-border);
+  border-radius: 12px;
+  background: var(--gc-bg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.loc-map-wrap.expanded .loc-map-tools {
+  margin-top: 0;
+}
+
+.loc-map-wrap.expanded .loc-map {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+}
+
+/* Popup shown when a polygon on the location map is clicked. */
+.loc-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 140px;
+  padding: 2px 2px 0;
+}
+
+.loc-info-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e1e1e;
+}
+
+.loc-add-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid #2563eb;
+  border-radius: 8px;
+  background: #2563eb;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.loc-add-btn:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.loc-add-btn:disabled {
+  border-color: #d1d5db;
+  background: #f3f4f6;
+  color: #4b5563;
+  cursor: default;
+}
+
+/* Round expand/close button over the map's bottom-right corner, like Google's
+   own map controls, in the map's top-right corner. `top` is measured from the
+   wrap, so it includes the toolbar row above the map. */
+.loc-map-wrap {
+  position: relative;
+}
+
+.loc-expand-btn.loc-expand-float {
+  position: absolute;
+  right: 10px;
+  top: 54px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #ffffff;
+  color: #4b5563;
+  font-size: 20px;
+  line-height: 1;
+  box-shadow: 0 1px 4px -1px rgba(0, 0, 0, 0.3);
+}
+
+.loc-expand-btn.loc-expand-float:hover {
+  background: #ebebeb;
+  color: #111827;
+}
+
+.loc-map-wrap.expanded .loc-expand-btn.loc-expand-float {
+  right: 22px;
+  top: 52px;
 }
