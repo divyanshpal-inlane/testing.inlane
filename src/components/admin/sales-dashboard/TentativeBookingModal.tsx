@@ -244,6 +244,11 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
     skipped: string[];
   } | null>(null);
 
+  // Slots a bulk add skipped, shown in the form after the dialog has closed.
+  const [bulkSkippedNotice, setBulkSkippedNotice] = useState<string[] | null>(
+    null,
+  );
+
   // Conflict detection (matches Instructor Management)
   const [availabilityMap, setAvailabilityMap] = useState<
     Record<string, { available: boolean; reason?: string }>
@@ -354,6 +359,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
     setBulkType("single");
     setRepeatCount(1);
     setBulkResult(null);
+    setBulkSkippedNotice(null);
     setIsBulkDialogOpen(true);
   };
 
@@ -384,10 +390,15 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
     setIsApplyingBulk(true);
     try {
       const result = await onAddBulkSlots(generated);
-      if (result.skipped.length === 0) {
+      if (result.added > 0 || result.skipped.length === 0) {
+        // One click is enough: the dialog always closes once anything was
+        // added (a second click would re-add the same slots). Skipped slots
+        // are reported in the form instead of keeping the dialog open.
+        setBulkSkippedNotice(result.skipped.length > 0 ? result.skipped : null);
         setIsBulkDialogOpen(false);
       } else {
-        setBulkResult({ added: result.added, skipped: result.skipped });
+        // Nothing was added, so staying open is safe: show why.
+        setBulkResult({ added: 0, skipped: result.skipped });
       }
     } catch (err) {
       setBulkResult({
@@ -737,6 +748,32 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                 >
                   ⚡ Bulk Add
                 </button>
+              </div>
+            )}
+            {bulkSkippedNotice && (
+              <div
+                role="status"
+                className="mb-2 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900"
+              >
+                <div className="mb-1 flex items-start justify-between gap-2">
+                  <p className="font-semibold">
+                    {bulkSkippedNotice.length} slot
+                    {bulkSkippedNotice.length === 1 ? "" : "s"} skipped:
+                  </p>
+                  <button
+                    type="button"
+                    aria-label="Dismiss"
+                    className="text-amber-900/70 hover:text-amber-900"
+                    onClick={() => setBulkSkippedNotice(null)}
+                  >
+                    ×
+                  </button>
+                </div>
+                <ul className="list-inside list-disc space-y-0.5">
+                  {bulkSkippedNotice.map((reason) => (
+                    <li key={reason}>{reason}</li>
+                  ))}
+                </ul>
               </div>
             )}
             <div className="space-y-1.5">

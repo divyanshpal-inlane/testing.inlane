@@ -306,6 +306,25 @@ function shortDate(iso: string): {
   };
 }
 
+// Returns the previous value while the new one is structurally identical, so a
+// prop that is rebuilt on every data commit (but unchanged in content) does
+// not make a memoized child -- the map -- redraw.
+function useStableJson<T>(value: T): T {
+  const ref = useRef<{ key: string; value: T } | null>(null);
+  const key = JSON.stringify(value);
+  if (ref.current === null || ref.current.key !== key) {
+    ref.current = { key, value };
+  }
+  return ref.current.value;
+}
+
+// Shared empties so the map's props keep the same identity between renders.
+const EMPTY_MATCHED_NAMES: string[] = [];
+const EMPTY_ZONE_INFO: Record<
+  string,
+  { color: string; instructorName: string; rawName: string }
+> = {};
+
 function showDetailTitle(
   instructor: InstructorRow,
   windowTotal: number,
@@ -1072,6 +1091,9 @@ export default function SalesDashboard() {
   const [isExpandTransitionPending, startExpandTransition] = useTransition();
   const [pendingExpandId, setPendingExpandId] = useState<string | null>(null);
   const [compareIds, setCompareIds] = useState<string[]>([]);
+  // Instructors added from a map polygon popup. During a location search the
+  // grid shows the matches; these are shown alongside them.
+  const [mapAddedIds, setMapAddedIds] = useState<Set<string>>(new Set());
   // Default: with a location search, Area instructors first, then Nearby by
   // distance; with no search it behaves like "most free slots".
   const [sort, setSort] = useState<SortKey>("distance");
@@ -1516,7 +1538,7 @@ export default function SalesDashboard() {
   // Opening a booking auto-opens that instructor's "Schedule" view.
   //
   // Every next step of the flow ("+ Add another class", "Change slot") tells
-  // Sales to click a green cell on the schedule, so the FIRST class should be
+  // Sales to click a white (free) cell on the schedule, so the FIRST class should be
   // picked from the same view the later ones are, rather than having to be
   // chosen from a collapsed row and then re-opened mid-booking. Only the locked
   // instructor is on screen at this point (see the gridRows filter), so this
@@ -1573,7 +1595,7 @@ export default function SalesDashboard() {
     // "+ Add another class" snapped the panel to "In this booking / Already
     // added to this booking", i.e. the summary of the class they were in the
     // middle of building. Keeping the form mounted leaves the customer form
-    // and Selected Slots exactly where they were; the next green cell click
+    // and Selected Slots exactly where they were; the next free cell click
     // appends and the form updates in place. See handleSlotSelect's
     // `addingSlotMode` append branch.
     // Reuse the row's existing "Schedule" control so the next class is
@@ -1667,6 +1689,17 @@ export default function SalesDashboard() {
     setCompareIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
     setSearchOpen(false);
   };
+
+  const addFromMap = useCallback(
+    (id: string) => {
+      addRosterInstructor(id);
+      setMapAddedIds((prev) => new Set(prev).add(id));
+      setCompareIds((prev) =>
+        prev.length > 0 && !prev.includes(id) ? [...prev, id] : prev,
+      );
+    },
+    [addRosterInstructor],
+  );
 
   const removeFromCompare = useCallback((id: string) => {
     setCompareIds((prev) => prev.filter((x) => x !== id));
@@ -1869,6 +1902,18 @@ export default function SalesDashboard() {
     return map;
   }, [locResult]);
 
+  // Stable identity: a fresh object per render made the map rebuild every
+  // overlay (and re-fit the view) on every dashboard re-render.
+  const locPoint = useMemo(
+    () => (locSearch ? { lat: locSearch.lat, lng: locSearch.lng } : null),
+    [locSearch],
+  );
+
+  const mapMatchedNames = useStableJson(
+    locResult?.zones ?? EMPTY_MATCHED_NAMES,
+  );
+  const mapZoneInfo = useStableJson(locResult?.zoneInfo ?? EMPTY_ZONE_INFO);
+
   const locStatus: LocateStatus = useMemo(() => {
     if (!locSearch) return "idle";
     if (dbZones === null) return "loading";
@@ -1905,6 +1950,7 @@ export default function SalesDashboard() {
     setSearchOpen(false);
     setCollapsed(new Set());
     setCompareIds([]);
+    setMapAddedIds(new Set());
     setSort("distance");
     setSelectedRows(new Set());
     clearLocation();
@@ -1935,11 +1981,19 @@ export default function SalesDashboard() {
   // or typing a new name to add hides every already-added instructor that
   // doesn't happen to match, making them look removed.
   const visibleInstructors = useMemo(() => {
-    const roster = locSearch
-      ? (locResult?.instrs ?? [])
-      : (data?.instructors ?? []);
+    let roster: InstructorRow[];
+    if (locSearch) {
+      const matched = locResult?.instrs ?? [];
+      const matchedIds = new Set(matched.map((i) => i.id));
+      const extras = (data?.instructors ?? []).filter(
+        (i) => mapAddedIds.has(i.id) && !matchedIds.has(i.id),
+      );
+      roster = [...matched, ...extras];
+    } else {
+      roster = data?.instructors ?? [];
+    }
     return roster.filter((i) => isBookable(i) || workingOnMap.has(i.id));
-  }, [data, locSearch, locResult, workingOnMap]);
+  }, [data, locSearch, locResult, workingOnMap, mapAddedIds]);
 
   const searchResults = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -2008,7 +2062,7 @@ export default function SalesDashboard() {
   }, [data, selectedDate, workingOnMap]);
 
   // Free-slot totals use freeGrid -- the strict "a full 1-hour class actually
-  // fits here" grid -- so the number always matches the green slots the
+  // fits here" grid -- so the number always matches the free slots the
   // weekly timetable shows (scattered 30-min gaps that can't fit a class are
   // not counted).
   const windowTotals = useMemo(() => {
@@ -2389,11 +2443,11 @@ export default function SalesDashboard() {
 
   // Bulk Add (copied from Instructor Management's "Bulk Add Schedules").
   //
-  // Like Instructor Management, this appends EVERY generated slot (only a
-  // slot for a different instructor than the locked one is ignored). It does
-  // not filter busy slots out: the modal checks each row against the DB and
-  // shows Free / Conflict, and a conflicting row blocks submit until it is
-  // removed. Filtering here is what used to turn 10 copies into 7.
+  // Generated slots that land on a GREY cell (the instructor's unavailability or
+  // a travel-gap buffer) are skipped and reported -- the DB conflict check in
+  // the modal only knows about bookings, so it would have shown them as Free.
+  // A slot that overlaps an actual booking is still appended: the modal shows
+  // it as a Conflict and blocks submit until it is removed.
   const handleAddBulkSlots = useCallback(
     async (
       newSlots: SlotPick[],
@@ -2402,11 +2456,38 @@ export default function SalesDashboard() {
         return { added: 0, skipped: ["No booking is in progress."] };
       }
 
+      const gapMinutes = Math.max(
+        0,
+        Math.floor(config?.instructor_gap_minutes ?? 0),
+      );
       const accepted: SlotPick[] = [];
+      const skipped: string[] = [];
       for (const slot of newSlots) {
         if (slot.instructorId !== lockedInstructorId) {
           // skip silently like instructor management
           continue;
+        }
+        const minute = timeToMinutes(slot.startTime);
+        const isFree = validateOneHourBlock(
+          slot.instructorId,
+          slot.date,
+          minute,
+          data?.freeGrid ?? null,
+        );
+        if (!isFree) {
+          const conflict = classifySlotConflict(
+            slot.instructorId,
+            slot.date,
+            minute,
+            gapMinutes,
+            blocksIndex,
+          );
+          if (conflict.kind !== "direct") {
+            skipped.push(
+              `${slot.date} ${slot.startTime}-${slot.endTime}: not available (instructor unavailable or travel-gap buffer)`,
+            );
+            continue;
+          }
         }
         accepted.push(slot);
       }
@@ -2415,9 +2496,14 @@ export default function SalesDashboard() {
         setPendingSlots((prev) => [...prev, ...accepted]);
       }
 
-      return { added: accepted.length, skipped: [] };
+      return { added: accepted.length, skipped };
     },
-    [lockedInstructorId],
+    [
+      lockedInstructorId,
+      config?.instructor_gap_minutes,
+      data?.freeGrid,
+      blocksIndex,
+    ],
   );
 
   // Edit an existing tentative booking: reopen the booking form loaded with
@@ -3031,6 +3117,12 @@ export default function SalesDashboard() {
     return base.filter((i) => i.id === lockedInstructorId);
   }, [compareIds, compareInstructors, rows, sortRoster, lockedInstructorId]);
 
+  // Instructors currently on the grid, for the map popup's "already added".
+  const dashboardIds = useMemo(
+    () => new Set(gridRows.map((i) => i.id)),
+    [gridRows],
+  );
+
   // Guarantees the timeline (06:00 column onward) always starts exactly
   // where the Instructor column ends, for any name length. The table's own
   // auto column-sizing can't be trusted here: browsers don't reliably feed a
@@ -3452,7 +3544,7 @@ export default function SalesDashboard() {
                 </p>
                 <p className="slot-panel-empty-hint">
                   {addingSlotMode
-                    ? `Click a green (free) cell on ${lockedInstructorName}'s schedule to pick ${
+                    ? `Click a white (free) cell on ${lockedInstructorName}'s schedule to pick ${
                         replacingSlotIndex !== null
                           ? "a replacement slot"
                           : "the next class"
@@ -3469,16 +3561,16 @@ export default function SalesDashboard() {
                 zonesError={zoneError}
                 status={locStatus}
                 resultLabel={locSearch?.label ?? null}
-                point={
-                  locSearch ? { lat: locSearch.lat, lng: locSearch.lng } : null
-                }
-                matchedNames={locResult?.zones ?? []}
+                point={locPoint}
+                matchedNames={mapMatchedNames}
                 via={locResult?.via ?? "none"}
-                zoneInfo={locResult?.zoneInfo ?? {}}
+                zoneInfo={mapZoneInfo}
                 onLocate={handleLocation}
                 onClear={clearLocation}
                 collapsed={locCollapsed}
                 onToggleCollapsed={toggleLocCollapsed}
+                onAddInstructor={addFromMap}
+                dashboardInstructorIds={dashboardIds}
               />
             </Suspense>
 
@@ -3769,7 +3861,7 @@ export default function SalesDashboard() {
                         bar to move every timetable at once.
                       </li>
                       <li>
-                        <strong>🟢 Green</strong> = free: no class, no time off,
+                        <strong>⚪ White</strong> = free: no class, no time off,
                         enough travel time.
                       </li>
                       <li>
@@ -3794,7 +3886,7 @@ export default function SalesDashboard() {
                       </li>
                       <li>
                         A {config.instructor_gap_minutes}-minute travel gap
-                        around classes is applied, so green slots are safe to
+                        around classes is applied, so white slots are safe to
                         assign.
                       </li>
                     </ul>
@@ -3804,7 +3896,7 @@ export default function SalesDashboard() {
                     <h3>Create a tentative booking</h3>
                     <ul>
                       <li>
-                        <strong>Click</strong> any green (free) slot to open the
+                        <strong>Click</strong> any white (free) slot to open the
                         booking form for that 1-hour block.
                       </li>
                       <li>
@@ -4039,7 +4131,7 @@ export default function SalesDashboard() {
                 <strong>
                   👉 Pick a new slot for Class {replacingSlotIndex + 1} now:
                 </strong>{" "}
-                click any green (free) cell on {lockedInstructorName}
+                click any white (free) cell on {lockedInstructorName}
                 &apos;s schedule below to replace the conflicting class. The
                 form isn&apos;t closed — it will reopen with your new slot in
                 place of Class {replacingSlotIndex + 1}.
@@ -4049,7 +4141,7 @@ export default function SalesDashboard() {
                 <strong>
                   👉 Pick {lockedInstructorName}&apos;s next class now:
                 </strong>{" "}
-                click any green (free) cell on {lockedInstructorName}
+                click any white (free) cell on {lockedInstructorName}
                 &apos;s schedule to add it to this booking. Other instructors
                 are hidden — this booking must stay with the same instructor.
                 Your form stays open here and updates as you pick.
