@@ -1,5 +1,6 @@
 // Types for Instructor Onboarding Wizard
 
+import type { ZoneCoordinate } from "@/components/instructor-zones/types";
 import { ParsedCalendarEvent } from "@/utils/icsParser";
 
 export type IdProofType = "aadhar" | "pan" | "voter_id" | "passport";
@@ -47,12 +48,25 @@ export interface InstructorOnboardingData {
   car_fuel_type: CarFuelType | null;
   experience: number;
 
-  // Step 4: Service Area
-  address: string;
-  latitude: number | null;
-  longitude: number | null;
-  radius: number;
-  areas: string[];
+  // Step 4: Drawn service area polygon (saved to instructor_service_zones after
+  // the Instructor row exists, since zones reference instructor_id). One polygon
+  // per instructor, so this is a single ring rather than a list.
+  // address/latitude/longitude/radius/areas were removed from this step: the
+  // polygon is now the only service-area source of truth.
+  serviceZone: ZoneCoordinate[] | null;
+
+  /**
+   * Step 4: mark the drawn polygon as ROUGH (provisional, pending Ops review).
+   *
+   * Defaults to TRUE, because an onboarding polygon is an admin's quick
+   * approximation drawn from a map, not a boundary Operations has verified
+   * against real driving routes. A rough polygon is stored but never used for
+   * customer/sales availability matching, so defaulting it on means a
+   * half-finished onboarding cannot put an unverified area into live matching.
+   * An admin who is entering a boundary Ops has already signed off can turn it
+   * off to save a verified service area instead.
+   */
+  serviceZoneIsRough: boolean;
 
   // Step 5: Unavailability
   unavailability: Unavailability[];
@@ -86,11 +100,8 @@ export const initialOnboardingData: InstructorOnboardingData = {
   experience: 0,
 
   // Step 4
-  address: "",
-  latitude: null,
-  longitude: null,
-  radius: 0,
-  areas: [],
+  serviceZone: null,
+  serviceZoneIsRough: true,
 
   // Step 5
   unavailability: [],

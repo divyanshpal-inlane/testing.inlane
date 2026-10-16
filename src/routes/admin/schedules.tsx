@@ -1,4 +1,8 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
 import {
@@ -11,7 +15,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import InstructorAnalytics from "@/components/admin/InstructorAnalytics";
@@ -50,13 +54,17 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/use-toast";
 import { COURSES_DATA, demoLessonOffsetFor } from "@/constants/courses";
+import { uniqueAdminLearners } from "@/lib/admin-learner-list";
+import { fetchAdminSchedules } from "@/lib/admin-schedules";
 import { sendMultiEventCalendarInvite } from "@/lib/calendarUtils";
 import { supabase } from "@/lib/supabaseClient";
 import { generateRandomOTP } from "@/lib/utils";
 import { useMutationCompleteRescheduleRequest } from "@/queries/learner";
 import {
+  invalidateSchedulingRequestQueries,
   SchedulingRequests,
   useEnrollmentTypesByLearner,
+  useInfiniteSchedulingRequests,
   useSchedulingRequests,
 } from "@/queries/preferences";
 import {
@@ -130,14 +138,104 @@ const PREDEFINED_COURSES = [
   },
 ];
 
+// Reusable hook for infinite scroll using IntersectionObserver
+// Uses callback ref pattern to properly detect when sentinel element changes (e.g., on tab switch)
+function useInfiniteScrollSentinel(
+  hasNextPage: boolean | undefined,
+  isFetchingNextPage: boolean,
+  fetchNextPage: () => void,
+) {
+  // Use state to track the sentinel element - this triggers re-render when element changes
+  const [sentinelEl, setSentinelEl] = useState<HTMLDivElement | null>(null);
+
+  // Callback ref that updates state when the DOM element is attached/detached
+  const sentinelRef = useCallback((node: HTMLDivElement | null) => {
+    setSentinelEl(node);
+  }, []);
+
+  useEffect(() => {
+    if (!sentinelEl || !hasNextPage || isFetchingNextPage) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        // When sentinel becomes visible, fetch next page
+        if (entries[0].isIntersecting) {
+          fetchNextPage();
+        }
+      },
+      {
+        threshold: 0.1,
+        rootMargin: "100px", // Start loading slightly before scrolling to bottom
+      },
+    );
+
+    observer.observe(sentinelEl);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [sentinelEl, hasNextPage, isFetchingNextPage, fetchNextPage]);
+
+  return sentinelRef;
+}
+
 export default function AdminSchedules() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { data: requests, isLoading, isRefetching } = useSchedulingRequests();
+
+  // Use infinite query for scheduling requests
+  const {
+    data: requestsData,
+    isLoading,
+    isRefetching,
+    error: requestsError,
+    refetch: refetchRequests,
+    fetchNextPage: fetchNextRequestsPage,
+    hasNextPage: hasNextRequestsPage,
+    isFetchingNextPage: isFetchingNextRequestsPage,
+  } = useInfiniteSchedulingRequests();
+
+  // Log any query errors
+  useEffect(() => {
+    if (requestsError) {
+      console.error("[Infinite Scroll] Requests error:", requestsError);
+    }
+  }, [requestsError]);
+
+  // Auto-fetch all scheduling request pages on mount (they're usually small - <100 total)
+  // This ensures we show accurate counts in tab headers
+  useEffect(() => {
+    if (
+      hasNextRequestsPage &&
+      !isFetchingNextRequestsPage &&
+      !isLoading &&
+      !isRefetching
+    ) {
+      fetchNextRequestsPage();
+    }
+  }, [
+    hasNextRequestsPage,
+    isFetchingNextRequestsPage,
+    fetchNextRequestsPage,
+    isLoading,
+    isRefetching,
+  ]);
+
+  // Flatten all pages into a single array
+  // Each page is now { data: [], hasMoreInDb: boolean }, so extract the data arrays
+  const requests = useMemo(() => {
+    if (!requestsData?.pages) return [];
+    return requestsData.pages.flatMap((page) => {
+      // Handle both old format (array) and new format ({ data: array, hasMoreInDb: boolean })
+      if (Array.isArray(page)) return page;
+      if (page && Array.isArray(page.data)) return page.data;
+      return [];
+    });
+  }, [requestsData]);
   const [selectedSchedule, setSelectedSchedule] = useState<any>(null);
   const [isInstructorChangeModalOpen, setIsInstructorChangeModalOpen] =
     useState(false);
-    
+
   const [selectedRequest, setSelectedRequest] = useState<
     SchedulingRequests[number] | null
   >(null);
@@ -151,12 +249,6 @@ export default function AdminSchedules() {
   const [newRequestFilter, setNewRequestFilter] = useState<
     "all" | "course" | "demo" | "topup"
   >("all");
-
-  useEffect(() => {
-    if (!isRefetching) {
-      setSelectedRequest(null);
-    }
-  }, [isRefetching]);
 
   const completeRescheduleRequestMutation =
     useMutationCompleteRescheduleRequest();
@@ -382,8 +474,11 @@ export default function AdminSchedules() {
       // the just-scheduled learner appears immediately in Active Learners
       // and the New Schedule list refreshes. The bare refetchActiveLearners
       // call in handleScheduleCreate is kept as a belt-and-suspenders.
-      queryClient.invalidateQueries({ queryKey: ["activeLearners"] });
-      queryClient.invalidateQueries({ queryKey: ["scheduling-requests"] });
+      queryClient.invalidateQueries({ queryKey: ["activeLearners-infinite"] });
+      queryClient.invalidateQueries({ queryKey: ["instructor-full"] });
+      queryClient.invalidateQueries({ queryKey: ["instructor"] });
+      queryClient.invalidateQueries({ queryKey: ["learner-schedules-admin"] });
+      invalidateSchedulingRequestQueries(queryClient);
     },
   });
 
@@ -539,6 +634,7 @@ export default function AdminSchedules() {
                 })
               : Promise.resolve(),
           ]);
+          setSelectedRequest(null);
         } catch (error) {
           console.error("Error completing reschedule request:", error);
         }
@@ -637,19 +733,178 @@ export default function AdminSchedules() {
     }
   }, [fetchedInstructorData]);
 
-  // Fetch learners with active enrollment and their schedules
+  // State declarations - MUST be before activeLearners query
+  const [searchTerm, setSearchTerm] = useState("");
+  const [selectedInstructorId, setSelectedInstructorId] = useState<
+    string | null
+  >(null);
+  const [selectedLearnerId, setSelectedLearnerId] = useState<string | null>(
+    null,
+  );
+  const [selectedFilterInstructorId, setSelectedFilterInstructorId] =
+    useState<string>("");
+
+  // Active tab state
+  const [activeTab, setActiveTab] = useState<"active" | "completed">("active");
+
+  // Infinite query for active/completed learners
   const {
-    data: activeLearners,
+    data: learnersData,
     isLoading: isLoadingActiveLearners,
+    error: learnersError,
     refetch: refetchActiveLearners,
-  } = useQuery({
-    queryKey: ["activeLearners"],
-    queryFn: async () => {
-      // First, get active enrollment learner IDs with progress info.
-      // PostgREST defaults to 1000 rows per response; with growing learner
-      // counts that silently truncates the result and the most recently
-      // paid learners can fall off the list. Page through in chunks of
-      // 1000 to make sure we get everything.
+    fetchNextPage: fetchNextLearnersPage,
+    hasNextPage: hasNextLearnersPage,
+    isFetchingNextPage: isFetchingNextLearnersPage,
+  } = useInfiniteQuery({
+    queryKey: [
+      "activeLearners-infinite",
+      searchTerm,
+      selectedFilterInstructorId,
+      activeTab,
+    ],
+    queryFn: async ({ pageParam = 0 }) => {
+      const PAGE_SIZE = 20;
+      const { data, error } = await supabase.rpc(
+        "get_active_learners_paginated",
+        {
+          page_offset: pageParam * PAGE_SIZE,
+          page_size: PAGE_SIZE,
+          search_term: searchTerm || null,
+          instructor_filter: selectedFilterInstructorId || null,
+          tab_filter: activeTab,
+        },
+      );
+
+      if (error) throw error;
+
+      // Handle case where data is not an array (e.g., RPC error or unexpected response)
+      const dataArray = Array.isArray(data) ? data : [];
+
+      // Map snake_case to camelCase for compatibility with existing UI
+      const learners = dataArray.map((learner: any) => ({
+        id: learner.id,
+        name: learner.name,
+        email: learner.email,
+        phone: learner.phone,
+        created_at: learner.created_at,
+        area: learner.area,
+        pick_up_location: learner.pick_up_location,
+        address_lat: learner.address_lat,
+        address_lng: learner.address_lng,
+        preferred_start_date: learner.preferred_start_date,
+        preferred_completion_days: learner.preferred_completion_days,
+        prefers_two_hour_classes: learner.prefers_two_hour_classes,
+        two_hour_days: learner.two_hour_days,
+        DL_test_date: learner.DL_test_date,
+
+        // Map computed fields
+        isDemo: learner.is_demo,
+        totalLessons: learner.total_lessons,
+        completedLessons: learner.completed_count,
+        isAllCompleted: learner.completed_count >= learner.total_lessons,
+        hasTopupPending: learner.has_topup_pending,
+
+        // New field for instructor filtering (RPC returns array instead of schedules)
+        instructor_ids: learner.instructor_ids,
+      }));
+
+      // Get total count from first record (RPC includes this in each row)
+      const totalCount =
+        dataArray.length > 0 ? dataArray[0]?.total_count || 0 : 0;
+      const hasMore =
+        learners.length === PAGE_SIZE &&
+        (pageParam + 1) * PAGE_SIZE < totalCount;
+
+      return {
+        learners,
+        totalCount,
+        nextPage: hasMore ? pageParam + 1 : undefined,
+      };
+    },
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) => lastPage.nextPage,
+    staleTime: 30 * 1000, // 30 seconds - avoid unnecessary refetches
+  });
+
+  //useEffect(() => {
+  //console.log('Active Learners updated:', activeLearners);
+  //}, [activeLearners]);
+
+  // Log any learners query errors
+  useEffect(() => {
+    if (learnersError) {
+      console.error("[Infinite Scroll] Learners error:", learnersError);
+    }
+  }, [learnersError]);
+
+  // Deduplicate across pages, not just within each page. Keep raw page sizes
+  // above for pagination so an overlapping page cannot prematurely end loading.
+  const allLearners = useMemo(
+    () => uniqueAdminLearners(learnersData?.pages),
+    [learnersData],
+  );
+
+  const totalLearnersCount = learnersData?.pages?.[0]?.totalCount || 0;
+
+  // Create sentinel refs for infinite scroll
+  const requestsSentinelRef = useInfiniteScrollSentinel(
+    hasNextRequestsPage,
+    isFetchingNextRequestsPage,
+    fetchNextRequestsPage,
+  );
+  const learnersSentinelRef = useInfiniteScrollSentinel(
+    hasNextLearnersPage,
+    isFetchingNextLearnersPage,
+    fetchNextLearnersPage,
+  );
+
+  const handleTabChange = (value: string) => {
+    // Reset selectedRequest when changing tabs
+    setSelectedRequest(null);
+    // Update active tab (infinite query will automatically reset)
+    if (value === "active" || value === "completed") {
+      setActiveTab(value);
+    }
+  };
+
+  // This handles the "Clearing" logic
+  const handleInstructorChange = (id: string) => {
+    setSelectedInstructorId(id);
+    setSelectedLearnerId(null); // Clear the right bar (Schedules)
+    // The left bar (Learner List) will automatically filter based on this ID
+  };
+
+  // Use the flattened learners for both tabs
+  const activeOnlyLearners = allLearners;
+  const completedLearners = allLearners;
+
+  // Export dialog state
+  const [showExportDialog, setShowExportDialog] = useState(false);
+  const [exportLearnerCount, setExportLearnerCount] = useState<string>("all");
+  const [exportSchedulePeriod, setExportSchedulePeriod] =
+    useState<string>("all");
+  const [exportStatuses, setExportStatuses] = useState<string[]>([
+    "booked",
+    "ongoing",
+    "completed",
+    "cancelled",
+  ]);
+
+  const toggleExportStatus = (status: string) => {
+    setExportStatuses((prev) =>
+      prev.includes(status)
+        ? prev.filter((s) => s !== status)
+        : [...prev, status],
+    );
+  };
+
+  const handleExportActiveLearnersCsv = async () => {
+    // Fetch ALL learners with full schedule data for export
+    // (The paginated view doesn't include schedules array)
+
+    try {
+      // Fetch all active enrollments
       const enrollmentData: Array<{
         learner_id: string;
         progress: any;
@@ -674,320 +929,171 @@ export default function AdminSchedules() {
         if (data.length < ENROLLMENT_PAGE) break;
       }
 
-      // Deduplicate learner IDs (a learner may have multiple enrollments)
       const learnerIds = [...new Set(enrollmentData.map((e) => e.learner_id))];
-      console.log(
-        `[activeLearners] enrollments=${enrollmentData.length}, unique learners=${learnerIds.length}`,
-      );
 
-      // Batch learner IDs into chunks to avoid URL length limits
+      // Batch fetch learners WITH schedules
       const BATCH_SIZE = 50;
       const batches: string[][] = [];
       for (let i = 0; i < learnerIds.length; i += BATCH_SIZE) {
         batches.push(learnerIds.slice(i, i + BATCH_SIZE));
       }
 
-      // Use allSettled so one failed batch can't wipe out the entire list.
-      // A single batch erroring out previously caused Promise.all to reject,
-      // which left activeLearners empty even when most batches succeeded.
       const batchResults = await Promise.allSettled(
         batches.map(async (batch) => {
           const { data, error } = await supabase
             .from("Learner")
             .select(
               `
-              id,
-              name,
-              area,
-              phone,
-              email,
-              preferred_start_date,
-              preferred_completion_days,
-              prefers_two_hour_classes,
-              two_hour_days,
-              DL_test_date,
-              pick_up_location,
-              created_at,
-              address_lat,
-              address_lng,
-
+              id, name, area, phone, email,
+              preferred_start_date, preferred_completion_days,
+              prefers_two_hour_classes, two_hour_days,
+              DL_test_date, pick_up_location, created_at,
               schedules:Schedule(
-                id,
-                date,
-                start_time,
-                end_time,
-                instructor_id,
-                lesson_id,
-                course_id,
-                learner_id,
-                status,
-                started_at,
-                ended_at,
-                Lesson(
-                  id,
-                  number
-                ),
-                Instructor(
-                  name
-                )
+                id, date, start_time, end_time, instructor_id,
+                lesson_id, course_id, status,
+                Lesson(id, number),
+                Instructor(name)
               )
             `,
             )
-            .in("id", batch)
-            .order("created_at", { ascending: false });
+            .in("id", batch);
 
           if (error) throw error;
           return data ?? [];
         }),
       );
 
-      const learnersData = batchResults.flatMap((r, i) => {
+      const allLearnersWithSchedules = batchResults.flatMap((r) => {
         if (r.status === "fulfilled") return r.value;
-        console.error(
-          `[activeLearners] batch ${i} failed (${batches[i].length} learners dropped):`,
-          r.reason,
-        );
         return [];
       });
-      console.log(
-        `[activeLearners] fetched ${learnersData.length} learners across ${batches.length} batches`,
-      );
 
-      // Build a set of demo learner IDs
-      const demoLearnerIds = new Set(
-        enrollmentData
-          .filter((e: any) => e.progress?.type === "demo")
-          .map((e: any) => e.learner_id),
-      );
+      if (!allLearnersWithSchedules || allLearnersWithSchedules.length === 0) {
+        toast({
+          title: "No data to export",
+          variant: "destructive",
+        });
+        return;
+      }
 
-      // Build map of learner_id -> total allotted lessons
-      const learnerTotalLessons: Record<string, number> = {};
-      enrollmentData.forEach((e: any) => {
-        const total =
-          e.Courses?.total_lessons ||
-          e.Courses?.duration ||
-          e.progress?.total_hours ||
-          10;
-        // Use the max if learner has multiple enrollments
-        learnerTotalLessons[e.learner_id] = Math.max(
-          learnerTotalLessons[e.learner_id] || 0,
-          total,
+      // 1. Apply instructor filter from the main UI
+      let learnersToExport = allLearnersWithSchedules.filter((learner: any) => {
+        if (!selectedFilterInstructorId) return true;
+        return learner.schedules?.some(
+          (s: any) => s.instructor_id === selectedFilterInstructorId,
         );
       });
 
-      // Show every learner with an active enrollment. The earlier filter
-      // required learner.schedules.length > 0 OR demo, which dropped course
-      // learners whose schedule join silently came back empty (e.g. response
-      // size truncation when many learners × many schedules are joined in
-      // one batched query). learnersData is already scoped to active
-      // enrollments, so no further filter is needed.
-      const learnersWithSchedules = learnersData;
+      // 2. Apply learner count limit
+      if (exportLearnerCount !== "all") {
+        const count = parseInt(exportLearnerCount, 10);
+        learnersToExport = learnersToExport.slice(0, count);
+      }
 
-      // Tag demo learners, completion status, and topup payment status
-      learnersWithSchedules.forEach((learner: any) => {
-        learner.isDemo = demoLearnerIds.has(learner.id);
-        const totalLessons = learnerTotalLessons[learner.id] || 10;
-        const completedCount =
-          learner.schedules?.filter((s: any) => s.status === "completed")
-            .length || 0;
-        learner.totalLessons = totalLessons;
-        learner.completedLessons = completedCount;
-        learner.isAllCompleted = completedCount >= totalLessons;
-        learner.hasTopupPending =
-          learner.schedules?.some((s: any) => s.status === "pending_payment") ||
-          false;
-      });
+      // 3. Determine schedule date cutoff
+      let dateCutoff: Date | null = null;
+      if (exportSchedulePeriod !== "all") {
+        dateCutoff = new Date();
+        dateCutoff.setDate(
+          dateCutoff.getDate() - parseInt(exportSchedulePeriod, 10),
+        );
+      }
 
-      // Sort by created_at descending (since batching may lose overall order)
-      learnersWithSchedules.sort((a, b) =>
-        (b.created_at ?? "").localeCompare(a.created_at ?? ""),
-      );
+      // Build one row per schedule entry so each lesson is its own row
+      const rows: string[][] = [];
+      const headers = [
+        "Learner Name",
+        "Email",
+        "Phone",
+        "Area",
+        "Pick-up Location",
+        "Preferred Start Date",
+        "Preferred Completion Days",
+        "Prefers 2-Hour Classes",
+        "2-Hour Days",
+        "DL Test Date",
+        "Created At",
+        "Lesson Number",
+        "Schedule Date",
+        "Start Time",
+        "End Time",
+        "Schedule Status",
+        "Instructor Name",
+      ];
+      rows.push(headers);
 
-      return learnersWithSchedules;
-    },
-    keepPreviousData: true,
-    staleTime: 30 * 1000, // 30 seconds - avoid unnecessary refetches
-  });
+      const buildLearnerCells = (learner: (typeof learnersToExport)[0]) => [
+        learner.name || "",
+        learner.email || "",
+        learner.phone || "",
+        learner.area || "",
+        learner.pick_up_location || "",
+        learner.preferred_start_date || "",
+        learner.preferred_completion_days?.toString() || "",
+        learner.prefers_two_hour_classes ? "Yes" : "No",
+        learner.two_hour_days || "",
+        learner.DL_test_date || "",
+        learner.created_at || "",
+      ];
 
-  //useEffect(() => {
-  //console.log('Active Learners updated:', activeLearners);
-  //}, [activeLearners]);
+      for (const learner of learnersToExport) {
+        // Filter schedules by status and date period
+        const filteredSchedules = [...(learner.schedules || [])]
+          .filter((s) => {
+            if (
+              exportStatuses.length > 0 &&
+              !exportStatuses.includes(s.status || "")
+            )
+              return false;
+            if (dateCutoff && s.date) {
+              const scheduleDate = new Date(s.date);
+              if (scheduleDate < dateCutoff) return false;
+            }
+            return true;
+          })
+          .sort((a, b) => (a.Lesson?.number ?? 0) - (b.Lesson?.number ?? 0));
 
-  const handleTabChange = (value: string) => {
-    // Reset selectedRequest when changing tabs
-    setSelectedRequest(null);
-  };
-
-  const [searchTerm, setSearchTerm] = useState("");
-
-  const [selectedInstructorId, setSelectedInstructorId] = useState<
-    string | null
-  >(null);
-  const [selectedLearnerId, setSelectedLearnerId] = useState<string | null>(
-    null,
-  );
-
-  // Inside your main Dashboard/Tabs component
-  const [selectedFilterInstructorId, setSelectedFilterInstructorId] =
-    useState<string>("");
-
-  // This handles the "Clearing" logic
-  const handleInstructorChange = (id: string) => {
-    setSelectedInstructorId(id);
-    setSelectedLearnerId(null); // Clear the right bar (Schedules)
-    // The left bar (Learner List) will automatically filter based on this ID
-  };
-  console.log(activeLearners);
-  const filteredLearners = activeLearners?.filter((learner) => {
-    const search = searchTerm.toLowerCase();
-    const learnerMatches =
-      learner.name?.toLowerCase().includes(search) ||
-      learner.email?.toLowerCase().includes(search) ||
-      learner.phone?.includes(searchTerm);
-    return learnerMatches;
-  });
-
-  // Split into active (still in progress) vs completed (all lessons done)
-  const activeOnlyLearners = filteredLearners?.filter(
-    (l: any) => !l.isAllCompleted,
-  );
-  const completedLearners = filteredLearners?.filter(
-    (l: any) => l.isAllCompleted,
-  );
-
-  // Export dialog state
-  const [showExportDialog, setShowExportDialog] = useState(false);
-  const [exportLearnerCount, setExportLearnerCount] = useState<string>("all");
-  const [exportSchedulePeriod, setExportSchedulePeriod] =
-    useState<string>("all");
-  const [exportStatuses, setExportStatuses] = useState<string[]>([
-    "booked",
-    "ongoing",
-    "completed",
-    "cancelled",
-  ]);
-
-  const toggleExportStatus = (status: string) => {
-    setExportStatuses((prev) =>
-      prev.includes(status)
-        ? prev.filter((s) => s !== status)
-        : [...prev, status],
-    );
-  };
-
-  const handleExportActiveLearnersCsv = () => {
-    if (!activeLearners || activeLearners.length === 0) return;
-
-    // 1. Apply instructor filter from the main UI
-    let learnersToExport = activeLearners.filter((learner) => {
-      if (!selectedFilterInstructorId) return true;
-      return learner.schedules?.some(
-        (s) => s.instructor_id === selectedFilterInstructorId,
-      );
-    });
-
-    // 2. Apply learner count limit
-    if (exportLearnerCount !== "all") {
-      const count = parseInt(exportLearnerCount, 10);
-      learnersToExport = learnersToExport.slice(0, count);
-    }
-
-    // 3. Determine schedule date cutoff
-    let dateCutoff: Date | null = null;
-    if (exportSchedulePeriod !== "all") {
-      dateCutoff = new Date();
-      dateCutoff.setDate(
-        dateCutoff.getDate() - parseInt(exportSchedulePeriod, 10),
-      );
-    }
-
-    // Build one row per schedule entry so each lesson is its own row
-    const rows: string[][] = [];
-    const headers = [
-      "Learner Name",
-      "Email",
-      "Phone",
-      "Area",
-      "Pick-up Location",
-      "Preferred Start Date",
-      "Preferred Completion Days",
-      "Prefers 2-Hour Classes",
-      "2-Hour Days",
-      "DL Test Date",
-      "Created At",
-      "Lesson Number",
-      "Schedule Date",
-      "Start Time",
-      "End Time",
-      "Schedule Status",
-      "Instructor Name",
-    ];
-    rows.push(headers);
-
-    const buildLearnerCells = (learner: (typeof learnersToExport)[0]) => [
-      learner.name || "",
-      learner.email || "",
-      learner.phone || "",
-      learner.area || "",
-      learner.pick_up_location || "",
-      learner.preferred_start_date || "",
-      learner.preferred_completion_days?.toString() || "",
-      learner.prefers_two_hour_classes ? "Yes" : "No",
-      learner.two_hour_days || "",
-      learner.DL_test_date || "",
-      learner.created_at || "",
-    ];
-
-    for (const learner of learnersToExport) {
-      // Filter schedules by status and date period
-      const filteredSchedules = [...(learner.schedules || [])]
-        .filter((s) => {
-          if (
-            exportStatuses.length > 0 &&
-            !exportStatuses.includes(s.status || "")
-          )
-            return false;
-          if (dateCutoff && s.date) {
-            const scheduleDate = new Date(s.date);
-            if (scheduleDate < dateCutoff) return false;
+        if (filteredSchedules.length === 0) {
+          // Still include learner row with empty schedule columns
+          rows.push([...buildLearnerCells(learner), "", "", "", "", "", ""]);
+        } else {
+          for (const schedule of filteredSchedules) {
+            rows.push([
+              ...buildLearnerCells(learner),
+              schedule.Lesson?.number?.toString() || "",
+              schedule.date || "",
+              schedule.start_time || "",
+              schedule.end_time || "",
+              schedule.status || "",
+              schedule.Instructor?.name || "",
+            ]);
           }
-          return true;
-        })
-        .sort((a, b) => (a.Lesson?.number ?? 0) - (b.Lesson?.number ?? 0));
-
-      if (filteredSchedules.length === 0) {
-        // Still include learner row with empty schedule columns
-        rows.push([...buildLearnerCells(learner), "", "", "", "", "", ""]);
-      } else {
-        for (const schedule of filteredSchedules) {
-          rows.push([
-            ...buildLearnerCells(learner),
-            schedule.Lesson?.number?.toString() || "",
-            schedule.date || "",
-            schedule.start_time || "",
-            schedule.end_time || "",
-            schedule.status || "",
-            schedule.Instructor?.name || "",
-          ]);
         }
       }
+
+      // Convert to CSV string with proper escaping
+      const csvContent = rows
+        .map((row) =>
+          row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(","),
+        )
+        .join("\n");
+
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `active_learners_${format(new Date(), "yyyy-MM-dd")}.csv`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setShowExportDialog(false);
+    } catch (error) {
+      console.error("Export error:", error);
+      toast({
+        title: "Export failed",
+        description: "An error occurred while exporting data.",
+        variant: "destructive",
+      });
     }
-
-    // Convert to CSV string with proper escaping
-    const csvContent = rows
-      .map((row) =>
-        row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(","),
-      )
-      .join("\n");
-
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `active_learners_${format(new Date(), "yyyy-MM-dd")}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-    setShowExportDialog(false);
   };
 
   return (
@@ -1012,7 +1118,23 @@ export default function AdminSchedules() {
             </Button>
             <h1 className="text-2xl font-bold">Schedule Management</h1>
           </div>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={isRefetching}
+            onClick={() => refetchRequests()}
+          >
+            <RefreshCcw
+              className={`mr-2 h-4 w-4 ${isRefetching ? "animate-spin" : ""}`}
+            />
+            Refresh requests
+          </Button>
         </div>
+        {requestsError && (
+          <p role="alert" className="mt-2 text-sm text-red-600">
+            Scheduling requests could not be loaded. Please refresh to retry.
+          </p>
+        )}
       </div>
 
       <Tabs
@@ -1032,10 +1154,11 @@ export default function AdminSchedules() {
               10th Lesson Requests {tenthLessonRequests?.length || 0}
             </TabsTrigger>
             <TabsTrigger value="active">
-              Active Learners {activeOnlyLearners?.length || 0}
+              Active Learners {activeTab === "active" ? totalLearnersCount : ""}
             </TabsTrigger>
             <TabsTrigger value="completed">
-              Completed Learners {completedLearners?.length || 0}
+              Completed Learners{" "}
+              {activeTab === "completed" ? totalLearnersCount : ""}
             </TabsTrigger>
           </TabsList>
         </div>
@@ -1129,6 +1252,15 @@ export default function AdminSchedules() {
                         </div>
                       );
                     })}
+                    {/* Infinite scroll sentinel */}
+                    {hasNextRequestsPage && (
+                      <div
+                        ref={requestsSentinelRef}
+                        className="py-4 text-center"
+                      >
+                        <Loader2 className="mx-auto h-4 w-4 animate-spin text-gray-400" />
+                      </div>
+                    )}
                   </ScrollArea>
                 </CardContent>
               </Card>
@@ -1215,6 +1347,15 @@ export default function AdminSchedules() {
                         />
                       </div>
                     ))}
+                    {/* Infinite scroll sentinel */}
+                    {hasNextRequestsPage && (
+                      <div
+                        ref={requestsSentinelRef}
+                        className="py-4 text-center"
+                      >
+                        <Loader2 className="mx-auto h-4 w-4 animate-spin text-gray-400" />
+                      </div>
+                    )}
                   </ScrollArea>
                 </CardContent>
               </Card>
@@ -1291,6 +1432,15 @@ export default function AdminSchedules() {
                         />
                       </div>
                     ))}
+                    {/* Infinite scroll sentinel */}
+                    {hasNextRequestsPage && (
+                      <div
+                        ref={requestsSentinelRef}
+                        className="py-4 text-center"
+                      >
+                        <Loader2 className="mx-auto h-4 w-4 animate-spin text-gray-400" />
+                      </div>
+                    )}
                   </ScrollArea>
                 </CardContent>
               </Card>
@@ -1359,7 +1509,7 @@ export default function AdminSchedules() {
                     variant="outline"
                     size="sm"
                     onClick={() => setShowExportDialog(true)}
-                    disabled={!activeLearners || activeLearners.length === 0}
+                    disabled={totalLearnersCount === 0}
                   >
                     <Download size={16} className="mr-2" />
                     Export CSV
@@ -1468,7 +1618,7 @@ export default function AdminSchedules() {
                         Export{" "}
                         <span className="font-medium">
                           {exportLearnerCount === "all"
-                            ? `all ${activeLearners?.length || 0}`
+                            ? `all ${totalLearnersCount}`
                             : `latest ${exportLearnerCount}`}
                         </span>{" "}
                         learners with{" "}
@@ -1536,9 +1686,17 @@ export default function AdminSchedules() {
                         placeholder="Search..."
                         className="h-8 pl-8 text-sm"
                         value={searchTerm}
-                        onChange={(e) => setSearchTerm(e.target.value)}
+                        onChange={(e) => {
+                          setSearchTerm(e.target.value);
+                        }}
                       />
                     </div>
+                  </div>
+                  {/* Total count display */}
+                  <div className="mt-2 text-xs text-gray-600">
+                    {isLoadingActiveLearners
+                      ? "Loading..."
+                      : `Showing ${allLearners.length} of ${totalLearnersCount} learners`}
                   </div>
                 </CardHeader>
                 <CardContent className="p-3 pt-0">
@@ -1550,19 +1708,11 @@ export default function AdminSchedules() {
                       </div>
                     ) : activeOnlyLearners?.length === 0 ? (
                       <div className="flex items-center justify-center py-10 text-sm text-gray-500">
-                        No learners found matching "{searchTerm}"
+                        No learners found
                       </div>
                     ) : (
                       activeOnlyLearners
-                        // Filter learners locally if an instructor is selected
-                        ?.filter((learner) => {
-                          if (!selectedFilterInstructorId) return true;
-                          // Assumes learner object has a schedule join or instructor_id reference
-                          return learner.schedules?.some(
-                            (s) =>
-                              s.instructor_id === selectedFilterInstructorId,
-                          );
-                        })
+                        // Instructor filtering is now handled by RPC
                         .map((learner) => (
                           <div key={learner.id} className="mb-2">
                             <div className="relative">
@@ -1597,6 +1747,15 @@ export default function AdminSchedules() {
                             </div>
                           </div>
                         ))
+                    )}
+                    {/* Infinite scroll sentinel */}
+                    {hasNextLearnersPage && (
+                      <div
+                        ref={learnersSentinelRef}
+                        className="py-4 text-center"
+                      >
+                        <Loader2 className="mx-auto h-4 w-4 animate-spin text-gray-400" />
+                      </div>
                     )}
                   </ScrollArea>
                 </CardContent>
@@ -1649,9 +1808,17 @@ export default function AdminSchedules() {
                         placeholder="Search..."
                         className="h-8 pl-8 text-sm"
                         value={searchTerm}
-                        onChange={(e) => setSearchTerm(e.target.value)}
+                        onChange={(e) => {
+                          setSearchTerm(e.target.value);
+                        }}
                       />
                     </div>
+                  </div>
+                  {/* Total count display */}
+                  <div className="mt-2 text-xs text-gray-600">
+                    {isLoadingActiveLearners
+                      ? "Loading..."
+                      : `Showing ${allLearners.length} of ${totalLearnersCount} learners`}
                   </div>
                 </CardHeader>
                 <CardContent className="p-3 pt-0">
@@ -1689,6 +1856,15 @@ export default function AdminSchedules() {
                           </div>
                         </div>
                       ))
+                    )}
+                    {/* Infinite scroll sentinel */}
+                    {hasNextLearnersPage && (
+                      <div
+                        ref={learnersSentinelRef}
+                        className="py-4 text-center"
+                      >
+                        <Loader2 className="mx-auto h-4 w-4 animate-spin text-gray-400" />
+                      </div>
                     )}
                   </ScrollArea>
                 </CardContent>
@@ -1794,6 +1970,8 @@ export const LearnerSchedulesManager = ({
 }: LearnerSchedulesManagerProps) => {
   const [learner, setLearner] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const dataControllerRef = useRef<AbortController | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -1804,14 +1982,14 @@ export const LearnerSchedulesManager = ({
     useState(false);
   const [isRescheduleModalOpen, setIsRescheduleModalOpen] = useState(false);
   // NEW - Pause Lesson Dialog State
-const [isPauseDialogOpen, setIsPauseDialogOpen] = useState(false);
+  const [isPauseDialogOpen, setIsPauseDialogOpen] = useState(false);
 
-const [pauseReason, setPauseReason] =
-  useState<"payment" | "other">("payment");
+  const [pauseReason, setPauseReason] = useState<"payment" | "other">(
+    "payment",
+  );
 
-const [pauseNotes, setPauseNotes] = useState("");
-const [pauseType, setPauseType] =
-  useState<"single" | "all">("single");
+  const [pauseNotes, setPauseNotes] = useState("");
+  const [pauseType, setPauseType] = useState<"single" | "all">("single");
 
   const [selectedInstructorId, setSelectedInstructorId] = useState("");
   const [instructorChangeFromLesson, setInstructorChangeFromLesson] = useState<
@@ -1853,6 +2031,8 @@ const [pauseType, setPauseType] =
   const [upgradeInstallment1, setUpgradeInstallment1] = useState("");
   const [isUpgrading, setIsUpgrading] = useState(false);
   const [topupTotalClasses, setTopupTotalClasses] = useState(1);
+  // Per-lesson cost for topup — editable by admin, defaults to 599 (DEMO_COURSE.price equivalent)
+  const [topupPerLessonCost, setTopupPerLessonCost] = useState(599);
   const completeRescheduleRequestMutation =
     useMutationCompleteRescheduleRequest();
   const [topupSlots, setTopupSlots] = useState<
@@ -1920,25 +2100,27 @@ const [pauseType, setPauseType] =
   // 1. Data Fetching
   const syncData = useCallback(async () => {
     if (!learnerId) return;
+    dataControllerRef.current?.abort();
+    const controller = new AbortController();
+    dataControllerRef.current = controller;
+    const { signal } = controller;
     try {
       setIsLoading(true);
-      const { data, error } = await supabase
-        .from("Learner")
-        .select(
-          `
-          id, name, area, phone, email, pick_up_location, address_lat, address_lng,
-          schedules:Schedule(
-            id, date, start_time, end_time, instructor_id,
-            status, course_id, started_at, ended_at,
-            Lesson(id, number),
-            Instructor(name)
+      setLoadError("");
+      const [profile, schedules] = await Promise.all([
+        supabase
+          .from("Learner")
+          .select(
+            "id, name, area, phone, email, pick_up_location, address_lat, address_lng",
           )
-        `,
-        )
-        .eq("id", learnerId)
-        .single();
-
-      if (error) throw error;
+          .eq("id", learnerId)
+          .abortSignal(signal)
+          .single(),
+        fetchAdminSchedules("learner_id", learnerId, signal),
+      ]);
+      if (profile.error) throw profile.error;
+      if (signal.aborted) return;
+      const data = { ...profile.data, schedules };
 
       // Sort schedules by date and time, then assign lesson numbers based on chronological order
       if (data && data.schedules) {
@@ -1990,15 +2172,34 @@ const [pauseType, setPauseType] =
       // under ["instructor", phone] — invalidate both so they refetch.
       queryClient.invalidateQueries({ queryKey: ["instructor-full"] });
       queryClient.invalidateQueries({ queryKey: ["instructor"] });
+      queryClient.invalidateQueries({ queryKey: ["activeLearners-infinite"] });
+      queryClient.invalidateQueries({ queryKey: ["learner-schedules-admin"] });
     } catch (error: any) {
-      console.error("Data fetch error:", error.message);
+      if (!signal.aborted) {
+        console.error("Data fetch error:", error.message);
+        setLearner(null);
+        setLoadError("Schedules could not be loaded. Please retry.");
+      }
     } finally {
-      setIsLoading(false);
+      if (!signal.aborted) setIsLoading(false);
     }
   }, [learnerId, queryClient]);
 
   useEffect(() => {
+    setLearner(null);
     syncData();
+    // Also refresh when returning from Instructor Management, even if
+    // Realtime replication is not enabled on this database.
+    const refresh = () => {
+      if (!document.hidden) void syncData();
+    };
+    window.addEventListener("focus", refresh);
+    const timer = window.setInterval(refresh, 30_000);
+    return () => {
+      dataControllerRef.current?.abort();
+      window.removeEventListener("focus", refresh);
+      window.clearInterval(timer);
+    };
   }, [syncData]);
 
   // 2. Action Handlers
@@ -2096,37 +2297,36 @@ const [pauseType, setPauseType] =
     }
   };
 
-const onUpdateStatus = async (
-  scheduleId: string | number,
-  newStatus: string,
-  pauseReason?: "payment" | "other",
-  pauseNotes?: string,
-) => {
+  const onUpdateStatus = async (
+    scheduleId: string | number,
+    newStatus: string,
+    pauseReason?: "payment" | "other",
+    pauseNotes?: string,
+  ) => {
     try {
       setIsProcessing(true);
       // Convert to number if it's a string, as the database expects an integer ID
       const numericId =
         typeof scheduleId === "string" ? Number(scheduleId) : scheduleId;
 
-     const updates: any = {
-  status: newStatus,
-};
+      const updates: any = {
+        status: newStatus,
+      };
 
-if (newStatus === "paused") {
-  updates.pause_reason = pauseReason;
-  updates.pause_notes =
-    pauseReason === "other" ? pauseNotes : null;
-}
+      if (newStatus === "paused") {
+        updates.pause_reason = pauseReason;
+        updates.pause_notes = pauseReason === "other" ? pauseNotes : null;
+      }
 
-if (newStatus === "booked") {
-  updates.pause_reason = null;
-  updates.pause_notes = null;
-}
+      if (newStatus === "booked") {
+        updates.pause_reason = null;
+        updates.pause_notes = null;
+      }
 
-const { error } = await supabase
-  .from("Schedule")
-  .update(updates)
-  .eq("id", numericId);
+      const { error } = await supabase
+        .from("Schedule")
+        .update(updates)
+        .eq("id", numericId);
 
       if (error) throw error;
       await syncData();
@@ -2146,11 +2346,12 @@ const { error } = await supabase
   };
 
   // Pause or resume ALL upcoming (booked) lessons for this learner
-const onPauseResumeAll = async (
-  action: "pause" | "resume",
-  pauseReason?: "payment" | "other",
-  pauseNotes?: string,
-) => {    if (!learner?.schedules) return;
+  const onPauseResumeAll = async (
+    action: "pause" | "resume",
+    pauseReason?: "payment" | "other",
+    pauseNotes?: string,
+  ) => {
+    if (!learner?.schedules) return;
     try {
       setIsProcessing(true);
       const today = format(new Date(), "yyyy-MM-dd");
@@ -2172,24 +2373,23 @@ const onPauseResumeAll = async (
       }
 
       const updates: any = {
-  status: newStatus,
-};
+        status: newStatus,
+      };
 
-if (newStatus === "paused") {
-  updates.pause_reason = pauseReason;
-  updates.pause_notes =
-    pauseReason === "other" ? pauseNotes : null;
-}
+      if (newStatus === "paused") {
+        updates.pause_reason = pauseReason;
+        updates.pause_notes = pauseReason === "other" ? pauseNotes : null;
+      }
 
-if (newStatus === "booked") {
-  updates.pause_reason = null;
-  updates.pause_notes = null;
-}
+      if (newStatus === "booked") {
+        updates.pause_reason = null;
+        updates.pause_notes = null;
+      }
 
-const { error } = await supabase
-  .from("Schedule")
-  .update(updates)
-  .in("id", scheduleIds);
+      const { error } = await supabase
+        .from("Schedule")
+        .update(updates)
+        .in("id", scheduleIds);
 
       if (error) throw error;
       await syncData();
@@ -2725,18 +2925,18 @@ const { error } = await supabase
       if (error) throw error;
 
       // Send payment link to learner. Demo uses ?type=demo (1hr @ ₹599);
-      // topup uses ?type=topup&hours=N (N × ₹599) so PaymentPage prefills
-      // the right flow instead of showing the generic course selector.
-      const totalHours = topupSlots.reduce((sum, slot) => {
-        const start = parseInt(slot.start_time.split(":")[0]);
-        const end = parseInt(slot.end_time.split(":")[0]);
-        return sum + (end - start);
-      }, 0);
+      // topup uses ?type=topup&hours=N so PaymentPage prefills the right flow.
+      // Use topupTotalClasses (admin-selected count) as the canonical number of
+      // classes/hours for payment calculation and WhatsApp message.
+      const totalHours = topupTotalClasses;
+      // Calculate the correct payment amount:
+      // - Demo: ₹1 (fixed)
+      // - Topup: perLessonCost × totalClasses (admin-editable)
+      const paymentAmount = isDemo ? 1 : topupPerLessonCost * topupTotalClasses;
       if (learner.phone) {
         const paymentLink = isDemo
           ? `https://inlane-web-app.vercel.app/payment?phone=${learner.phone}&type=demo`
-          : `https://inlane-web-app.vercel.app/payment?phone=${learner.phone}&type=topup&hours=${totalHours}`;
-        const paymentAmount = isDemo ? 1 : 1 * totalHours;
+          : `https://inlane-web-app.vercel.app/payment?phone=${learner.phone}&type=topup&hours=${topupTotalClasses}&amount=${paymentAmount}`;
         try {
           await supabase.functions.invoke("send-message", {
             body: {
@@ -2759,11 +2959,10 @@ const { error } = await supabase
       // the Active Learners list in the parent uses its own useQuery, so
       // invalidate it here too. Otherwise the new topup/demo schedule
       // wouldn't appear under the learner's card until the cache expired.
-      queryClient.invalidateQueries({ queryKey: ["activeLearners"] });
-      const topupPrice = isDemo ? 1 : 1 * totalHours;
+      queryClient.invalidateQueries({ queryKey: ["activeLearners-infinite"] });
       toast({
         title: isDemo ? "Demo Scheduled" : "Topup Added",
-        description: `${topupTotalClasses} class(es) scheduled. Payment link (₹${topupPrice}) sent to ${learner.name}.`,
+        description: `${topupTotalClasses} class(es) scheduled. Payment link (₹${paymentAmount}) sent to ${learner.name}.`,
       });
     } catch (error: any) {
       toast({
@@ -2830,18 +3029,18 @@ const { error } = await supabase
                   s.date >= format(new Date(), "yyyy-MM-dd"),
               ) && (
                 <Button
-  variant="outline"
-  size="sm"
-  className="border-amber-400 bg-amber-50 text-amber-700 hover:bg-amber-100"
-  onClick={() => {
-    setPauseType("all");
-    setPauseReason("payment");
-    setPauseNotes("");
-    setIsPauseDialogOpen(true);
-  }}
->
-  Pause Class
-</Button>
+                  variant="outline"
+                  size="sm"
+                  className="border-amber-400 bg-amber-50 text-amber-700 hover:bg-amber-100"
+                  onClick={() => {
+                    setPauseType("all");
+                    setPauseReason("payment");
+                    setPauseNotes("");
+                    setIsPauseDialogOpen(true);
+                  }}
+                >
+                  Pause Class
+                </Button>
               )}
               {learner?.schedules?.some(
                 (s: any) =>
@@ -2875,6 +3074,7 @@ const { error } = await supabase
                     },
                   ]);
                   setTopupLessonId("");
+                  setTopupPerLessonCost(599); // Reset to default when opening dialog
                   setIsTopupDialogOpen(true);
                 }}
               >
@@ -2903,7 +3103,22 @@ const { error } = await supabase
         </CardHeader>
         <CardContent className="p-3 pt-0">
           <div className="space-y-2">
-            {learner?.schedules?.length > 0 ? (
+            {loadError ? (
+              <div
+                role="alert"
+                className="rounded-md bg-red-50 p-4 text-red-700"
+              >
+                <p>{loadError}</p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="mt-2"
+                  onClick={() => void syncData()}
+                >
+                  Retry schedules
+                </Button>
+              </div>
+            ) : learner?.schedules?.length > 0 ? (
               [...learner.schedules]
                 .sort(
                   (a, b) =>
@@ -3045,25 +3260,27 @@ const { error } = await supabase
                               Reschedule
                             </DropdownMenuItem>
                             {schedule.status !== "completed" &&
-  (schedule.status === "paused" ? (
-    <DropdownMenuItem
-      onClick={() => onUpdateStatus(schedule.id, "booked")}
-    >
-      Resume Lesson
-    </DropdownMenuItem>
-  ) : (
-    <DropdownMenuItem
-      onClick={() => {
-        setSelectedSchedule(schedule);
-        setPauseReason("payment");
-        setPauseType("single");
-        setPauseNotes("");
-        setIsPauseDialogOpen(true);
-      }}
-    >
-      Pause Lesson
-    </DropdownMenuItem>
-  ))}
+                              (schedule.status === "paused" ? (
+                                <DropdownMenuItem
+                                  onClick={() =>
+                                    onUpdateStatus(schedule.id, "booked")
+                                  }
+                                >
+                                  Resume Lesson
+                                </DropdownMenuItem>
+                              ) : (
+                                <DropdownMenuItem
+                                  onClick={() => {
+                                    setSelectedSchedule(schedule);
+                                    setPauseReason("payment");
+                                    setPauseType("single");
+                                    setPauseNotes("");
+                                    setIsPauseDialogOpen(true);
+                                  }}
+                                >
+                                  Pause Lesson
+                                </DropdownMenuItem>
+                              ))}
                           </DropdownMenuContent>
                         </DropdownMenu>
                       </div>
@@ -3348,112 +3565,91 @@ const { error } = await supabase
         </DialogContent>
       </Dialog>
       {/* Pause Lesson Dialog */}
-<Dialog
-  open={isPauseDialogOpen}
-  onOpenChange={setIsPauseDialogOpen}
->
-  <DialogContent className="sm:max-w-md [&>button]:border 
-  [&>button]:border-green-500 [&>button]:rounded-md [&>button]:hover:bg-green-50">
-    <DialogHeader>
-      <DialogTitle>Pause Lesson</DialogTitle>
-      <DialogDescription>
-        Select a reason for pausing this lesson.
-      </DialogDescription>
-    </DialogHeader>
+      <Dialog open={isPauseDialogOpen} onOpenChange={setIsPauseDialogOpen}>
+        <DialogContent className="sm:max-w-md [&>button]:rounded-md [&>button]:border [&>button]:border-green-500 [&>button]:hover:bg-green-50">
+          <DialogHeader>
+            <DialogTitle>Pause Lesson</DialogTitle>
+            <DialogDescription>
+              Select a reason for pausing this lesson.
+            </DialogDescription>
+          </DialogHeader>
 
-   <div className="space-y-4">
+          <div className="space-y-4">
+            <div className="space-y-3">
+              <label className="flex items-center gap-2 text-sm font-medium">
+                <input
+                  type="radio"
+                  name="pauseReason"
+                  value="payment"
+                  checked={pauseReason === "payment"}
+                  onChange={() => {
+                    setPauseReason("payment");
+                    setPauseNotes("");
+                  }}
+                />
+                Due to Payment
+              </label>
 
-  <div className="space-y-3">
+              <label className="flex items-center gap-2 text-sm font-medium">
+                <input
+                  type="radio"
+                  name="pauseReason"
+                  value="other"
+                  checked={pauseReason === "other"}
+                  onChange={() => setPauseReason("other")}
+                />
+                Other Reason
+              </label>
+            </div>
 
-    <label className="flex items-center gap-2 text-sm font-medium">
-      <input
-        type="radio"
-        name="pauseReason"
-        value="payment"
-        checked={pauseReason === "payment"}
-        onChange={() => {
-          setPauseReason("payment");
-          setPauseNotes("");
-        }}
-      />
-      Due to Payment
-    </label>
+            {pauseReason === "other" && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-gray-700">
+                  Reason
+                </label>
 
+                <textarea
+                  value={pauseNotes}
+                  onChange={(e) => setPauseNotes(e.target.value)}
+                  placeholder="Enter reason for pausing lesson"
+                  className="min-h-[90px] w-full rounded-md border border-gray-300 p-3 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                />
+              </div>
+            )}
 
-    <label className="flex items-center gap-2 text-sm font-medium">
-      <input
-        type="radio"
-        name="pauseReason"
-        value="other"
-        checked={pauseReason === "other"}
-        onChange={() => setPauseReason("other")}
-      />
-      Other Reason
-    </label>
+            <div className="flex justify-end gap-2 pt-3">
+              <Button
+                variant="outline"
+                onClick={() => setIsPauseDialogOpen(false)}
+              >
+                Cancel
+              </Button>
 
-  </div>
+              <Button
+                disabled={pauseReason === "other" && pauseNotes.trim() === ""}
+                onClick={() => {
+                  if (pauseType === "single") {
+                    if (!selectedSchedule) return;
 
+                    onUpdateStatus(
+                      selectedSchedule.id,
+                      "paused",
+                      pauseReason,
+                      pauseNotes,
+                    );
+                  } else {
+                    onPauseResumeAll("pause", pauseReason, pauseNotes);
+                  }
 
-  {pauseReason === "other" && (
-    <div className="space-y-2">
-
-      <label className="text-sm font-medium text-gray-700">
-        Reason
-      </label>
-
-      <textarea
-        value={pauseNotes}
-        onChange={(e) => setPauseNotes(e.target.value)}
-        placeholder="Enter reason for pausing lesson"
-        className="min-h-[90px] w-full rounded-md border border-gray-300 p-3 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-      />
-
-    </div>
-  )}
-
-
-  <div className="flex justify-end gap-2 pt-3">
-
-    <Button
-      variant="outline"
-      onClick={() => setIsPauseDialogOpen(false)}
-    >
-      Cancel
-    </Button>
-
-<Button
-  disabled={
-    pauseReason === "other" &&
-    pauseNotes.trim() === ""
-  }
-  onClick={() => {
-    if (pauseType === "single") {
-      if (!selectedSchedule) return;
-
-      onUpdateStatus(
-        selectedSchedule.id,
-        "paused",
-        pauseReason,
-        pauseNotes
-      );
-    } else {
-      onPauseResumeAll(
-        "pause",
-        pauseReason,
-        pauseNotes
-      );
-    }
-
-    setIsPauseDialogOpen(false);
-  }}
->
-  Pause
-</Button>
-  </div>
-
-</div>
-  </DialogContent>
-</Dialog>
+                  setIsPauseDialogOpen(false);
+                }}
+              >
+                Pause
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
       {/* Topup Dialog */}
       <Dialog
         open={isTopupDialogOpen}
@@ -3507,6 +3703,38 @@ const { error } = await supabase
                     ))}
                   </SelectContent>
                 </Select>
+              </div>
+            )}
+
+            {/* Per-lesson cost — hidden for demo */}
+            {!isDemo && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-3">
+                  <label className="text-sm font-medium text-gray-700">
+                    Per lesson cost (₹):
+                  </label>
+                  <Input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={topupPerLessonCost}
+                    onChange={(e) =>
+                      setTopupPerLessonCost(
+                        Math.max(1, Number(e.target.value) || 0),
+                      )
+                    }
+                    className="w-[120px]"
+                    disabled={isProcessing}
+                  />
+                </div>
+                <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800">
+                  <span className="font-medium">Total Payment:</span> ₹
+                  {topupPerLessonCost * topupTotalClasses}{" "}
+                  <span className="text-green-600">
+                    ({topupTotalClasses} class
+                    {topupTotalClasses > 1 ? "es" : ""} × ₹{topupPerLessonCost})
+                  </span>
+                </div>
               </div>
             )}
 

@@ -7,6 +7,7 @@ import {
   Loader2,
   X,
 } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
@@ -45,8 +46,95 @@ const fmtWhen = (c: NoShowCase) =>
     ? `${format(new Date(c.date), "EEE d MMM")} · ${c.startTime?.slice(0, 5) ?? ""}–${c.endTime?.slice(0, 5) ?? ""}`
     : "—";
 
+// Pages can overlap if a new case is inserted while the list is being read.
+function loadedRows<T>(
+  pages: { rows: T[] }[] | undefined,
+  key: (row: T) => string | number,
+): T[] {
+  return Array.from(
+    new Map(
+      (pages ?? []).flatMap((page) => page.rows).map((row) => [key(row), row]),
+    ).values(),
+  );
+}
+
+function LoadMoreCases({
+  hasNextPage,
+  isFetching,
+  isFetchingNextPage,
+  isFetchNextPageError,
+  fetchNextPage,
+}: {
+  hasNextPage: boolean;
+  isFetching: boolean;
+  isFetchingNextPage: boolean;
+  isFetchNextPageError: boolean;
+  fetchNextPage: (options: { cancelRefetch: boolean }) => Promise<unknown>;
+}) {
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const hasScrolledRef = useRef(false);
+
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || !hasNextPage || isFetching) return;
+
+    let requested = false;
+    const loadMore = () => {
+      if (requested) return;
+      requested = true;
+      observer.disconnect();
+      void fetchNextPage({ cancelRefetch: false });
+    };
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (
+          entry.isIntersecting &&
+          hasScrolledRef.current &&
+          !isFetchNextPageError
+        ) {
+          loadMore();
+        }
+      },
+      { rootMargin: "0px 0px 200px" },
+    );
+    const onScroll = (event: Event) => {
+      if (event.target instanceof Element && !event.target.contains(sentinel))
+        return;
+      hasScrolledRef.current = true;
+      const bounds = sentinel.getBoundingClientRect();
+      if (bounds.top <= window.innerHeight + 200 && bounds.bottom >= 0)
+        loadMore();
+    };
+    // Opening a tab fetches only its first batch, even in a tall viewport.
+    // A failed next-page request can be retried by scrolling again, without
+    // an observer-driven retry loop.
+    window.addEventListener("scroll", onScroll, {
+      capture: true,
+      passive: true,
+    });
+    observer.observe(sentinel);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [hasNextPage, isFetching, isFetchNextPageError, fetchNextPage]);
+
+  if (!hasNextPage) return null;
+  return (
+    <div ref={sentinelRef} className="min-h-px">
+      {isFetchingNextPage && (
+        <div className="flex justify-center py-4">
+          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReportedCases() {
-  const { data: cases, isLoading } = useNoShowCases();
+  const query = useNoShowCases();
+  const { isLoading } = query;
+  const cases = loadedRows(query.data?.pages, (c) => c.id);
   const resolve = useResolveNoShow();
   const charge = useChargeNoShowFee();
   const { data: admin } = useCurrentAdmin();
@@ -54,7 +142,11 @@ function ReportedCases() {
 
   const act = async (id: string, status: "resolved" | "dismissed") => {
     try {
-      await resolve.mutateAsync({ id, status, resolverName: admin?.name ?? "Admin" });
+      await resolve.mutateAsync({
+        id,
+        status,
+        resolverName: admin?.name ?? "Admin",
+      });
       toast({ title: status === "resolved" ? "Marked resolved" : "Dismissed" });
     } catch (e) {
       toast({
@@ -113,24 +205,50 @@ function ReportedCases() {
           <CardContent className="flex items-center justify-between gap-3 p-3">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <Badge variant="outline" className={`text-[10px] capitalize ${PARTY_STYLE[c.no_show_party]}`}>
+                <Badge
+                  variant="outline"
+                  className={`text-[10px] capitalize ${PARTY_STYLE[c.no_show_party]}`}
+                >
                   {c.no_show_party} no-show
                 </Badge>
-                <Badge variant="outline" className={`text-[10px] capitalize ${STATUS_STYLE[c.status]}`}>
+                <Badge
+                  variant="outline"
+                  className={`text-[10px] capitalize ${STATUS_STYLE[c.status]}`}
+                >
                   {c.status}
                 </Badge>
-                <span className="text-xs text-muted-foreground">{fmtWhen(c)}</span>
+                <span className="text-xs text-muted-foreground">
+                  {fmtWhen(c)}
+                </span>
               </div>
               <div className="mt-1 text-sm">
-                <span className="font-medium">{c.learnerName ?? "Learner"}</span>
-                {c.instructorName ? <span className="text-muted-foreground"> · {c.instructorName}</span> : ""}
+                <span className="font-medium">
+                  {c.learnerName ?? "Learner"}
+                </span>
+                {c.instructorName ? (
+                  <span className="text-muted-foreground">
+                    {" "}
+                    · {c.instructorName}
+                  </span>
+                ) : (
+                  ""
+                )}
                 {c.lessonNumber != null && (
-                  <span className="text-muted-foreground"> · Lesson {c.lessonNumber}</span>
+                  <span className="text-muted-foreground">
+                    {" "}
+                    · Lesson {c.lessonNumber}
+                  </span>
                 )}
               </div>
-              {c.note && <p className="mt-0.5 text-xs text-muted-foreground">“{c.note}”</p>}
+              {c.note && (
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  “{c.note}”
+                </p>
+              )}
               {c.resolution && (
-                <p className="mt-0.5 text-xs text-emerald-700">Resolution: {c.resolution}</p>
+                <p className="mt-0.5 text-xs text-emerald-700">
+                  Resolution: {c.resolution}
+                </p>
               )}
             </div>
             {c.status === "open" && (
@@ -143,13 +261,26 @@ function ReportedCases() {
                     disabled={charge.isPending}
                     onClick={() => chargeFee(c)}
                   >
-                    <IndianRupee className="mr-1 h-3 w-3" /> Charge ₹{NO_SHOW_FEE_AMOUNT}
+                    <IndianRupee className="mr-1 h-3 w-3" /> Charge ₹
+                    {NO_SHOW_FEE_AMOUNT}
                   </Button>
                 )}
-                <Button size="sm" variant="outline" className="h-8" disabled={resolve.isPending} onClick={() => act(c.id, "resolved")}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8"
+                  disabled={resolve.isPending}
+                  onClick={() => act(c.id, "resolved")}
+                >
                   <Check className="mr-1 h-3 w-3" /> Resolve
                 </Button>
-                <Button size="sm" variant="ghost" className="h-8 text-muted-foreground" disabled={resolve.isPending} onClick={() => act(c.id, "dismissed")}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 text-muted-foreground"
+                  disabled={resolve.isPending}
+                  onClick={() => act(c.id, "dismissed")}
+                >
                   <X className="mr-1 h-3 w-3" /> Dismiss
                 </Button>
               </div>
@@ -157,18 +288,24 @@ function ReportedCases() {
           </CardContent>
         </Card>
       ))}
+      <LoadMoreCases {...query} />
     </div>
   );
 }
 
 function PotentialInstructorNoShows() {
-  const { data: rows, isLoading } = usePotentialInstructorNoShows();
+  const query = usePotentialInstructorNoShows();
+  const { isLoading } = query;
+  const rows = loadedRows(query.data?.pages, (r) => r.scheduleId);
   const flag = useFlagInstructorNoShow();
   const { toast } = useToast();
 
   const doFlag = async (scheduleId: number) => {
     try {
-      await flag.mutateAsync({ scheduleId, note: "Lesson never started (no OTP)" });
+      await flag.mutateAsync({
+        scheduleId,
+        note: "Lesson never started (no OTP)",
+      });
       toast({ title: "Flagged as instructor no-show" });
     } catch (e) {
       toast({
@@ -198,26 +335,37 @@ function PotentialInstructorNoShows() {
     <>
       <p className="mb-2 flex items-center gap-1 text-xs text-muted-foreground">
         <AlertTriangle className="h-3 w-3 text-amber-500" />
-        Past booked lessons that never started (no OTP). Confirm to log as an instructor no-show.
+        Past booked lessons that never started (no OTP). Confirm to log as an
+        instructor no-show.
       </p>
       <div className="space-y-2">
         {rows.map((r) => (
           <Card key={r.scheduleId}>
             <CardContent className="flex items-center justify-between gap-3 p-3">
               <div className="min-w-0 text-sm">
-                <div className="font-medium">{r.instructorName ?? "Instructor"}</div>
+                <div className="font-medium">
+                  {r.instructorName ?? "Instructor"}
+                </div>
                 <div className="text-xs text-muted-foreground">
-                  {format(new Date(r.date), "EEE d MMM")} · {r.startTime?.slice(0, 5)}–{r.endTime?.slice(0, 5)} ·{" "}
+                  {format(new Date(r.date), "EEE d MMM")} ·{" "}
+                  {r.startTime?.slice(0, 5)}–{r.endTime?.slice(0, 5)} ·{" "}
                   {r.learnerName ?? "Learner"}
                   {r.lessonNumber != null ? ` · Lesson ${r.lessonNumber}` : ""}
                 </div>
               </div>
-              <Button size="sm" variant="outline" className="h-8 border-purple-200 text-purple-700 hover:bg-purple-50" disabled={flag.isPending} onClick={() => doFlag(r.scheduleId)}>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 border-purple-200 text-purple-700 hover:bg-purple-50"
+                disabled={flag.isPending}
+                onClick={() => doFlag(r.scheduleId)}
+              >
                 Flag no-show
               </Button>
             </CardContent>
           </Card>
         ))}
+        <LoadMoreCases {...query} />
       </div>
     </>
   );
@@ -245,7 +393,14 @@ const fmtFeeWhen = (f: NoShowFee) =>
     : "—";
 
 function FeesAndAppeals() {
-  const { data: fees, isLoading } = useAllNoShowFees();
+  const query = useAllNoShowFees();
+  const appealsQuery = useAllNoShowFees({ pendingAppealsOnly: true });
+  const isLoading = query.isLoading || appealsQuery.isLoading;
+  const fees = loadedRows(query.data?.pages, (f) => f.id);
+  const pendingAppeals = loadedRows(appealsQuery.data?.pages, (f) => f.id);
+  const totalFees = query.data?.pages[0]?.total ?? fees.length;
+  const totalPendingAppeals =
+    appealsQuery.data?.pages[0]?.total ?? pendingAppeals.length;
   const review = useReviewAppeal();
   const { data: admin } = useCurrentAdmin();
   const { toast } = useToast();
@@ -263,7 +418,11 @@ function FeesAndAppeals() {
       );
       if (raw == null) return;
       refundAmount = Number(raw);
-      if (!Number.isFinite(refundAmount) || refundAmount <= 0 || refundAmount >= f.amount) {
+      if (
+        !Number.isFinite(refundAmount) ||
+        refundAmount <= 0 ||
+        refundAmount >= f.amount
+      ) {
         toast({
           title: "Invalid amount",
           description: `Enter a number between 1 and ${f.amount - 1}.`,
@@ -315,28 +474,27 @@ function FeesAndAppeals() {
       </Card>
     );
 
-  const pendingAppeals = fees.filter(
-    (f) => f.appeal && f.appeal.status === "pending",
-  );
-
   return (
     <div className="space-y-4">
       {pendingAppeals.length > 0 && (
         <div>
           <h2 className="mb-2 text-sm font-semibold">
-            Pending appeals ({pendingAppeals.length})
+            Pending appeals ({totalPendingAppeals})
           </h2>
           <div className="space-y-2">
             {pendingAppeals.map((f) => (
               <Card key={f.id} className="border-orange-200">
                 <CardContent className="space-y-2 p-3">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-medium">{f.learnerName ?? "Learner"}</span>
+                    <span className="font-medium">
+                      {f.learnerName ?? "Learner"}
+                    </span>
                     <span className="text-xs text-muted-foreground">
                       {fmtFeeWhen(f)} · ₹{f.amount}
                     </span>
                     <Badge variant="outline" className="text-[10px]">
-                      {APPEAL_REASON_LABEL[f.appeal!.reason] ?? f.appeal!.reason}
+                      {APPEAL_REASON_LABEL[f.appeal!.reason] ??
+                        f.appeal!.reason}
                     </Badge>
                   </div>
                   {f.appeal!.description && (
@@ -376,21 +534,26 @@ function FeesAndAppeals() {
                 </CardContent>
               </Card>
             ))}
+            <LoadMoreCases {...appealsQuery} />
           </div>
         </div>
       )}
 
       <div>
-        <h2 className="mb-2 text-sm font-semibold">All fees ({fees.length})</h2>
+        <h2 className="mb-2 text-sm font-semibold">All fees ({totalFees})</h2>
         <div className="space-y-2">
           {fees.map((f) => (
             <Card key={f.id}>
               <CardContent className="flex items-center justify-between gap-3 p-3">
                 <div className="min-w-0 text-sm">
-                  <div className="font-medium">{f.learnerName ?? "Learner"}</div>
+                  <div className="font-medium">
+                    {f.learnerName ?? "Learner"}
+                  </div>
                   <div className="text-xs text-muted-foreground">
                     {fmtFeeWhen(f)}
-                    {f.lessonNumber != null ? ` · Lesson ${f.lessonNumber}` : ""}
+                    {f.lessonNumber != null
+                      ? ` · Lesson ${f.lessonNumber}`
+                      : ""}
                     {f.instructorName ? ` · ${f.instructorName}` : ""}
                   </div>
                 </div>
@@ -406,6 +569,7 @@ function FeesAndAppeals() {
               </CardContent>
             </Card>
           ))}
+          <LoadMoreCases {...query} />
         </div>
       </div>
     </div>
@@ -423,7 +587,9 @@ export default function NoShowManagement() {
             </Button>
           </Link>
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">No-show Management</h1>
+            <h1 className="text-2xl font-bold tracking-tight">
+              No-show Management
+            </h1>
             <p className="text-sm text-muted-foreground">
               Manage learner & instructor no-show cases.
             </p>
@@ -434,7 +600,9 @@ export default function NoShowManagement() {
           <TabsList>
             <TabsTrigger value="reported">Reported cases</TabsTrigger>
             <TabsTrigger value="fees">Fees &amp; appeals</TabsTrigger>
-            <TabsTrigger value="potential">Potential instructor no-shows</TabsTrigger>
+            <TabsTrigger value="potential">
+              Potential instructor no-shows
+            </TabsTrigger>
           </TabsList>
           <TabsContent value="reported" className="mt-4">
             <ReportedCases />

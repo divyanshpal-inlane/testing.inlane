@@ -26,6 +26,26 @@ const formatTime = (time: string): string => {
   return `${hourNum}:${minutes} ${period}`;
 };
 
+const formatScheduleDate = (date: string): string => {
+  const [year, month, day] = date.split("-");
+  const monthName = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ][Number(month) - 1];
+
+  return `${day} ${monthName} ${year}`;
+};
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -77,8 +97,8 @@ Deno.serve(async (req) => {
     const results = [];
 
     for (const learner_id of uniqueLearnerIds) {
-      // Fetch tomorrow's schedules + ALL schedules for this learner to calculate correct lesson numbers
-      const [tomorrowResult, allResult, learnerResult] = await Promise.all([
+      // Fetch tomorrow's schedules and the learner receiving the reminder.
+      const [tomorrowResult, learnerResult] = await Promise.all([
         supabaseClient
           .from("Schedule")
           .select(
@@ -100,13 +120,6 @@ Deno.serve(async (req) => {
           .neq("status", "paused")
           .order("start_time"),
         supabaseClient
-          .from("Schedule")
-          .select("id, date, start_time, course_id, lesson_id")
-          .eq("learner_id", learner_id)
-          .neq("status", "paused")
-          .order("date", { ascending: true })
-          .order("start_time", { ascending: true }),
-        supabaseClient
           .from("Learner")
           .select("id, name, phone")
           .eq("id", learner_id)
@@ -114,54 +127,25 @@ Deno.serve(async (req) => {
       ]);
 
       const schedules = tomorrowResult.data;
-      const allSchedules = allResult.data;
       const learner = learnerResult.data;
 
       if (tomorrowResult.error || !schedules || schedules.length === 0)
         continue;
       if (learnerResult.error || !learner) continue;
 
-      // Calculate chronological lesson numbers per course
-      const scheduleToLessonNumber = new Map<number, number>();
-      if (allSchedules) {
-        const grouped: Record<string, any[]> = {};
-        for (const s of allSchedules) {
-          const key = s.course_id || "no-course";
-          if (!grouped[key]) grouped[key] = [];
-          grouped[key].push(s);
-        }
-        for (const group of Object.values(grouped)) {
-          group
-            .sort(
-              (a, b) =>
-                new Date(`${a.date}T${a.start_time}`).getTime() -
-                new Date(`${b.date}T${b.start_time}`).getTime(),
-            )
-            .forEach((s, i) => {
-              scheduleToLessonNumber.set(s.id, i + 1);
-            });
-        }
-      }
-
-      // Format schedule messages with correct lesson numbers
-      const scheduleMessages = schedules.map((schedule) => {
-        const startTime = formatTime(schedule.start_time);
-        const endTime = formatTime(schedule.end_time);
-        const lessonNum =
-          scheduleToLessonNumber.get(schedule.id) ||
-          schedule.Lesson?.number ||
-          "?";
-        return `${startTime} - ${endTime}: Lesson ${lessonNum}`;
-      });
+      // Show every start time when a learner has more than one lesson tomorrow.
+      const scheduleTimes = schedules.map((schedule) =>
+        formatTime(schedule.start_time),
+      );
 
       // Prepare the message payload
       const messagePayload = {
         messages: [
           {
             clientWaNumber: learner.phone,
-            templateName: "webapp_reminder_customer_for_class_tomorrow_v2",
+            templateName: "daily_notification_schedule_",
             templateContent:
-              "Hey {{1}}, We hope you are having the best day. You have lessons tomorrow 📔🚗. Do check the details below: {{2}} Check the Lane App for more details 🥳 Thank you, Lane Team 🚗🚗",
+              "Hey {{1}},\n\nWe hope you’re having a great day! 😊\n\nJust a gentle reminder that your driving lesson is scheduled for tomorrow. 🚗📔 Please find the details below:\n\nDate: {{2}}\n\nTime: {{3}}\n\nDriving Buddy: {{4}}\n\nFor complete lesson details and updates, kindly check the Lane App. 🥳\n\nImportant: We kindly request you to let us know if you need any changes to tomorrow’s schedule before 7:00 PM today. This will help us plan the schedules smoothly and accommodate your request wherever possible.\n\nWe sincerely request your cooperation in informing us within the mentioned time. Requests made after 7:00 PM may be difficult to accommodate, and nominal charges may apply for late schedule changes.\n\nThank you so much for your understanding and cooperation. 🙏\n\n– Team Lane 🚗🚗",
             templateHeader: "",
             languageCode: "en",
             variables: [
@@ -174,17 +158,16 @@ Deno.serve(async (req) => {
                   },
                   {
                     type: "text",
-                    text: nextDayString, // Parameter 2: Date of the lesson
+                    text: formatScheduleDate(nextDayString), // Parameter 2: Date of the lesson
                   },
                   {
                     type: "text",
-                    text: scheduleMessages.join(", "), // Parameter 3: Time and lesson details
+                    text: scheduleTimes.join(", "), // Parameter 3: Lesson start time(s)
                   },
                   {
                     type: "text",
                     text: schedules[0].Instructor.name, // Parameter 4: Driving buddy's name
                   },
-                 
                 ],
               },
             ],

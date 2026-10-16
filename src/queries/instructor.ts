@@ -597,10 +597,7 @@ export const useUpdateScheduleStatus = () => {
         try {
           await runLLAutoPromoteDL(data.learner_id as string);
         } catch (e) {
-          console.error(
-            "[useUpdateScheduleStatus] LL auto-promote failed:",
-            e,
-          );
+          console.error("[useUpdateScheduleStatus] LL auto-promote failed:", e);
         }
       }
 
@@ -612,6 +609,7 @@ export const useUpdateScheduleStatus = () => {
       queryClient.invalidateQueries({ queryKey: ["instructor"] });
       queryClient.invalidateQueries({ queryKey: ["verify-otp"] });
       queryClient.invalidateQueries({ queryKey: ["ll-applications"] });
+      queryClient.invalidateQueries({ queryKey: ["ll-queue-counts"] });
       queryClient.invalidateQueries({ queryKey: ["my-ll-application"] });
     },
   });

@@ -83,23 +83,32 @@ function RespondDialog({
           <DialogTitle className="flex items-center gap-2">
             {ticket.subject}
             {ticket.priority === "urgent" && (
-              <Badge variant="outline" className="border-red-200 bg-red-50 text-[10px] text-red-700">
+              <Badge
+                variant="outline"
+                className="border-red-200 bg-red-50 text-[10px] text-red-700"
+              >
                 Urgent
               </Badge>
             )}
           </DialogTitle>
           <DialogDescription>
-            {TICKET_CATEGORY_LABEL[ticket.category]} · {ticket.instructorName ?? "Instructor"}
+            {TICKET_CATEGORY_LABEL[ticket.category]} ·{" "}
+            {ticket.instructorName ?? "Instructor"}
             {ticket.instructorPhone ? ` · ${ticket.instructorPhone}` : ""}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           {ticket.description && (
-            <p className="rounded bg-gray-50 p-2 text-sm text-gray-700">{ticket.description}</p>
+            <p className="rounded bg-gray-50 p-2 text-sm text-gray-700">
+              {ticket.description}
+            </p>
           )}
           <div className="space-y-1">
             <span className="text-xs font-medium">Status</span>
-            <Select value={status} onValueChange={(v) => setStatus(v as TicketStatus)}>
+            <Select
+              value={status}
+              onValueChange={(v) => setStatus(v as TicketStatus)}
+            >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
@@ -122,11 +131,17 @@ function RespondDialog({
             />
           </div>
           <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={onClose} disabled={update.isPending}>
+            <Button
+              variant="outline"
+              onClick={onClose}
+              disabled={update.isPending}
+            >
               Cancel
             </Button>
             <Button onClick={save} disabled={update.isPending}>
-              {update.isPending && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+              {update.isPending && (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              )}
               Save
             </Button>
           </div>
@@ -143,17 +158,18 @@ export default function SupportTickets() {
     status: status === "all" ? undefined : status,
     category: category === "all" ? undefined : category,
   });
-  const [selected, setSelected] = useState<SupportTicketWithInstructor | null>(null);
+  const [selected, setSelected] = useState<SupportTicketWithInstructor | null>(
+    null,
+  );
 
   // urgent + open first
-  const rows = (data ?? [])
-    .slice()
-    .sort((a, b) => {
-      if ((a.status === "open") !== (b.status === "open")) return a.status === "open" ? -1 : 1;
-      if ((a.priority === "urgent") !== (b.priority === "urgent"))
-        return a.priority === "urgent" ? -1 : 1;
-      return (b.created_at ?? "").localeCompare(a.created_at ?? "");
-    });
+  const rows = (data ?? []).slice().sort((a, b) => {
+    if ((a.status === "open") !== (b.status === "open"))
+      return a.status === "open" ? -1 : 1;
+    if ((a.priority === "urgent") !== (b.priority === "urgent"))
+      return a.priority === "urgent" ? -1 : 1;
+    return (b.created_at ?? "").localeCompare(a.created_at ?? "");
+  });
 
   const openCount = (data ?? []).filter((t) => t.status === "open").length;
 
@@ -167,16 +183,25 @@ export default function SupportTickets() {
             </Button>
           </Link>
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">Support Tickets</h1>
+            <h1 className="text-2xl font-bold tracking-tight">
+              Support Tickets
+            </h1>
             <p className="text-sm text-muted-foreground">
               Respond to instructor support requests.{" "}
-              {openCount > 0 && <span className="font-medium text-amber-600">{openCount} open</span>}
+              {openCount > 0 && (
+                <span className="font-medium text-amber-600">
+                  {openCount} open
+                </span>
+              )}
             </p>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Select value={status} onValueChange={(v) => setStatus(v as TicketStatus | "all")}>
+          <Select
+            value={status}
+            onValueChange={(v) => setStatus(v as TicketStatus | "all")}
+          >
             <SelectTrigger className="w-[160px]">
               <SelectValue />
             </SelectTrigger>
@@ -189,7 +214,10 @@ export default function SupportTickets() {
               ))}
             </SelectContent>
           </Select>
-          <Select value={category} onValueChange={(v) => setCategory(v as TicketCategory | "all")}>
+          <Select
+            value={category}
+            onValueChange={(v) => setCategory(v as TicketCategory | "all")}
+          >
             <SelectTrigger className="w-[160px]">
               <SelectValue />
             </SelectTrigger>
@@ -217,23 +245,38 @@ export default function SupportTickets() {
         ) : (
           <div className="space-y-2">
             {rows.map((t) => (
-              <Card key={t.id} className="cursor-pointer transition-colors hover:bg-muted/30" onClick={() => setSelected(t)}>
+              <Card
+                key={t.id}
+                className="cursor-pointer transition-colors hover:bg-muted/30"
+                onClick={() => setSelected(t)}
+              >
                 <CardContent className="flex items-center justify-between gap-3 p-3">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="truncate text-sm font-semibold">{t.subject}</span>
+                      <span className="truncate text-sm font-semibold">
+                        {t.subject}
+                      </span>
                       {t.priority === "urgent" && (
-                        <Badge variant="outline" className="border-red-200 bg-red-50 text-[10px] text-red-700">
+                        <Badge
+                          variant="outline"
+                          className="border-red-200 bg-red-50 text-[10px] text-red-700"
+                        >
                           Urgent
                         </Badge>
                       )}
-                      <Badge variant="outline" className={`text-[10px] capitalize ${STATUS_STYLE[t.status]}`}>
+                      <Badge
+                        variant="outline"
+                        className={`text-[10px] capitalize ${STATUS_STYLE[t.status]}`}
+                      >
                         {statusLabel(t.status)}
                       </Badge>
                     </div>
                     <div className="mt-0.5 text-xs text-muted-foreground">
-                      {TICKET_CATEGORY_LABEL[t.category]} · {t.instructorName ?? "Instructor"}
-                      {t.created_at ? ` · ${format(new Date(t.created_at), "d MMM")}` : ""}
+                      {TICKET_CATEGORY_LABEL[t.category]} ·{" "}
+                      {t.instructorName ?? "Instructor"}
+                      {t.created_at
+                        ? ` · ${format(new Date(t.created_at), "d MMM")}`
+                        : ""}
                     </div>
                     {t.instructorPhone && (
                       <div className="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground">

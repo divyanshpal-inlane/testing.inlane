@@ -53,6 +53,7 @@ export default function InstructorAuth() {
 
     try {
       setIsRequestingOtp(true);
+      setErrorMessage("");
       await requestPasswordReset(phone, "instructor");
       setResetRequested(true);
       setTimer(30);
@@ -60,7 +61,12 @@ export default function InstructorAuth() {
         "OTP sent to your WhatsApp. Please check and enter below.",
       );
     } catch (error) {
-      setErrorMessage("Failed to send OTP. Please try again.");
+      setSuccessMessage("");
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to send OTP. Please try again.",
+      );
     } finally {
       setIsRequestingOtp(false);
     }
@@ -68,11 +74,17 @@ export default function InstructorAuth() {
 
   const handleVerifyOtp = async () => {
     try {
+      setErrorMessage("");
       await verifyOtpAndResetPassword(phone, otp, null);
       setOtpVerified(true);
       setSuccessMessage("OTP verified successfully. Set your new password.");
     } catch (error) {
-      setErrorMessage("Invalid OTP. Please try again.");
+      setSuccessMessage("");
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Invalid OTP. Please try again.",
+      );
     }
   };
 
@@ -84,22 +96,24 @@ export default function InstructorAuth() {
       const formattedPhone = `+91${phone.replace(/\D/g, "")}`;
       if (active === "login") {
         await login(formattedPhone, password, "instructor");
-       } else if (active === "signup") {
-         if (!name || name.trim().length < 2) {
-           throw new Error("Please enter your full name");
-         }
-         await signUp(formattedPhone, password, "instructor", name.trim());
-         // Show success message and redirect to login
-         setSuccessMessage("User registered successfully! You can now login with your phone number.");
-         setTimeout(() => {
-           setActive("login");
-           setPhone("");
-           setName("");
-           setPassword("");
-           setSuccessMessage("");
-           setErrorMessage("");
-         }, 2500);
-       } else if (active === "forgot-password") {
+      } else if (active === "signup") {
+        if (!name || name.trim().length < 2) {
+          throw new Error("Please enter your full name");
+        }
+        await signUp(formattedPhone, password, "instructor", name.trim());
+        // Show success message and redirect to login
+        setSuccessMessage(
+          "User registered successfully! You can now login with your phone number.",
+        );
+        setTimeout(() => {
+          setActive("login");
+          setPhone("");
+          setName("");
+          setPassword("");
+          setSuccessMessage("");
+          setErrorMessage("");
+        }, 2500);
+      } else if (active === "forgot-password") {
         if (!resetRequested) {
           if (!phone || phone.trim().length < 10) {
             throw new Error("Please enter a valid phone number");
@@ -187,7 +201,11 @@ export default function InstructorAuth() {
                   <div className="relative w-full">
                     <Input
                       type={showPassword ? "text" : "password"}
-                      placeholder={active === "signup" ? "Create Password" : "Enter Password"}
+                      placeholder={
+                        active === "signup"
+                          ? "Create Password"
+                          : "Enter Password"
+                      }
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       className="pr-10"

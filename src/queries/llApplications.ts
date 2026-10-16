@@ -1,11 +1,23 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import {
   assertLLStatusTransition,
   classifyLLStatusTransition,
   fieldsToClearOnLLRevert,
   isLLSegregationRouteCode,
+  LL_ESCALATION_STATUSES,
+  LL_FAILURE_STAGES,
+  LL_PHASES,
+  LL_SEGREGATION_ROUTES,
+  LL_STAGES,
+  LLPhaseKey,
   llSegregationRouteLabel,
+  llStagePhase,
 } from "@/constants/llPipeline";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -59,6 +71,10 @@ export interface LLApplication {
   reapply_fee: number | null;
   /** Which scheduled nudges the ll-flow-reminders sweep already sent. */
   reminders_sent: Record<string, string>;
+  /** Sticky: learner passed the online LL test (survives Ops revert). */
+  ll_test_passed_achieved?: boolean;
+  /** Sticky: learner passed the DL test (survives Ops revert). */
+  dl_test_passed_achieved?: boolean;
   created_at: string;
   updated_at: string;
   Learner: {
@@ -82,19 +98,393 @@ export interface LLPipelineEvent {
   created_at: string;
 }
 
-export function useLLApplications() {
+// ── Backend-driven pagination (LLDL Pipeline) ────────────────────────────
+// The admin list never downloads the whole table. Every request asks the
+// database for one page (15 rows) and applies the active queue/search/route/
+// date filters in the WHERE clause (PostgREST LIMIT/OFFSET + filters). The
+// page can never return more than 15 rows and pagination reaches well
+// past PostgREST's 1000-row response cap.
+
+export type LLPipelineQueueKey = "all" | LLPhaseKey | "escalations";
+
+export interface LLPipelineFilters {
+  /** Empty = every phase; otherwise status must fall in one of these phases. */
+  phases: LLPhaseKey[];
+  /** When true, only escalated rows / failure statuses (scoped to selected phases if any). */
+  escalationsOnly: boolean;
+  /** Empty = all stages in scope; otherwise status IN (...). */
+  stages: string[];
+  /** Matches learner name/phone/email, application no., LL no., batch/route. */
+  search: string;
+  /** Empty = all routes; values A|B|C|D|unset */
+  routes: string[];
+  dateField: "created_at" | "updated_at";
+  dateFrom: string;
+  dateTo: string;
+}
+
+export const LL_PIPELINE_PAGE_SIZE = 15;
+
+/** Swap inverted local-date bounds so filters stay inclusive. */
+export function normalizeLLPipelineFilters(
+  filters: LLPipelineFilters,
+): LLPipelineFilters {
+  const stages = [
+    ...new Set(filters.stages.map((s) => s.trim()).filter(Boolean)),
+  ];
+  let next: LLPipelineFilters = { ...filters, stages };
+  if (next.dateFrom && next.dateTo && next.dateFrom > next.dateTo) {
+    next = {
+      ...next,
+      dateFrom: next.dateTo,
+      dateTo: next.dateFrom,
+    };
+  }
+  next = {
+    ...next,
+    stages: resolveLLPipelineStageFilter(
+      next.stages,
+      next.phases,
+      next.escalationsOnly,
+    ),
+  };
+  return next;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyLLRoutesFilter(query: any, routes: string[]) {
+  if (!routes.length) return query;
+  const orParts: string[] = [];
+  if (routes.includes("unset")) {
+    orParts.push("batch_code.is.null");
+  }
+  for (const code of ["A", "B", "C", "D"] as const) {
+    if (routes.includes(code)) {
+      orParts.push(`batch_code.eq.${code}`);
+    }
+  }
+  if (orParts.length === 0) return query;
+  return query.or(orParts.join(","));
+}
+
+/** Every storable status that belongs to a pipeline phase (incl. failures). */
+function llStatusesInPhase(phase: LLPhaseKey): string[] {
+  const statuses = new Set<string>();
+  for (const stage of LL_STAGES) {
+    if (stage.phase === phase) statuses.add(stage.key);
+  }
+  for (const key of Object.keys(LL_FAILURE_STAGES)) {
+    if (llStagePhase(key) === phase) statuses.add(key);
+  }
+  return [...statuses];
+}
+
+const ALL_LL_PIPELINE_STATUSES = [
+  ...LL_STAGES.map((stage) => stage.key),
+  ...Object.keys(LL_FAILURE_STAGES),
+];
+
+/** Union of storable statuses across the selected pipeline phases. */
+export function llStatusesForPhases(phases: LLPhaseKey[]): string[] {
+  const statuses = new Set<string>();
+  for (const phase of phases) {
+    for (const status of llStatusesInPhase(phase)) {
+      statuses.add(status);
+    }
+  }
+  return [...statuses];
+}
+
+/** Status keys allowed by the current phase / escalation scope (before stage pick). */
+export function llPipelineStatusesInScope(
+  phases: LLPhaseKey[],
+  escalationsOnly: boolean,
+): string[] {
+  if (phases.length > 0) {
+    return llStatusesForPhases(phases);
+  }
+  if (escalationsOnly) {
+    return ALL_LL_PIPELINE_STATUSES;
+  }
+  return ALL_LL_PIPELINE_STATUSES;
+}
+
+/** Stage multi-select intersected with phase scope; deduped. */
+export function resolveLLPipelineStageFilter(
+  stages: string[],
+  phases: LLPhaseKey[],
+  escalationsOnly: boolean,
+): string[] {
+  if (stages.length === 0) return [];
+  const scope = new Set(llPipelineStatusesInScope(phases, escalationsOnly));
+  const seen = new Set<string>();
+  const picked: string[] = [];
+  for (const key of stages) {
+    if (!scope.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    picked.push(key);
+  }
+  return picked;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyLLPipelineStatusFilter(
+  query: any,
+  phases: LLPhaseKey[],
+  escalationsOnly: boolean,
+  stages: string[],
+) {
+  const stageFilter = resolveLLPipelineStageFilter(
+    stages,
+    phases,
+    escalationsOnly,
+  );
+  const phaseStatuses = phases.length > 0 ? llStatusesForPhases(phases) : null;
+
+  if (!escalationsOnly && !phaseStatuses && stageFilter.length === 0) {
+    return query;
+  }
+
+  if (!escalationsOnly) {
+    if (stageFilter.length > 0) {
+      return query.in("status", stageFilter);
+    }
+    if (phaseStatuses) {
+      return query.in("status", phaseStatuses);
+    }
+    return query;
+  }
+
+  // Escalations scope: escalated flag and/or failure statuses, optionally
+  // narrowed by phase and/or explicit stage multi-select.
+  const baseScope = phaseStatuses ?? ALL_LL_PIPELINE_STATUSES;
+  const scoped = stageFilter.length > 0 ? stageFilter : baseScope;
+
+  if (scoped.length === 0) {
+    return query.in("status", ["__ll_pipeline_no_match__"]);
+  }
+
+  const failuresInScope = scoped.filter((s) =>
+    LL_ESCALATION_STATUSES.includes(s),
+  );
+  const orParts = [`and(escalated.is.true,status.in.(${scoped.join(",")}))`];
+  if (failuresInScope.length > 0) {
+    orParts.push(`status.in.(${failuresInScope.join(",")})`);
+  }
+  return query.or(orParts.join(","));
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyLLPhaseQueueFilters(
+  query: any,
+  phases: LLPhaseKey[],
+  escalationsOnly: boolean,
+) {
+  return applyLLPipelineStatusFilter(query, phases, escalationsOnly, []);
+}
+
+/** Expand derived route labels into database batch-code matches. */
+function llPipelineSearchRoutes(term: string): string[] {
+  const t = term.trim().toLowerCase();
+  if (!t) return [];
+
+  return LL_SEGREGATION_ROUTES.filter(
+    (route) =>
+      route.code.toLowerCase() === t ||
+      route.name.toLowerCase().includes(t) ||
+      llSegregationRouteLabel(route.code).toLowerCase().includes(t),
+  ).map((route) => route.code);
+}
+
+async function fetchLLApplicationsPage(opts: {
+  page: number;
+  filters: LLPipelineFilters;
+  signal: AbortSignal;
+}): Promise<{ data: LLApplication[]; total: number }> {
+  const { page, signal } = opts;
+  const filters = normalizeLLPipelineFilters(opts.filters);
+  const from = (page - 1) * LL_PIPELINE_PAGE_SIZE;
+  const buildQuery = (head = false) => {
+    // The SQL function returns the table type, preserving Learner embedding.
+    // Search, exact count and the 15-row range use a single database request.
+    let q = sb.rpc(
+      "get_ll_pipeline_applications",
+      {
+        search_term: filters.search.trim(),
+        search_routes: llPipelineSearchRoutes(filters.search),
+      },
+      { count: "exact", head },
+    );
+
+    q = q.select("*, Learner(id, name, phone, email, area)");
+    q = applyLLPipelineStatusFilter(
+      q,
+      filters.phases,
+      filters.escalationsOnly,
+      filters.stages,
+    );
+    q = applyLLRoutesFilter(q, filters.routes);
+    if (filters.dateFrom) {
+      // Local-date aware bounds (IST) so a date filter includes the whole day.
+      q = q.gte(filters.dateField, `${filters.dateFrom}T00:00:00+05:30`);
+    }
+    if (filters.dateTo) {
+      q = q.lte(filters.dateField, `${filters.dateTo}T23:59:59+05:30`);
+    }
+    return q.abortSignal(signal);
+  };
+
+  const { data, error, count } = await buildQuery()
+    .order("updated_at", { ascending: false })
+    .order("id", { ascending: false })
+    .range(from, from + LL_PIPELINE_PAGE_SIZE - 1);
+  // Status changes/deletions can shrink the last page. PostgREST doesn't give
+  // a usable count on PGRST103, so recover it with a count-only request.
+  if (error?.code === "PGRST103" && from > 0) {
+    const { count: remainingCount, error: countError } = await buildQuery(true);
+    if (countError) throw countError;
+    return { data: [], total: remainingCount ?? 0 };
+  }
+  if (error) {
+    if (error.code === "PGRST202") {
+      throw new Error(
+        "Apply the LL pipeline pagination migration " +
+          "(20260918000700_ll_pipeline_pagination.sql) in Supabase.",
+      );
+    }
+    throw error;
+  }
+  return {
+    data: (data ?? []) as unknown as LLApplication[],
+    total: count ?? 0,
+  };
+}
+
+/** Only the active tab's current 15-row page is fetched, never accumulated. */
+export function useLLApplicationsPage(
+  filters: LLPipelineFilters,
+  page: number,
+  enabled = true,
+) {
   return useQuery({
-    queryKey: ["ll-applications"],
-    queryFn: async (): Promise<LLApplication[]> => {
+    queryKey: ["ll-applications", "page", filters, page],
+    queryFn: ({ signal }) => fetchLLApplicationsPage({ page, filters, signal }),
+    enabled,
+    staleTime: 30 * 1000,
+    retry: (failureCount, error) =>
+      !(error instanceof Error) &&
+      (error as { code?: string }).code !== "42501" &&
+      failureCount < 2,
+  });
+}
+
+/** Keep selected details/actions available even outside the current page. */
+export function useLLApplication(
+  applicationId: string | null,
+  pageApplication?: LLApplication,
+) {
+  return useQuery({
+    queryKey: ["ll-applications", "detail", applicationId],
+    queryFn: async ({ signal }): Promise<LLApplication | null> => {
+      if (!applicationId) return null;
       const { data, error } = await sb
         .from("ll_applications")
         .select("*, Learner(id, name, phone, email, area)")
-        .order("updated_at", { ascending: false });
+        .eq("id", applicationId)
+        .abortSignal(signal)
+        .single();
       if (error) throw error;
-      return (data ?? []) as unknown as LLApplication[];
+      return data;
+    },
+    initialData: pageApplication,
+    enabled: !!applicationId && !pageApplication,
+    staleTime: 30 * 1000,
+  });
+}
+
+/**
+ * Per-tab counts for the LLDL Pipeline header. Each tab is a cheap DB count
+ * query (`HEAD` + exact count) so the numbers are real totals, never capped
+ * at 1000.
+ */
+export function useLLQueueCounts() {
+  return useQuery({
+    queryKey: ["ll-queue-counts"],
+    queryFn: async (): Promise<Record<LLPipelineQueueKey, number>> => {
+      const tabs: { key: LLPipelineQueueKey; statuses: string[] | null }[] = [
+        { key: "all", statuses: null },
+        ...LL_PHASES.map((p) => ({
+          key: p.key as LLPipelineQueueKey,
+          statuses: llStatusesInPhase(p.key),
+        })),
+        { key: "escalations", statuses: null },
+      ];
+      const rows = await Promise.all(
+        tabs.map(async ({ key, statuses }) => {
+          let q = sb.from("ll_applications").select("id", {
+            count: "exact",
+            head: true,
+          });
+          if (key === "escalations") {
+            q = q.or(
+              `escalated.is.true,status.in.(${LL_ESCALATION_STATUSES.join(",")})`,
+            );
+          } else if (statuses) {
+            q = q.in("status", statuses);
+          }
+          const { error, count } = await q;
+          if (error) throw error;
+          return { key, count: count ?? 0 };
+        }),
+      );
+      return Object.fromEntries(rows.map((r) => [r.key, r.count])) as Record<
+        LLPipelineQueueKey,
+        number
+      >;
     },
     staleTime: 30 * 1000,
   });
+}
+
+/** Exact counts for every stage in the current phase / escalation scope. */
+export function useLLStageCounts(
+  phases: LLPhaseKey[],
+  escalationsOnly: boolean,
+) {
+  return useQuery({
+    queryKey: ["ll-stage-counts", phases, escalationsOnly],
+    queryFn: async (): Promise<Record<string, number>> => {
+      const statusesInScope =
+        phases.length === 0
+          ? ALL_LL_PIPELINE_STATUSES
+          : llStatusesForPhases(phases);
+
+      const rows = await Promise.all(
+        statusesInScope.map(async (status) => {
+          let q = sb.from("ll_applications").select("id", {
+            count: "exact",
+            head: true,
+          });
+          q = applyLLPhaseQueueFilters(q, phases, escalationsOnly).eq(
+            "status",
+            status,
+          );
+          const { error, count } = await q;
+          if (error) throw error;
+          return [status, count ?? 0] as const;
+        }),
+      );
+      return Object.fromEntries(rows);
+    },
+    staleTime: 30 * 1000,
+  });
+}
+
+/** Refresh the pipeline lists + tab counts after any LL application change. */
+function invalidateLLPipeline(queryClient: QueryClient) {
+  queryClient.invalidateQueries({ queryKey: ["ll-applications"] });
+  queryClient.invalidateQueries({ queryKey: ["ll-queue-counts"] });
+  queryClient.invalidateQueries({ queryKey: ["ll-stage-counts"] });
 }
 
 export function useLLPipelineEvents(applicationId: string | null) {
@@ -118,7 +508,9 @@ export function useLLLearnerSearch(term: string) {
   return useQuery({
     queryKey: ["ll-learner-search", term],
     queryFn: async () => {
-      const like = `%${term}%`;
+      // Strip commas — they break or() parsing (PGRST100).
+      const clean = term.trim().replace(/,/g, "");
+      const like = `%${clean}%`;
       const { data, error } = await sb
         .from("Learner")
         .select("id, name, phone, email")
@@ -155,6 +547,29 @@ async function appendEvent(event: {
   if (error) console.error("[llApplications] event insert failed:", error);
 }
 
+/** Match the database's one-active-journey constraint. */
+async function findActiveLLApplication(
+  learnerId: string,
+): Promise<LLApplication | null> {
+  const { data, error } = await sb
+    .from("ll_applications")
+    .select("*, Learner(id, name, phone, email, area)")
+    .eq("learner_id", learnerId)
+    .not("status", "in", "(dl_delivered,closed)")
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+export function useActiveLLApplication(learnerId: string | null) {
+  return useQuery({
+    queryKey: ["ll-active-application", learnerId],
+    queryFn: () => findActiveLLApplication(learnerId!),
+    enabled: !!learnerId,
+    staleTime: 0,
+  });
+}
+
 export function useCreateLLApplication() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -167,12 +582,23 @@ export function useCreateLLApplication() {
       services: string[];
       actorName?: string | null;
     }) => {
+      const existing = await findActiveLLApplication(learnerId);
+      if (existing) return { kind: "existing" as const, application: existing };
+
       const { data, error } = await sb
         .from("ll_applications")
         .insert({ learner_id: learnerId, services, status: "payment_received" })
         .select("id")
         .single();
-      if (error) throw error;
+      if (error) {
+        // Another admin or the learner may have created a journey after our check.
+        if (error.code === "23505") {
+          const concurrent = await findActiveLLApplication(learnerId);
+          if (concurrent)
+            return { kind: "existing" as const, application: concurrent };
+        }
+        throw error;
+      }
       await appendEvent({
         application_id: data.id,
         learner_id: learnerId,
@@ -181,10 +607,21 @@ export function useCreateLLApplication() {
         actor_name: actorName,
         note: "Application created",
       });
-      return data.id as string;
+      return { kind: "created" as const, id: data.id as string };
     },
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["ll-applications"] }),
+    onSuccess: (result, { learnerId }) => {
+      if (result.kind === "existing") {
+        queryClient.setQueryData(
+          ["ll-active-application", learnerId],
+          result.application,
+        );
+      } else {
+        queryClient.invalidateQueries({
+          queryKey: ["ll-active-application", learnerId],
+        });
+      }
+      return invalidateLLPipeline(queryClient);
+    },
   });
 }
 
@@ -300,10 +737,16 @@ export function useUpdateLLStatus() {
         (extraFields?.batch_code as string | null | undefined) ??
         application.batch_code;
 
+      const milestones = {
+        ll_test_passed_achieved: application.ll_test_passed_achieved ?? false,
+        dl_test_passed_achieved: application.dl_test_passed_achieved ?? false,
+      };
+
       const kind = classifyLLStatusTransition(
         application.status,
         toStatus,
         batchCode,
+        milestones,
       );
       if (!kind) {
         throw new Error(
@@ -317,6 +760,7 @@ export function useUpdateLLStatus() {
         toStatus,
         batchCode,
         kind,
+        milestones,
       });
 
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -364,7 +808,7 @@ export function useUpdateLLStatus() {
       }
     },
     onSuccess: (_d, { application }) => {
-      queryClient.invalidateQueries({ queryKey: ["ll-applications"] });
+      invalidateLLPipeline(queryClient);
       queryClient.invalidateQueries({ queryKey: ["ll-pipeline-events"] });
       queryClient.invalidateQueries({
         queryKey: ["my-ll-application", application.learner_id],
@@ -446,7 +890,7 @@ export function useRevertLLStatus() {
       });
     },
     onSuccess: (_d, { application }) => {
-      queryClient.invalidateQueries({ queryKey: ["ll-applications"] });
+      invalidateLLPipeline(queryClient);
       queryClient.invalidateQueries({ queryKey: ["ll-pipeline-events"] });
       queryClient.invalidateQueries({
         queryKey: ["my-ll-application", application.learner_id],
@@ -608,6 +1052,149 @@ export function useReviewLLDocument() {
   });
 }
 
+/** RTO team replaces a rejected customer document collected offline. */
+export function useAdminReplaceLLDocument() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      application,
+      doc,
+      file,
+      actorName,
+      docLabel,
+    }: {
+      application: LLApplication;
+      doc: LLDocument;
+      file: File;
+      actorName?: string | null;
+      docLabel: string;
+    }) => {
+      if (doc.status !== "rejected") {
+        throw new Error("Only rejected documents can be replaced here.");
+      }
+
+      const ext = file.name.split(".").pop()?.toLowerCase() || "bin";
+      const slot = doc.doc_slot || "primary";
+      const path = `${application.learner_id}/${doc.doc_type}-${slot}-admin-${Date.now()}.${ext}`;
+      const { error: uploadError } = await supabase.storage
+        .from("ll-documents")
+        .upload(path, file, { cacheControl: "3600", upsert: false });
+      if (uploadError) {
+        throw new Error(`Document upload failed: ${uploadError.message}`);
+      }
+
+      const { data: replaced, error: updateError } = await sb
+        .from("ll_documents")
+        .update({
+          storage_path: path,
+          file_name: file.name,
+          mime_type: file.type,
+          status: "pending",
+          rejection_reason: null,
+          reviewed_by: null,
+          reviewed_at: null,
+          created_at: new Date().toISOString(),
+        })
+        .eq("id", doc.id)
+        .eq("application_id", application.id)
+        .eq("status", "rejected")
+        .select("id")
+        .maybeSingle();
+      if (updateError) throw updateError;
+      if (!replaced) {
+        throw new Error(
+          "This document is no longer rejected. Refresh and try again.",
+        );
+      }
+
+      await appendEvent({
+        application_id: application.id,
+        learner_id: application.learner_id,
+        event_type: "note",
+        actor_name: actorName,
+        note: `Document replaced by RTO team: ${docLabel} — ${file.name}`,
+      });
+
+      const { data: remainingRejected, error: remainingError } = await sb
+        .from("ll_documents")
+        .select("id")
+        .eq("application_id", application.id)
+        .eq("status", "rejected")
+        .limit(1);
+      if (remainingError) throw remainingError;
+
+      let returnedToReview = false;
+      if (
+        application.status === "docs_rejected" &&
+        (remainingRejected ?? []).length === 0
+      ) {
+        const { data: submitted, error: submitError } = await sb
+          .from("ll_applications")
+          .update({
+            status: "docs_submitted",
+            rejection_reason: null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", application.id)
+          .eq("status", "docs_rejected")
+          .select("id")
+          .maybeSingle();
+        if (submitError) throw submitError;
+
+        if (submitted) {
+          await appendEvent({
+            application_id: application.id,
+            learner_id: application.learner_id,
+            event_type: "status_change",
+            from_status: "docs_rejected",
+            to_status: "docs_submitted",
+            actor_name: actorName,
+            note: "All rejected documents were replaced by the RTO team",
+          });
+
+          const { data: underReview, error: reviewError } = await sb
+            .from("ll_applications")
+            .update({
+              status: "docs_under_review",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", application.id)
+            .eq("status", "docs_submitted")
+            .select("id")
+            .maybeSingle();
+          if (reviewError) throw reviewError;
+          if (!underReview) {
+            throw new Error(
+              "The documents were replaced, but the application status changed at the same time. Refresh to see its current stage.",
+            );
+          }
+
+          returnedToReview = true;
+          await appendEvent({
+            application_id: application.id,
+            learner_id: application.learner_id,
+            event_type: "status_change",
+            from_status: "docs_submitted",
+            to_status: "docs_under_review",
+            actor_name: actorName,
+            note: "RTO team replacement submitted — documents returned to review",
+          });
+        }
+      }
+
+      return { returnedToReview };
+    },
+    onSuccess: (_result, { application }) => {
+      queryClient.invalidateQueries({ queryKey: ["ll-documents"] });
+      invalidateLLPipeline(queryClient);
+      queryClient.invalidateQueries({ queryKey: ["ll-pipeline-events"] });
+      queryClient.invalidateQueries({
+        queryKey: ["my-ll-application", application.learner_id],
+      });
+    },
+  });
+}
+
 export function useUpdateLLFields() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -653,9 +1240,7 @@ export function useUpdateLLFields() {
         fields.batch_code !== "" &&
         !isLLSegregationRouteCode(String(fields.batch_code))
       ) {
-        throw new Error(
-          "Segregation route must be A, B, C, or D.",
-        );
+        throw new Error("Segregation route must be A, B, C, or D.");
       }
 
       const { error } = await sb
@@ -672,7 +1257,7 @@ export function useUpdateLLFields() {
       });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["ll-applications"] });
+      invalidateLLPipeline(queryClient);
       queryClient.invalidateQueries({ queryKey: ["ll-pipeline-events"] });
     },
   });

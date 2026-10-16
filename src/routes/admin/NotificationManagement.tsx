@@ -1,8 +1,12 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { addDays, format, formatDate, parse } from "date-fns";
 import { Delete, Mail, RefreshCcw, Search, Send, UserPlus } from "lucide-react";
 import { ArrowLeft, Loader2 } from "lucide-react";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
@@ -28,9 +32,10 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/use-toast";
 import { usePhoneVisibility } from "@/context/phone-visibility-context";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import { supabase } from "@/lib/supabaseClient";
 import { useCurrentAdmin } from "@/queries/adminPermissions";
 import { useCurrentUser } from "@/queries/userManagement";
-import { supabase } from "@/lib/supabaseClient";
 import { maskPhoneNumber } from "@/utils/phoneMasking";
 
 export default function NotificationManagement() {
@@ -419,107 +424,125 @@ function IndividualNotificationCard() {
   );
 }
 
+const DAILY_NOTIFICATION_PAGE_SIZE = 15;
+type NotificationTab = "learners" | "instructors";
+type NotificationSchedulesPage = {
+  schedules: Record<string, unknown>[];
+  total_count: number;
+  learner_count: number;
+  instructor_count: number;
+};
+
 function LearnerNotificationCard() {
-  const [loading, setLoading] = useState(true);
-  const [schedulesList, setSchedulesList] = useState<any[]>([]);
   const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [activeTab, setActiveTab] = useState<NotificationTab>("learners");
+  const [tabState, setTabState] = useState({
+    learners: { search: "" },
+    instructors: { search: "" },
+  });
+  const [counts, setCounts] = useState({ learners: 0, instructors: 0 });
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+  const learnerSearch = useDebouncedValue(tabState.learners.search);
+  const instructorSearch = useDebouncedValue(tabState.instructors.search);
+  const { search } = tabState[activeTab];
+  const debouncedSearch =
+    activeTab === "learners" ? learnerSearch : instructorSearch;
+  const searchPending = search !== debouncedSearch;
+  const tomorrow = addDays(new Date(), 1).toISOString().split("T")[0];
 
-  const maxDaysWindowToFetch = 1;
-
-  const fetchSchedulesForReminder = async () => {
-    const startDate = new Date();
-    const endDate = addDays(startDate, maxDaysWindowToFetch);
-    setLoading(true);
-    try {
+  const {
+    data,
+    fetchNextPage,
+    hasNextPage,
+    isError,
+    isFetching,
+    isFetchingNextPage,
+    isFetchNextPageError,
+    isLoading,
+  } = useInfiniteQuery({
+    queryKey: [
+      "daily-notification-schedules",
+      tomorrow,
+      activeTab,
+      debouncedSearch,
+    ],
+    queryFn: async ({ pageParam, signal }) => {
       const { data, error } = await supabase
-        .from("Schedule")
-        .select(
-          `
-          *,
-          Learner(name, phone, email, pick_up_location, address_lat, address_lng),
-          Instructor(name, phone, email),
-          Courses(name, duration),
-          Lesson(id, description, number)`,
-        )
-        .gte("date", endDate.toISOString().split("T")[0])
-        .lte("date", endDate.toISOString().split("T")[0])
-        .or("isTentative.eq.false,isTentative.is.null")
-        .neq("status", "paused")
-        .order("date", { ascending: true })
-        .order("start_time", { ascending: true });
-
+        .rpc("get_daily_notification_schedules", {
+          schedule_date: tomorrow,
+          recipient_tab: activeTab,
+          search_term: debouncedSearch,
+          page_number: pageParam,
+        })
+        .abortSignal(signal);
       if (error) throw error;
+      return data as unknown as NotificationSchedulesPage;
+    },
+    initialPageParam: 1,
+    getNextPageParam: (lastPage, pages) =>
+      pages.length * DAILY_NOTIFICATION_PAGE_SIZE < lastPage.total_count
+        ? pages.length + 1
+        : undefined,
+    enabled: !searchPending,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
 
-      // Fix lesson numbers: calculate chronological position per learner+course
-      if (data && data.length > 0) {
-        // Get unique learner+course combos
-        const combos = new Set(
-          data.map((s: any) => `${s.learner_id}__${s.course_id}`),
-        );
+  const schedules = useMemo(() => {
+    const seen = new Set<unknown>();
 
-        // Fetch all schedules for these learner+course combos to determine correct order
-        const learnerIds = [
-          ...new Set(data.map((s: any) => s.learner_id).filter(Boolean)),
-        ];
-        const { data: allSchedules } = await supabase
-          .from("Schedule")
-          .select(
-            "id, date, start_time, learner_id, course_id, lesson_id, Lesson(id, number)",
-          )
-          .in("learner_id", learnerIds)
-          .neq("status", "paused")
-          .or("isTentative.eq.false,isTentative.is.null")
-          .order("date", { ascending: true })
-          .order("start_time", { ascending: true });
-
-        if (allSchedules) {
-          // Group by learner+course and assign chronological numbers
-          const lessonNumberMap = new Map<number, number>(); // schedule.id -> correct lesson number
-          const grouped: Record<string, any[]> = {};
-          for (const s of allSchedules) {
-            const key = `${s.learner_id}__${s.course_id}`;
-            if (!grouped[key]) grouped[key] = [];
-            grouped[key].push(s);
-          }
-          for (const schedules of Object.values(grouped)) {
-            schedules
-              .sort(
-                (a: any, b: any) =>
-                  new Date(`${a.date}T${a.start_time}`).getTime() -
-                  new Date(`${b.date}T${b.start_time}`).getTime(),
-              )
-              .forEach((s: any, i: number) => {
-                lessonNumberMap.set(s.id, i + 1);
-              });
-          }
-
-          // Apply correct lesson numbers to tomorrow's schedules
-          for (const schedule of data as any[]) {
-            const correctNumber = lessonNumberMap.get(schedule.id);
-            if (correctNumber && schedule.Lesson) {
-              schedule.Lesson.number = correctNumber;
-            }
-          }
-        }
-      }
-
-      setSchedulesList(data || []);
-      return data;
-    } catch (err) {
-      console.error("Error fetching schedules:", err);
-      toast({
-        title: "Error",
-        description: "Failed to fetch schedules",
-        variant: "destructive",
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
+    return (data?.pages ?? []).flatMap((page) =>
+      page.schedules.filter((schedule) => {
+        const id = schedule.id;
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      }),
+    );
+  }, [data]);
+  const loading = searchPending || isLoading;
 
   useEffect(() => {
-    fetchSchedulesForReminder();
-  }, []);
+    const firstPage = data?.pages[0];
+    if (!firstPage) return;
+    setCounts({
+      learners: firstPage.learner_count,
+      instructors: firstPage.instructor_count,
+    });
+  }, [data]);
+
+  useEffect(() => {
+    const loadMoreNode = loadMoreRef.current;
+    if (
+      !loadMoreNode ||
+      !hasNextPage ||
+      isFetching ||
+      isFetchNextPageError ||
+      searchPending
+    ) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting) {
+          void fetchNextPage({ cancelRefetch: false });
+        }
+      },
+      { rootMargin: "300px 0px" },
+    );
+
+    observer.observe(loadMoreNode);
+    return () => observer.disconnect();
+  }, [
+    fetchNextPage,
+    hasNextPage,
+    isFetching,
+    isFetchNextPageError,
+    searchPending,
+  ]);
 
   return (
     <Card className="transition-all hover:shadow-lg">
@@ -528,42 +551,98 @@ function LearnerNotificationCard() {
         <Button
           variant="outline"
           size="icon"
-          onClick={fetchSchedulesForReminder}
-          disabled={loading}
+          onClick={() =>
+            queryClient.invalidateQueries({
+              queryKey: ["daily-notification-schedules", tomorrow],
+            })
+          }
+          disabled={searchPending || isFetching}
         >
-          <RefreshCcw size={16} className={loading ? "animate-spin" : ""} />
+          <RefreshCcw size={16} className={isFetching ? "animate-spin" : ""} />
         </Button>
       </CardHeader>
       <CardContent>
-        {loading ? (
-          <p className="py-4 text-center text-muted-foreground">
-            Loading schedules...
-          </p>
-        ) : schedulesList.length === 0 ? (
-          <p className="py-4 text-center text-muted-foreground">
-            No schedules found for tomorrow
-          </p>
-        ) : (
-          <Tabs defaultValue="learners">
-            <TabsList>
-              <TabsTrigger value="learners">
-                Learners ({schedulesList.length})
-              </TabsTrigger>
-              <TabsTrigger value="instructors">
-                Instructors (
-                {new Set(schedulesList.map((s) => s.instructor_id)).size})
-              </TabsTrigger>
-            </TabsList>
+        <Tabs
+          value={activeTab}
+          onValueChange={(value) => setActiveTab(value as NotificationTab)}
+        >
+          <TabsList>
+            <TabsTrigger value="learners">
+              Learners ({counts.learners})
+            </TabsTrigger>
+            <TabsTrigger value="instructors">
+              Instructors ({counts.instructors})
+            </TabsTrigger>
+          </TabsList>
 
-            <TabsContent value="learners">
-              <LearnerTab schedulesList={schedulesList} toast={toast} />
-            </TabsContent>
+          <TabsContent value={activeTab}>
+            <div className="relative mt-4">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                placeholder={`Search ${activeTab} by name or phone...`}
+                aria-label={`Search ${activeTab} by name or phone`}
+                value={search}
+                onChange={(e) => {
+                  const nextSearch = e.target.value;
+                  // Each debounced search gets a fresh infinite-query cache.
+                  setTabState((prev) => ({
+                    ...prev,
+                    [activeTab]: { search: nextSearch },
+                  }));
+                }}
+                className="pl-10"
+              />
+            </div>
+            {loading ? (
+              <p className="py-4 text-center text-muted-foreground">
+                Loading schedules...
+              </p>
+            ) : isError && !data ? (
+              <p className="py-4 text-center text-muted-foreground">
+                Failed to fetch schedules
+              </p>
+            ) : !schedules.length ? (
+              <p className="py-4 text-center text-muted-foreground">
+                {search
+                  ? "No schedules match your search"
+                  : "No schedules found for tomorrow"}
+              </p>
+            ) : activeTab === "learners" ? (
+              <LearnerTab
+                key={`${tomorrow}:${debouncedSearch}`}
+                schedulesList={schedules}
+                toast={toast}
+              />
+            ) : (
+              <InstructorTab
+                key={`${tomorrow}:${debouncedSearch}`}
+                schedulesList={schedules}
+                toast={toast}
+              />
+            )}
 
-            <TabsContent value="instructors">
-              <InstructorTab schedulesList={schedulesList} toast={toast} />
-            </TabsContent>
-          </Tabs>
-        )}
+            <div
+              ref={loadMoreRef}
+              className="mt-4 flex min-h-8 items-center justify-center"
+            >
+              {isFetchingNextPage && (
+                <span className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading more...
+                </span>
+              )}
+              {isFetchNextPageError && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void fetchNextPage({ cancelRefetch: false })}
+                >
+                  Could not load more. Retry
+                </Button>
+              )}
+            </div>
+          </TabsContent>
+        </Tabs>
       </CardContent>
     </Card>
   );
@@ -1163,7 +1242,9 @@ function InstructorTab({
                   <div className="font-medium">{instructor.name}</div>
                 </td>
                 <td className="px-2 py-2 text-sm text-gray-600">
-                  {canViewUnmaskedPhoneNumbers ? instructor.phone : maskPhoneNumber(instructor.phone)}
+                  {canViewUnmaskedPhoneNumbers
+                    ? instructor.phone
+                    : maskPhoneNumber(instructor.phone)}
                 </td>
                 <td className="px-2 py-2 text-center">
                   <Badge variant="secondary">

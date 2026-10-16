@@ -22,7 +22,7 @@ import {
   MatrixRawData,
   MatrixRawSchedule,
 } from "@/queries/instructorMatrix";
-import { utilizationStyle, UtilizationBucket } from "@/utils/utilizationColor";
+import { UtilizationBucket, utilizationStyle } from "@/utils/utilizationColor";
 
 // --- colour palette (ARGB, mirrors the Tailwind classes used on screen) ----
 const HEADER_FILL = "1F2937"; // slate-800
@@ -31,14 +31,15 @@ const TOTAL_FILL = "111827"; // slate-900
 const TITLE_FONT = "111827";
 const SUBTITLE_FONT = "6B7280"; // gray-500
 
-const BUCKET_STYLE: Record<UtilizationBucket, { fill: string; font: string }> = {
-  off: { fill: "E5E7EB", font: "4B5563" }, // gray
-  low: { fill: "FEE2E2", font: "991B1B" }, // red-100
-  medium: { fill: "FECACA", font: "7F1D1D" }, // red-200
-  high: { fill: "F87171", font: "450A0A" }, // red-400
-  full: { fill: "DC2626", font: "FFFFFF" }, // red-600
-  overbooked: { fill: "FDE047", font: "713F12" }, // yellow-300 (conflict)
-};
+const BUCKET_STYLE: Record<UtilizationBucket, { fill: string; font: string }> =
+  {
+    off: { fill: "E5E7EB", font: "4B5563" }, // gray
+    low: { fill: "FEE2E2", font: "991B1B" }, // red-100
+    medium: { fill: "FECACA", font: "7F1D1D" }, // red-200
+    high: { fill: "F87171", font: "450A0A" }, // red-400
+    full: { fill: "DC2626", font: "FFFFFF" }, // red-600
+    overbooked: { fill: "FDE047", font: "713F12" }, // yellow-300 (conflict)
+  };
 
 // Enrollment-type tints for the Bookings sheet (mirror the drawer badges).
 const ENROLLMENT_FILL: Record<string, string> = {
@@ -98,7 +99,11 @@ function styleHeaderRow(ws: WS, rowNumber: number) {
   row.eachCell((cell) => {
     cell.fill = solidFill(HEADER_FILL);
     cell.font = { bold: true, color: { argb: `FF${HEADER_FONT}` }, size: 11 };
-    cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+    cell.alignment = {
+      vertical: "middle",
+      horizontal: "center",
+      wrapText: true,
+    };
     cell.border = thinBorder;
   });
 }
@@ -138,9 +143,14 @@ function buildMatrixSheet(
 
   // Header row (row 4).
   const headerRowIdx = 4;
-  const header = ["Instructor", "Phone", ...data.dayHeaders.map(
-    (h) => `${h.weekday} ${h.dayOfMonth}`,
-  ), "Week (Bkd/Cap)", "Util %", "Conflicts"];
+  const header = [
+    "Instructor",
+    "Phone",
+    ...data.dayHeaders.map((h) => `${h.weekday} ${h.dayOfMonth}`),
+    "Week (Bkd/Cap)",
+    "Util %",
+    "Conflicts",
+  ];
   ws.getRow(headerRowIdx).values = header;
   styleHeaderRow(ws, headerRowIdx);
 
@@ -175,7 +185,8 @@ function buildMatrixSheet(
       const base = offDuty
         ? "Off"
         : `${Math.round(d.bookedHours)}/${trimNum(d.capacityHours)}`;
-      cell.value = d.conflictCount > 0 ? `⚠ ${base} (${d.conflictCount})` : base;
+      cell.value =
+        d.conflictCount > 0 ? `⚠ ${base} (${d.conflictCount})` : base;
       cell.fill = solidFill(BUCKET_STYLE[style.bucket].fill);
       cell.font = {
         color: { argb: `FF${BUCKET_STYLE[style.bucket].font}` },
@@ -308,7 +319,8 @@ function buildBookingsSheet(
   // instructorId -> date -> schedules
   const byInstrDate = new Map<string, Map<string, MatrixRawSchedule[]>>();
   for (const s of raw.schedules) {
-    if (!byInstrDate.has(s.instructorId)) byInstrDate.set(s.instructorId, new Map());
+    if (!byInstrDate.has(s.instructorId))
+      byInstrDate.set(s.instructorId, new Map());
     const dateMap = byInstrDate.get(s.instructorId)!;
     if (!dateMap.has(s.date)) dateMap.set(s.date, []);
     dateMap.get(s.date)!.push(s);
@@ -392,7 +404,10 @@ function buildBookingsSheet(
 
   const widths = [22, 16, 12, 9, 8, 8, 11, 14, 10, 14, 9, 22, 16, 9, 15];
   widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
-  ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: header.length } };
+  ws.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: header.length },
+  };
   ws.views = [{ state: "frozen", ySplit: 1 }];
 }
 
@@ -420,9 +435,16 @@ function buildSummarySheet(ws: WS, data: InstructorMatrixData) {
   data.rows.forEach((r, i) => {
     const rowIdx = 2 + i;
     const row = ws.getRow(rowIdx);
-    const cells: (string | number)[] = [r.instructor.name, r.instructor.phone ?? ""];
+    const cells: (string | number)[] = [
+      r.instructor.name,
+      r.instructor.phone ?? "",
+    ];
     for (const d of r.days) {
-      cells.push(round1(d.bookedHours), round1(d.capacityHours), d.conflictCount);
+      cells.push(
+        round1(d.bookedHours),
+        round1(d.capacityHours),
+        d.conflictCount,
+      );
     }
     const free = Math.max(0, r.weekCapacityHours - r.weekBookedHours);
     const util =
@@ -479,7 +501,10 @@ function buildSummarySheet(ws: WS, data: InstructorMatrixData) {
   ws.getColumn(1).width = 22;
   ws.getColumn(2).width = 16;
   for (let c = 3; c <= utilColIdx + 1; c++) ws.getColumn(c).width = 10;
-  ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: header.length } };
+  ws.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: header.length },
+  };
   ws.views = [{ state: "frozen", xSplit: 1, ySplit: 1 }];
 }
 

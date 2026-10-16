@@ -24,6 +24,7 @@ import {
   DL_TEST_CHECKLIST_SECTIONS,
   isDLSlotVisibleToCustomer,
   parseLLDateYmd,
+  shouldShowLLExpiryWarning,
 } from "@/constants/llPipeline";
 import { whatsappHref } from "@/constants/support";
 import { useCustomerDLTestSlots } from "@/queries/dlTestSlots";
@@ -207,6 +208,25 @@ export function DLPhaseCard({
   learnerName: string | null;
 }) {
   const status = application.status;
+
+  if (status === "ll_expired") {
+    return (
+      <JourneyCard title="Learner's Licence Expired">
+        <div className="flex items-center gap-3">
+          <AlertTriangle className="h-8 w-8 shrink-0 text-red-500" />
+          <p className="text-base">
+            Your Learner&apos;s Licence expired
+            {application.ll_expiry_date
+              ? ` on ${format(new Date(application.ll_expiry_date), "dd MMM yyyy")}`
+              : ""}
+            . Our team will contact you to restart the required application
+            steps before your journey can continue.
+          </p>
+        </div>
+        <SupportCallButton label="Contact Lane Support" />
+      </JourneyCard>
+    );
+  }
 
   // ── Pick a DL test date (LL matured / classes completed) ───────────────
   if (status === "ll_matured" || status === "dl_date_selection") {
@@ -596,6 +616,18 @@ function LLExpiryBannerInner({
 }) {
   const requestHelp = useRequestLLHelp();
   const [requested, setRequested] = useState(false);
+
+  if (
+    !shouldShowLLExpiryWarning(
+      {
+        ll_test_passed_achieved: application.ll_test_passed_achieved,
+        dl_test_passed_achieved: application.dl_test_passed_achieved,
+      },
+      application.status,
+    )
+  ) {
+    return null;
+  }
 
   const expiryDays = daysUntil(application.ll_expiry_date);
   if (expiryDays === null || expiryDays < 0 || expiryDays > 30) return null;

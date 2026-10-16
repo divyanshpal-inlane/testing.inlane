@@ -98,9 +98,10 @@ export const LL_SEGREGATION_ROUTES: LLSegregationRoute[] = [
 export const LL_SEGREGATION_ROUTE_MAP: Record<
   LLSegregationRouteCode,
   LLSegregationRoute
-> = Object.fromEntries(
-  LL_SEGREGATION_ROUTES.map((r) => [r.code, r]),
-) as Record<LLSegregationRouteCode, LLSegregationRoute>;
+> = Object.fromEntries(LL_SEGREGATION_ROUTES.map((r) => [r.code, r])) as Record<
+  LLSegregationRouteCode,
+  LLSegregationRoute
+>;
 
 /** @deprecated Use LL_SEGREGATION_ROUTES — kept as code list for callers that expect strings. */
 export const LL_BATCHES = LL_SEGREGATION_ROUTES.map((r) => r.code);
@@ -374,6 +375,12 @@ export const LL_STAGES: LLStage[] = [
     phase: "post_ll",
     next: ["dl_date_preference_received"],
   },
+  {
+    key: "ll_expired",
+    label: "LL Expired",
+    phase: "post_ll",
+    next: [],
+  },
 
   // ── Phase 6: DL test & delivery ──────────────────────────────────────
   {
@@ -477,6 +484,19 @@ export const LL_STAGE_MAP: Record<string, LLStage> = Object.fromEntries(
   LL_STAGES.map((s) => [s.key, s]),
 );
 
+/** Expiry states are terminal until Ops deliberately reverts the journey. */
+export const LL_EXPIRY_STATUSES = ["scrutiny_expired", "ll_expired"] as const;
+
+export function isLLExpiryStatus(status: string): boolean {
+  return (LL_EXPIRY_STATUSES as readonly string[]).includes(status);
+}
+
+/** Statuses shown in the Escalations queue even without a manual flag. */
+export const LL_ESCALATION_STATUSES = [
+  ...Object.keys(LL_FAILURE_STAGES),
+  "ll_expired",
+];
+
 export function llStageLabel(status: string): string {
   return (
     LL_STAGE_MAP[status]?.label ?? LL_FAILURE_STAGES[status]?.label ?? status
@@ -492,7 +512,50 @@ export function llStagePhase(status: string): LLPhaseKey {
 }
 
 export function isLLFailureStatus(status: string): boolean {
-  return status in LL_FAILURE_STAGES;
+  return status in LL_FAILURE_STAGES || status === "ll_expired";
+}
+
+/** Sticky journey milestones (set in DB on first reach; survive Ops reverts). */
+export interface LLPipelineMilestones {
+  ll_test_passed_achieved?: boolean;
+  dl_test_passed_achieved?: boolean;
+}
+
+export function llStatusRank(status: string): number {
+  return LL_STAGE_ORDER[status] ?? -1;
+}
+
+export function hasAchievedLLTestPassed(
+  milestones: LLPipelineMilestones,
+): boolean {
+  return milestones.ll_test_passed_achieved === true;
+}
+
+export function hasAchievedDLTestPassed(
+  milestones: LLPipelineMilestones,
+): boolean {
+  return milestones.dl_test_passed_achieved === true;
+}
+
+/** Block scrutiny-expired after LL or DL test milestones (incl. Ops revert edge cases). */
+export function canEnterScrutinyExpired(
+  milestones: LLPipelineMilestones,
+): boolean {
+  if (hasAchievedLLTestPassed(milestones)) return false;
+  if (hasAchievedDLTestPassed(milestones)) return false;
+  return true;
+}
+
+/** 30-day LL-validity nudges — not relevant after DL test passed. */
+export function shouldShowLLExpiryWarning(
+  milestones: LLPipelineMilestones,
+  status?: string,
+): boolean {
+  if (hasAchievedDLTestPassed(milestones)) return false;
+  if (status && llStatusRank(status) >= llStatusRank("dl_test_passed")) {
+    return false;
+  }
+  return true;
 }
 
 const LL_STAGE_ORDER: Record<string, number> = Object.fromEntries([
@@ -565,6 +628,7 @@ export function getLLAdvanceTargets(
 export function getLLFailureOptions(
   status: string,
   batchCode: string | null | undefined,
+  milestones?: LLPipelineMilestones,
 ): LLFailure[] {
   const stage = LL_STAGE_MAP[status];
   if (!stage?.failures?.length) return [];
@@ -573,6 +637,13 @@ export function getLLFailureOptions(
   const def = route ? LL_SEGREGATION_ROUTE_MAP[route] : null;
 
   return stage.failures.filter((f) => {
+    if (
+      f.key === "scrutiny_expired" &&
+      milestones &&
+      !canEnterScrutinyExpired(milestones)
+    ) {
+      return false;
+    }
     if (
       (f.key === "ll_test_failed" || f.key === "scrutiny_expired") &&
       def &&
@@ -606,9 +677,7 @@ function buildLLReverseEdges(
       for (const f of s.failures ?? []) link(s.key, f.key);
     }
   }
-  return Object.fromEntries(
-    Object.entries(map).map(([k, v]) => [k, [...v]]),
-  );
+  return Object.fromEntries(Object.entries(map).map(([k, v]) => [k, [...v]]));
 }
 
 /**
@@ -619,6 +688,14 @@ export function getLLRevertTargets(
   currentStatus: string,
   batchCode?: string | null,
 ): string[] {
+  // Expiry has no forward edge. Ops must explicitly pick the stage where the
+  // renewed/reapplied journey should restart.
+  if (currentStatus === "ll_expired") {
+    return LL_STAGES.filter(
+      (stage) => stage.key !== "ll_expired" && stage.key !== "dl_delivered",
+    ).map((stage) => stage.key);
+  }
+
   const reverse = buildLLReverseEdges(batchCode ?? null);
   const seen = new Set<string>();
   const queue = [...(reverse[currentStatus] ?? [])];
@@ -661,8 +738,9 @@ export function assertLLStatusTransition(opts: {
   toStatus: string;
   batchCode: string | null | undefined;
   kind: LLTransitionKind;
+  milestones?: LLPipelineMilestones;
 }): void {
-  const { fromStatus, toStatus, batchCode, kind } = opts;
+  const { fromStatus, toStatus, batchCode, kind, milestones } = opts;
 
   if (fromStatus === toStatus) {
     throw new Error("Status is already set to that stage.");
@@ -681,15 +759,29 @@ export function assertLLStatusTransition(opts: {
   if (kind === "recover") {
     const failure = LL_FAILURE_STAGES[fromStatus];
     if (!failure || failure.recoverTo !== toStatus) {
-      throw new Error(
-        `Cannot recover from ${fromStatus} to ${toStatus}.`,
-      );
+      throw new Error(`Cannot recover from ${fromStatus} to ${toStatus}.`);
     }
     return;
   }
 
   if (kind === "failure") {
-    const allowed = getLLFailureOptions(fromStatus, batchCode).map((f) => f.key);
+    if (
+      toStatus === "scrutiny_expired" &&
+      milestones &&
+      !canEnterScrutinyExpired(milestones)
+    ) {
+      if (hasAchievedLLTestPassed(milestones)) {
+        throw new Error(
+          "Cannot mark scrutiny expired after the learner has passed the LL test.",
+        );
+      }
+      throw new Error(
+        "Cannot mark scrutiny expired after the learner has passed the DL test.",
+      );
+    }
+    const allowed = getLLFailureOptions(fromStatus, batchCode, milestones).map(
+      (f) => f.key,
+    );
     if (!allowed.includes(toStatus)) {
       throw new Error(
         `Failure ${toStatus} is not available from ${fromStatus} for route ${batchCode ?? "unset"}.`,
@@ -699,7 +791,10 @@ export function assertLLStatusTransition(opts: {
   }
 
   // advance
-  if (fromStatus === "application_ready" && !isLLSegregationRouteCode(batchCode)) {
+  if (
+    fromStatus === "application_ready" &&
+    !isLLSegregationRouteCode(batchCode)
+  ) {
     throw new Error(
       "Set segregation route (A / B / C / D) before advancing from Ready for RTO.",
     );
@@ -721,11 +816,16 @@ export function classifyLLStatusTransition(
   fromStatus: string,
   toStatus: string,
   batchCode: string | null | undefined,
+  milestones?: LLPipelineMilestones,
 ): LLTransitionKind | null {
   if (getLLAdvanceTargets(fromStatus, batchCode).includes(toStatus)) {
     return "advance";
   }
-  if (getLLFailureOptions(fromStatus, batchCode).some((f) => f.key === toStatus)) {
+  if (
+    getLLFailureOptions(fromStatus, batchCode, milestones).some(
+      (f) => f.key === toStatus,
+    )
+  ) {
     return "failure";
   }
   const failure = LL_FAILURE_STAGES[fromStatus];
@@ -753,7 +853,13 @@ const STAGE_FIELD_CLEAR_AFTER: {
   },
   {
     afterStage: "ll_issued",
-    fields: ["ll_number", "ll_issue_date", "ll_expiry_date", "ll_type", "ll_matures_at"],
+    fields: [
+      "ll_number",
+      "ll_issue_date",
+      "ll_expiry_date",
+      "ll_type",
+      "ll_matures_at",
+    ],
   },
   {
     afterStage: "dl_date_preference_received",
@@ -1011,8 +1117,9 @@ export const DL_TEST_CHECKLIST_SECTIONS: {
 ];
 
 /** Flat list for calendar/reminder snippets. */
-export const DL_TEST_CHECKLIST: string[] =
-  DL_TEST_CHECKLIST_SECTIONS.flatMap((s) => s.items);
+export const DL_TEST_CHECKLIST: string[] = DL_TEST_CHECKLIST_SECTIONS.flatMap(
+  (s) => s.items,
+);
 
 /**
  * DL-phase statuses that get their own customer homepage screens. These are
@@ -1020,6 +1127,7 @@ export const DL_TEST_CHECKLIST: string[] =
  * classes-track learners have left the LL flow by then.
  */
 export const DL_PHASE_CUSTOMER_STATUSES = [
+  "ll_expired",
   "ll_matured",
   "dl_date_selection",
   "dl_date_preference_received",
@@ -1091,10 +1199,7 @@ export interface LLDocTypeDef {
    * Subtypes that need two separate files. Keys are subtype keys; values
    * are labels for the primary + secondary upload slots.
    */
-  dualUploadSubtypes?: Record<
-    string,
-    { primary: string; secondary: string }
-  >;
+  dualUploadSubtypes?: Record<string, { primary: string; secondary: string }>;
 }
 
 /** Default single-file slot used by most document types. */

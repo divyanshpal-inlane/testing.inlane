@@ -103,13 +103,7 @@ export function useCreateDLTestSlot() {
 export function useSetDLTestSlotActive() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async ({
-      id,
-      isActive,
-    }: {
-      id: string;
-      isActive: boolean;
-    }) => {
+    mutationFn: async ({ id, isActive }: { id: string; isActive: boolean }) => {
       const { error } = await sb
         .from("dl_test_slots")
         .update({

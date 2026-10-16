@@ -1,13 +1,34 @@
 import {
+  QueryClient,
   skipToken,
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
 
+import { filterUnfulfilledSchedulingRequests } from "@/lib/scheduling-requests";
 import { supabase } from "@/lib/supabaseClient";
 import { Database } from "@/types/database.types";
 import { TimeSlot } from "@/types/schedule";
+
+// Admin uses the infinite queue; other screens still use the regular query.
+export function invalidateSchedulingRequestQueries(
+  queryClient: QueryClient,
+  learnerId?: string,
+) {
+  return Promise.all([
+    queryClient.invalidateQueries({ queryKey: ["scheduling-requests"] }),
+    queryClient.invalidateQueries({
+      queryKey: ["scheduling-requests-infinite"],
+    }),
+    queryClient.invalidateQueries({
+      queryKey: learnerId
+        ? ["learnerRescheduleRequests", learnerId]
+        : ["learnerRescheduleRequests"],
+    }),
+  ]);
+}
 
 export function useSchedulePreferences(learnerId?: string) {
   return useQuery({
@@ -87,7 +108,8 @@ export function useSchedulingRequests() {
             two_hour_days, DL_test_date, pincode, signed_up, created_at)`,
         )
         .eq("status", "pending")
-        .order("created_at", { ascending: false });
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false });
 
       if (learnersError) throw learnersError;
       if (!learners) return [];
@@ -103,12 +125,12 @@ export function useSchedulingRequests() {
 
       if (learnerIds.length === 0) return [];
 
-      // Check which learners already have schedules
+      // Include lesson/status metadata so unrelated or cancelled classes
+      // cannot incorrectly hide a learner who still needs scheduling.
       const { data: existingSchedules, error: scheduleError } = await supabase
         .from("Schedule")
-        .select("learner_id, created_at")
-        .in("learner_id", learnerIds)
-        .neq("status", "paused"); // Exclude paused schedules
+        .select("learner_id, lesson_id, created_at, status")
+        .in("learner_id", learnerIds);
 
       if (scheduleError) {
         console.error("Error checking existing schedules:", scheduleError);
@@ -116,66 +138,92 @@ export function useSchedulingRequests() {
         return learners;
       }
 
-      // Group each learner's non-paused schedule creation times so we can tell
-      // whether a "new" request has effectively already been fulfilled.
-      const scheduleTimesByLearner = new Map<string, number[]>();
-      for (const s of existingSchedules || []) {
-        if (!s.learner_id || !s.created_at) continue;
-        const createdAt = new Date(s.created_at).getTime();
-        const list = scheduleTimesByLearner.get(s.learner_id);
-        if (list) list.push(createdAt);
-        else scheduleTimesByLearner.set(s.learner_id, [createdAt]);
-      }
-
-      // How far before a request we still treat a schedule as "fulfilling" it.
-      // Covers the common race where admin books the schedule slightly before
-      // the payment webhook/callback inserts the (now-stale) scheduling request.
-      const FULFILL_BACKDATE_MS = 24 * 60 * 60 * 1000;
-
-      // Filter out learners who have already been scheduled, BUT keep reschedule
-      // and lesson10 requests (those are specifically for already-scheduled
-      // learners who want to change an existing lesson).
-      const filteredLearners = learners.filter((request) => {
-        const isRescheduleOrLesson10 =
-          request.type === "reschedule" || request.type === "lesson10";
-        if (isRescheduleOrLesson10) return true;
-
-        const scheduleTimes =
-          scheduleTimesByLearner.get(request.learner_id) ?? [];
-
-        // No non-paused schedules at all → the learner genuinely needs one.
-        if (scheduleTimes.length === 0) return true;
-        if (!request.created_at) return false;
-
-        // A "new" request asks for lesson_ids.length lessons. If the learner
-        // already has at least that many non-paused schedules created around or
-        // after the request, those schedules fulfill it and the request is a
-        // stale leftover (duplicate insert, or a schedule booked outside the
-        // New Schedules tab that never completed the request).
-        //
-        // We count only schedules created on/after (request - 1 day), NOT all
-        // of them: a learner who finished a course weeks ago and just bought a
-        // top-up has many OLD completed schedules but still legitimately needs
-        // the top-up scheduled, so those old rows must not hide the request.
-        // Likewise a single completed demo (1 schedule) can't fulfill a
-        // 10-lesson course request.
-        const reqAt = new Date(request.created_at).getTime();
-        const windowStart = reqAt - FULFILL_BACKDATE_MS;
-        const fulfillingCount = scheduleTimes.filter(
-          (t) => t >= windowStart,
-        ).length;
-        const lessonsNeeded = Array.isArray(request.lesson_ids)
-          ? request.lesson_ids.length
-          : 1;
-
-        // Show only while the learner does NOT yet have enough recent schedules
-        // to cover the request.
-        return fulfillingCount < Math.max(1, lessonsNeeded);
-      });
-
-      return filteredLearners;
+      return filterUnfulfilledSchedulingRequests(
+        learners,
+        existingSchedules ?? [],
+      );
     },
     staleTime: 30 * 1000,
+    refetchInterval: 30 * 1000,
+  });
+}
+
+// Infinite scroll version of useSchedulingRequests
+// Fetches requests in batches of 25 for incremental loading
+export function useInfiniteSchedulingRequests() {
+  return useInfiniteQuery({
+    queryKey: ["scheduling-requests-infinite"],
+    queryFn: async ({ pageParam = 0 }) => {
+      const BATCH_SIZE = 25;
+      const from = pageParam;
+      const to = from + BATCH_SIZE - 1;
+
+      // Get learners who need scheduling - fetch in batches
+      const { data: learners, error: learnersError } = await supabase
+        .from("reschedule_requests")
+        .select(
+          `id, learner_id, type, status, lesson_ids, amount, created_at,
+          Learner(id, name, phone, email, area, pick_up_location, address_lat, address_lng,
+            preferred_start_date, preferred_completion_days, prefers_two_hour_classes,
+            two_hour_days, DL_test_date, pincode, signed_up, created_at)`,
+        )
+        .eq("status", "pending")
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .range(from, to);
+
+      if (learnersError) throw learnersError;
+
+      // Track raw fetched count to determine if there are more pages
+      const rawFetchedCount = learners?.length ?? 0;
+
+      if (!learners || learners.length === 0) {
+        return { data: [], hasMoreInDb: false };
+      }
+
+      // Apply the same schedule-checking logic as the original query
+      const learnerIds = learners
+        .map((r) => r.learner_id)
+        .filter((id): id is string => !!id);
+
+      if (learnerIds.length === 0) {
+        return { data: [], hasMoreInDb: rawFetchedCount >= BATCH_SIZE };
+      }
+
+      // Same fulfillment rules as the regular queue.
+      const { data: existingSchedules, error: scheduleError } = await supabase
+        .from("Schedule")
+        .select("learner_id, lesson_id, created_at, status")
+        .in("learner_id", learnerIds);
+
+      if (scheduleError) {
+        console.error("Error checking existing schedules:", scheduleError);
+        return { data: learners, hasMoreInDb: rawFetchedCount >= BATCH_SIZE };
+      }
+
+      const filteredLearners = filterUnfulfilledSchedulingRequests(
+        learners,
+        existingSchedules ?? [],
+      );
+
+      // Return both the filtered data and whether there are more records in the DB
+      // We determine hasMoreInDb based on the RAW fetched count, not filtered count
+      return {
+        data: filteredLearners,
+        hasMoreInDb: rawFetchedCount >= BATCH_SIZE,
+      };
+    },
+    getNextPageParam: (lastPage, allPages) => {
+      const BATCH_SIZE = 25;
+      // Check hasMoreInDb flag based on RAW database count, not filtered results
+      // This ensures we keep fetching even when many records are filtered out
+      if (!lastPage || !lastPage.hasMoreInDb) return undefined;
+      // Next offset is number of pages * batch size
+      return allPages.length * BATCH_SIZE;
+    },
+    initialPageParam: 0,
+    staleTime: 30 * 1000,
+    refetchInterval: 30 * 1000,
   });
 }
 

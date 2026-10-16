@@ -70,7 +70,9 @@
   },
   "devDependencies": {
     "@nabla/vite-plugin-eslint": "^2.0.4",
+    "@playwright/test": "^1.63.0",
     "@types/file-saver": "^2.0.7",
+    "@types/google.maps": "^3.66.3",
     "@types/node": "^22.1.0",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
@@ -89,7 +91,6 @@
     "eslint-plugin-react-refresh": "0.4.4",
     "eslint-plugin-simple-import-sort": "^12.1.1",
     "postcss": "^8.4.41",
-    "pre-commit": "^1.2.2",
     "prettier": "^3.3.3",
     "prettier-plugin-tailwindcss": "^0.6.5",
     "supabase": "^1.226.4",
@@ -97,12 +98,10 @@
     "typescript": "^5.5.4",
     "vite": "5.2.12"
   },
-  "pre-commit": "lint",
   "license": "MIT",
   "pnpm": {
     "neverBuiltDependencies": [
       "@swc/core",
-      "pre-commit",
       "spawn-sync",
       "supabase"
     ]

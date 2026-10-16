@@ -1,6 +1,6 @@
 import { getYear } from "date-fns";
-import { useCallback, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import React, { useCallback, useState } from "react";
+import { Navigate, useNavigate } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -11,8 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useUser } from "@/context/auth-context";
-import { useLearnerUpdate } from "@/queries/learner";
-import { learnerHasDOB } from "@/utils/duplicateDetection";
+import { useLearner, useLearnerUpdate } from "@/queries/learner";
 
 const days = Array.from({ length: 31 }, (_, i) => i + 1);
 
@@ -42,75 +41,87 @@ export default function Birthday() {
   const { mutate, isPending } = useLearnerUpdate();
   const navigate = useNavigate();
   const { phone } = useUser();
+  const { data: learner, isLoading: learnerLoading, refetch } = useLearner();
 
-   const handleContinueClick = useCallback(async () => {
-     setError("");
+  // Refetch learner data on mount to ensure we have the latest DOB status
+  // This prevents the issue where cached data shows no DOB but DB has it
+  React.useEffect(() => {
+    console.log(
+      "[BIRTHDAY] Refetching learner data to ensure fresh DOB status",
+    );
+    refetch();
+  }, [refetch]);
 
-     if (!day || !month || !year) {
-       setError("Please select your full date of birth");
-       return;
-     }
+  // Guard: If learner already has DOB, redirect to next step
+  // This uses the same cached data that /home uses for navigation
+  if (!learnerLoading && learner?.dob) {
+    console.log("[BIRTHDAY] Learner already has DOB, redirecting to aadhar");
+    return <Navigate to="/onboard/aadhar" replace />;
+  }
 
-     const dayNum = parseInt(day);
-     const monthIndex = months.indexOf(month);
-     const yearNum = parseInt(year);
+  const handleContinueClick = useCallback(async () => {
+    setError("");
 
-     // Guard against impossible dates (e.g. 31 Feb).
-     const candidate = new Date(yearNum, monthIndex, dayNum);
-     if (
-       candidate.getFullYear() !== yearNum ||
-       candidate.getMonth() !== monthIndex ||
-       candidate.getDate() !== dayNum
-     ) {
-       setError("That date doesn't exist. Please check the day and month.");
-       return;
-     }
+    if (!day || !month || !year) {
+      setError("Please select your full date of birth");
+      return;
+    }
 
-     // ── VERIFY PHONE EXISTS ──────────────────────────────────────────────
-     if (!phone) {
-       setError("Phone number not found. Please log in again.");
-       return;
-     }
+    const dayNum = parseInt(day);
+    const monthIndex = months.indexOf(month);
+    const yearNum = parseInt(year);
 
-     console.log("[BIRTHDAY] Proceeding with DOB update for phone:", phone);
+    // Guard against impossible dates (e.g. 31 Feb).
+    const candidate = new Date(yearNum, monthIndex, dayNum);
+    if (
+      candidate.getFullYear() !== yearNum ||
+      candidate.getMonth() !== monthIndex ||
+      candidate.getDate() !== dayNum
+    ) {
+      setError("That date doesn't exist. Please check the day and month.");
+      return;
+    }
 
-     try {
-       // Check if learner already has DOB filled to prevent overwriting
-       const alreadyHasDOB = await learnerHasDOB(phone);
-       
-       if (alreadyHasDOB) {
-         console.warn("[BIRTHDAY] ⚠️ Learner already has DOB filled");
-         setError("You have already entered your date of birth. If you need to change it, please contact support.");
-         return;
-       }
+    // ── VERIFY PHONE EXISTS ──────────────────────────────────────────────
+    if (!phone) {
+      setError("Phone number not found. Please log in again.");
+      return;
+    }
 
-       const dob = `${yearNum}-${String(monthIndex + 1).padStart(2, "0")}-${String(
-         dayNum,
-       ).padStart(2, "0")}`;
+    console.log("[BIRTHDAY] Proceeding with DOB update for phone:", phone);
 
-       console.log("[BIRTHDAY] Updating learner DOB with phone:", { phone, dob });
+    try {
+      const dob = `${yearNum}-${String(monthIndex + 1).padStart(2, "0")}-${String(
+        dayNum,
+      ).padStart(2, "0")}`;
 
-       // Update the existing learner record created during signup
-       mutate(
-         { dob },
-         {
-           onSuccess: () => {
-             console.log("[BIRTHDAY] ✅ DOB updated successfully");
-             navigate("/onboard/aadhar");
-           },
-           onError: (error) => {
-             console.error("[BIRTHDAY] ❌ Failed to update DOB:", error);
-             setError("Failed to save your date of birth. Please try again.");
-           },
-         },
-       );
-     } catch (err: any) {
-       console.error("[BIRTHDAY] ❌ Error during DOB update:", err);
-       setError(
-         err.message || "An error occurred while updating your information. Please try again."
-       );
-     }
-   }, [day, month, year, mutate, navigate, phone]);
+      console.log("[BIRTHDAY] Updating learner DOB with phone:", {
+        phone,
+        dob,
+      });
+
+      // Update the existing learner record created during signup
+      mutate(
+        { dob },
+        {
+          onSuccess: () => {
+            console.log("[BIRTHDAY] ✅ DOB updated successfully");
+            navigate("/onboard/aadhar");
+          },
+          onError: (error) => {
+            console.error("[BIRTHDAY] ❌ Failed to update DOB:", error);
+            setError("Failed to save your date of birth. Please try again.");
+          },
+        },
+      );
+    } catch (err: any) {
+      console.error("[BIRTHDAY] ❌ Error during DOB update:", err);
+      setError(
+        err.message ||
+          "An error occurred while updating your information. Please try again.",
+      );
+    }
+  }, [day, month, year, mutate, navigate, phone]);
 
   return (
     <div className="flex h-full w-full flex-col rounded-md">

@@ -15,7 +15,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { supabase } from "@/lib/supabaseClient";
+import { fetchInstructorModuleSchedules } from "@/lib/admin-schedules";
 
 import { Badge } from "../ui/badge";
 
@@ -30,10 +30,13 @@ type ScheduleInfoData = {
   isTentative: boolean;
   tentative_details?: {
     name?: string;
+    // Masked by the edge function unless the viewer holds "View Unmasked
+    // Customer Phone Numbers".
     phone?: string;
     description?: string;
     paid_info?: string;
     leadName?: string;
+    pickup_location?: string;
   };
 };
 
@@ -61,13 +64,10 @@ export const SearchInstructorScheduleInfo: React.FC<
   const { data: scheduleData, isLoading } = useQuery({
     queryKey: ["Schedule", instructorId],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("Schedule")
-        .select(`*`)
-        .eq("instructor_id", instructorId)
-        .order("date", { ascending: true });
-      if (error) throw error;
-      return data as ScheduleInfoData[];
+      // Read path through the edge function: learner and tentative phone
+      // numbers arrive masked unless the viewer may see them unmasked.
+      const rows = await fetchInstructorModuleSchedules(instructorId);
+      return rows as unknown as ScheduleInfoData[];
     },
     // onSuccess: () => {
     //   queryClient.invalidateQueries({ queryKey: ["Schedule", instructorId] });
@@ -189,7 +189,7 @@ export const SearchInstructorScheduleInfo: React.FC<
                         <div>
                           <p className="text-sm">
                             <span className="font-medium">Phone:</span>{" "}
-                            {schedule.tentative_details?.phone}
+                            {schedule.tentative_details?.phone || "N/A"}
                           </p>
                           <p className="text-sm">
                             <span className="font-medium">Lead Name:</span>{" "}

@@ -8,7 +8,7 @@ import {
   UserCheck,
   XCircle,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
@@ -37,6 +37,8 @@ import {
   LeaveStatus,
   useAllLeaveRequests,
   useLeaveAffectedLessons,
+  useLeaveRequest,
+  usePendingLeaveRequestCount,
   useReassignLesson,
   useReplacementCandidates,
   useReviewLeaveRequest,
@@ -53,22 +55,15 @@ const STATUS_STYLE: Record<LeaveStatus, string> = {
 const fmtRange = (r: LeaveRequestWithInstructor) => {
   const f = format(new Date(r.from_date), "EEE d MMM");
   const t = format(new Date(r.to_date), "EEE d MMM yyyy");
-  const days = r.from_date === r.to_date ? format(new Date(r.from_date), "EEE d MMM yyyy") : `${f} – ${t}`;
+  const days =
+    r.from_date === r.to_date
+      ? format(new Date(r.from_date), "EEE d MMM yyyy")
+      : `${f} – ${t}`;
   const time = r.all_day
     ? "All day"
     : `${r.start_time?.slice(0, 5) ?? ""}–${r.end_time?.slice(0, 5) ?? ""}`;
   return `${days} · ${time}`;
 };
-
-// Rank order: pending first, emergency before planned, then most recent.
-const sortRequests = (rows: LeaveRequestWithInstructor[]) =>
-  [...rows].sort((a, b) => {
-    if ((a.status === "pending") !== (b.status === "pending"))
-      return a.status === "pending" ? -1 : 1;
-    if ((a.leave_type === "emergency") !== (b.leave_type === "emergency"))
-      return a.leave_type === "emergency" ? -1 : 1;
-    return (b.created_at ?? "").localeCompare(a.created_at ?? "");
-  });
 
 // One affected booked lesson + its ranked replacement candidates.
 function AffectedLessonRow({
@@ -91,7 +86,10 @@ function AffectedLessonRow({
 
   const assign = async (newInstructorId: string, name: string | null) => {
     try {
-      await reassign.mutateAsync({ scheduleId: lesson.scheduleId, newInstructorId });
+      await reassign.mutateAsync({
+        scheduleId: lesson.scheduleId,
+        newInstructorId,
+      });
       toast({ title: `Reassigned to ${name ?? "instructor"}` });
     } catch (e) {
       toast({
@@ -106,11 +104,13 @@ function AffectedLessonRow({
     <div className="rounded-md border bg-gray-50 p-3">
       <div className="flex items-center justify-between text-sm">
         <span className="font-medium">
-          {format(new Date(lesson.date), "EEE d MMM")} · {lesson.startTime?.slice(0, 5)}–
-          {lesson.endTime?.slice(0, 5)}
+          {format(new Date(lesson.date), "EEE d MMM")} ·{" "}
+          {lesson.startTime?.slice(0, 5)}–{lesson.endTime?.slice(0, 5)}
         </span>
         {lesson.lessonNumber != null && (
-          <span className="text-xs text-muted-foreground">Lesson {lesson.lessonNumber}</span>
+          <span className="text-xs text-muted-foreground">
+            Lesson {lesson.lessonNumber}
+          </span>
         )}
       </div>
       <div className="mt-0.5 text-xs text-muted-foreground">
@@ -125,7 +125,8 @@ function AffectedLessonRow({
           </span>
         ) : !candidates || candidates.length === 0 ? (
           <span className="flex items-center gap-1 text-xs font-medium text-amber-600">
-            <AlertTriangle className="h-3 w-3" /> No free instructor for this slot
+            <AlertTriangle className="h-3 w-3" /> No free instructor for this
+            slot
           </span>
         ) : (
           <div className="flex flex-wrap gap-1.5">
@@ -164,7 +165,8 @@ function ReviewDialog({
   const { data: admin } = useCurrentAdmin();
   const review = useReviewLeaveRequest();
   const revoke = useRevokeLeave();
-  const { data: affected, isLoading: lessonsLoading } = useLeaveAffectedLessons(request);
+  const { data: affected, isLoading: lessonsLoading } =
+    useLeaveAffectedLessons(request);
   const { toast } = useToast();
   const [note, setNote] = useState(request.admin_note ?? "");
 
@@ -176,7 +178,9 @@ function ReviewDialog({
         adminNote: note.trim() || undefined,
         reviewerName: admin?.name ?? "Admin",
       });
-      toast({ title: action === "approve" ? "Leave approved" : "Leave rejected" });
+      toast({
+        title: action === "approve" ? "Leave approved" : "Leave rejected",
+      });
       if (action === "reject") onClose();
     } catch (e) {
       toast({
@@ -208,7 +212,10 @@ function ReviewDialog({
           <DialogTitle className="flex items-center gap-2">
             {request.instructorName ?? "Instructor"}
             {request.leave_type === "emergency" && (
-              <Badge variant="outline" className="border-red-200 bg-red-50 text-[10px] text-red-700">
+              <Badge
+                variant="outline"
+                className="border-red-200 bg-red-50 text-[10px] text-red-700"
+              >
                 Emergency
               </Badge>
             )}
@@ -221,7 +228,9 @@ function ReviewDialog({
 
         <div className="space-y-4">
           {request.reason && (
-            <p className="rounded bg-gray-50 p-2 text-sm text-gray-700">{request.reason}</p>
+            <p className="rounded bg-gray-50 p-2 text-sm text-gray-700">
+              {request.reason}
+            </p>
           )}
 
           {request.status === "pending" ? (
@@ -233,7 +242,11 @@ function ReviewDialog({
                 onChange={(e) => setNote(e.target.value)}
               />
               <div className="flex gap-2">
-                <Button className="flex-1" disabled={review.isPending} onClick={() => act("approve")}>
+                <Button
+                  className="flex-1"
+                  disabled={review.isPending}
+                  onClick={() => act("approve")}
+                >
                   {review.isPending ? (
                     <Loader2 className="mr-1 h-4 w-4 animate-spin" />
                   ) : (
@@ -254,11 +267,20 @@ function ReviewDialog({
             </div>
           ) : (
             <div className="flex items-center justify-between">
-              <Badge variant="outline" className={`capitalize ${STATUS_STYLE[request.status]}`}>
+              <Badge
+                variant="outline"
+                className={`capitalize ${STATUS_STYLE[request.status]}`}
+              >
                 {request.status}
               </Badge>
               {request.status === "approved" && (
-                <Button variant="ghost" size="sm" className="text-xs text-red-600" disabled={revoke.isPending} onClick={doRevoke}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-xs text-red-600"
+                  disabled={revoke.isPending}
+                  onClick={doRevoke}
+                >
                   Revoke leave
                 </Button>
               )}
@@ -270,7 +292,9 @@ function ReviewDialog({
             <h3 className="mb-2 text-sm font-semibold">
               Affected booked lessons{" "}
               {affected && affected.length > 0 && (
-                <span className="text-muted-foreground">({affected.length})</span>
+                <span className="text-muted-foreground">
+                  ({affected.length})
+                </span>
               )}
             </h3>
             {lessonsLoading ? (
@@ -301,15 +325,90 @@ function ReviewDialog({
 
 export default function LeaveManagement() {
   const [statusFilter, setStatusFilter] = useState<LeaveStatus | "all">("all");
-  const { data, isLoading } = useAllLeaveRequests();
-  const [selected, setSelected] = useState<LeaveRequestWithInstructor | null>(null);
+  const {
+    data,
+    error,
+    isLoading,
+    isFetching,
+    hasNextPage,
+    isFetchNextPageError,
+    fetchNextPage,
+  } = useAllLeaveRequests({
+    status: statusFilter === "all" ? undefined : statusFilter,
+  });
+  const [selected, setSelected] = useState<LeaveRequestWithInstructor | null>(
+    null,
+  );
+  const { data: selectedRequest } = useLeaveRequest(selected?.id);
+  const { data: pendingCount = 0 } = usePendingLeaveRequestCount();
+  const { toast } = useToast();
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+  const hasScrolledRef = useRef(false);
+  const rows = data ?? [];
 
-  const rows = useMemo(() => {
-    const all = sortRequests(data ?? []);
-    return statusFilter === "all" ? all : all.filter((r) => r.status === statusFilter);
-  }, [data, statusFilter]);
+  useEffect(() => {
+    hasScrolledRef.current = false;
+  }, [statusFilter]);
 
-  const pendingCount = (data ?? []).filter((r) => r.status === "pending").length;
+  useEffect(() => {
+    if (error) {
+      toast({
+        title: "Couldn't load leave requests",
+        description: error.message,
+        variant: "destructive",
+      });
+    }
+  }, [error, toast]);
+
+  useEffect(() => {
+    const sentinel = loadMoreRef.current;
+    if (!sentinel || !hasNextPage || isFetching) return;
+
+    let requested = false;
+    const loadMore = () => {
+      if (requested) return;
+      requested = true;
+      observer.disconnect();
+      void fetchNextPage({ cancelRefetch: false });
+    };
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        // Don't drain pages on open in a tall viewport, or loop on an error.
+        if (
+          entry.isIntersecting &&
+          hasScrolledRef.current &&
+          !isFetchNextPageError
+        )
+          loadMore();
+      },
+      { rootMargin: "0px 0px 200px" },
+    );
+    const onScroll = (event: Event) => {
+      // Ignore scrolling inside the filter picker or Review dialog.
+      if (event.target instanceof Element && !event.target.contains(sentinel))
+        return;
+      hasScrolledRef.current = true;
+      const bounds = sentinel.getBoundingClientRect();
+      if (bounds.top <= window.innerHeight + 200 && bounds.bottom >= 0)
+        loadMore();
+    };
+    window.addEventListener("scroll", onScroll, {
+      capture: true,
+      passive: true,
+    });
+    observer.observe(sentinel);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [
+    data,
+    fetchNextPage,
+    hasNextPage,
+    isFetching,
+    isFetchNextPageError,
+    statusFilter,
+  ]);
 
   return (
     <div className="min-h-screen bg-muted/30 p-4 sm:p-6">
@@ -321,18 +420,25 @@ export default function LeaveManagement() {
             </Button>
           </Link>
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">Leave Management</h1>
+            <h1 className="text-2xl font-bold tracking-tight">
+              Leave Management
+            </h1>
             <p className="text-sm text-muted-foreground">
               Approve leave and arrange replacement instructors.{" "}
               {pendingCount > 0 && (
-                <span className="font-medium text-amber-600">{pendingCount} pending</span>
+                <span className="font-medium text-amber-600">
+                  {pendingCount} pending
+                </span>
               )}
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
-          <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as LeaveStatus | "all")}>
+          <Select
+            value={statusFilter}
+            onValueChange={(v) => setStatusFilter(v as LeaveStatus | "all")}
+          >
             <SelectTrigger className="w-[180px]">
               <SelectValue />
             </SelectTrigger>
@@ -353,7 +459,8 @@ export default function LeaveManagement() {
         ) : rows.length === 0 ? (
           <Card>
             <CardContent className="p-6 text-center text-sm text-muted-foreground">
-              No leave requests{statusFilter !== "all" ? ` with status “${statusFilter}”` : ""}.
+              No leave requests
+              {statusFilter !== "all" ? ` with status “${statusFilter}”` : ""}.
             </CardContent>
           </Card>
         ) : (
@@ -367,22 +474,34 @@ export default function LeaveManagement() {
                         {r.instructorName ?? "Instructor"}
                       </span>
                       {r.leave_type === "emergency" && (
-                        <Badge variant="outline" className="border-red-200 bg-red-50 text-[10px] text-red-700">
+                        <Badge
+                          variant="outline"
+                          className="border-red-200 bg-red-50 text-[10px] text-red-700"
+                        >
                           Emergency
                         </Badge>
                       )}
-                      <Badge variant="outline" className={`text-[10px] capitalize ${STATUS_STYLE[r.status]}`}>
+                      <Badge
+                        variant="outline"
+                        className={`text-[10px] capitalize ${STATUS_STYLE[r.status]}`}
+                      >
                         {r.status}
                       </Badge>
                     </div>
-                    <div className="mt-0.5 text-xs text-muted-foreground">{fmtRange(r)}</div>
+                    <div className="mt-0.5 text-xs text-muted-foreground">
+                      {fmtRange(r)}
+                    </div>
                     {r.instructorPhone && (
                       <div className="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground">
                         <Phone className="h-3 w-3" /> {r.instructorPhone}
                       </div>
                     )}
                   </div>
-                  <Button size="sm" variant={r.status === "pending" ? "default" : "outline"} onClick={() => setSelected(r)}>
+                  <Button
+                    size="sm"
+                    variant={r.status === "pending" ? "default" : "outline"}
+                    onClick={() => setSelected(r)}
+                  >
                     {r.status === "pending" ? "Review" : "View"}
                   </Button>
                 </CardContent>
@@ -390,14 +509,18 @@ export default function LeaveManagement() {
             ))}
           </div>
         )}
+        {hasNextPage && (
+          <div ref={loadMoreRef} className="h-px" aria-hidden="true" />
+        )}
       </div>
 
       {selected && (
         <ReviewDialog
-          request={
+          request={{
             // keep the dialog in sync with the latest fetched row
-            (data ?? []).find((r) => r.id === selected.id) ?? selected
-          }
+            ...(rows.find((r) => r.id === selected.id) ?? selected),
+            ...selectedRequest,
+          }}
           onClose={() => setSelected(null)}
         />
       )}

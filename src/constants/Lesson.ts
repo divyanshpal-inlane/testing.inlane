@@ -53,6 +53,13 @@ export const LESSON_CONTENT: LessonContent = {
       },
       video: [
         {
+          title: "Public Relations for Drivers",
+          icon: "🤝",
+          color: "bg-blue-500",
+          video_path:
+            "https://inlane-lesson-content.s3.ap-south-1.amazonaws.com/PUBLIC%20RELATIONS%20FOR%20DRIVERS.mp4",
+        },
+        {
           title: "3 seconds is all it takes",
           icon: "⏰",
           color: "bg-[#6257FF]",
@@ -439,6 +446,13 @@ export const LESSON_CONTENT: LessonContent = {
       },
       video: [
         {
+          title: "U-turn Tutorial",
+          icon: "↩️",
+          color: "bg-blue-500",
+          video_path:
+            "https://inlane-lesson-content.s3.ap-south-1.amazonaws.com/U-turn%20tutorial.mp4",
+        },
+        {
           title: "Roudabout rules",
           icon: "📷",
           color: "bg-yellow-500",
@@ -626,6 +640,15 @@ export const LESSON_CONTENT: LessonContent = {
     description: "Mini challenges",
     image_path: "/assets/lesson-pic-10.png",
     menu: {
+      video: [
+        {
+          title: "First Aid for Drivers",
+          icon: "🩹",
+          color: "bg-red-500",
+          video_path:
+            "https://inlane-lesson-content.s3.ap-south-1.amazonaws.com/First%20Aid%20for%20Drivers.mp4",
+        },
+      ],
       trivia: {
         title: "You drove into a quiz",
         icon: "🤖",

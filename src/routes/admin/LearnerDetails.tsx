@@ -42,7 +42,10 @@ import {
   SelectTrigger,
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { supabase } from "@/lib/supabaseClient";
+
+const POST_LL_PAGE_SIZE = 15;
 
 // Animated Search Bar Component
 const AnimatedSearchBar = ({ value, onChange, placeholder }) => {
@@ -106,6 +109,9 @@ const LearnerDetails = () => {
   const queryClient = useQueryClient();
   const [dialogOpenTestDate, setDialogOpenTestDate] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
+  const [page, setPage] = useState(1);
+  const debouncedSearchTerm = useDebouncedValue(searchTerm, 300);
+  const isSearchPending = searchTerm !== debouncedSearchTerm;
   const [isBookedTestDateDialogOpen, setIsBookedTestDateDialogOpen] =
     useState(false);
   const [bookedTest, setBookedTest] = useState("");
@@ -116,35 +122,73 @@ const LearnerDetails = () => {
 
   // Query for past LL approved applications
   const {
-    data: pastLLApplications,
+    data: pastLLApplicationsPage,
     isLoading: isPastLLLoading,
+    isFetching: isPastLLFetching,
     isError: isPastLLError,
   } = useQuery({
-    queryKey: ["learners", "pastLLApplications"],
-    queryFn: async () => {
-      const { data, error } = await supabase
+    queryKey: [
+      "learners",
+      "pastLLApplications",
+      "postLL",
+      page,
+      debouncedSearchTerm,
+    ],
+    enabled: !isSearchPending,
+    staleTime: 30_000,
+    queryFn: async ({ signal }) => {
+      const from = (page - 1) * POST_LL_PAGE_SIZE;
+      let query = supabase
         .from("Learner")
-        .select("*, schedule_preferences!left(learner_id)")
+        .select("*, schedule_preferences!left(learner_id)", { count: "exact" })
         .in("has_postLL_done", [true, false])
         .is("LL_result", true)
         .is("LL_application_approved", true)
         .is("LL_received", true)
-        .order("has_a_DL");
+        .order("has_a_DL")
+        .order("id")
+        .range(from, from + POST_LL_PAGE_SIZE - 1)
+        .abortSignal(signal);
+
+      if (debouncedSearchTerm) {
+        // Escape regex and quote the filter value to preserve literal,
+        // case-insensitive substring searches, including punctuation.
+        const searchPattern = JSON.stringify(
+          debouncedSearchTerm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+        );
+        query = query.or(
+          `name.imatch.${searchPattern},phone.imatch.${searchPattern},LL_application_id.imatch.${searchPattern}`,
+        );
+      }
+
+      const { data, error, count } = await query;
       if (error) throw error;
-      return data;
+      return { applications: data ?? [], totalCount: count ?? 0 };
     },
   });
 
-  // Filter past LL approved applications based on search term
-  const filteredPastApplications = pastLLApplications?.filter((learner) => {
-    if (!searchTerm) return true;
-    const searchLower = searchTerm.toLowerCase();
-    return (
-      learner.name?.toLowerCase().includes(searchLower) ||
-      learner.phone?.toLowerCase().includes(searchLower) ||
-      learner.LL_application_id?.toLowerCase().includes(searchLower)
-    );
-  });
+  const pastLLApplications = pastLLApplicationsPage?.applications;
+  const totalPages = Math.max(
+    1,
+    Math.ceil((pastLLApplicationsPage?.totalCount ?? 0) / POST_LL_PAGE_SIZE),
+  );
+
+  useEffect(() => {
+    if (
+      pastLLApplicationsPage &&
+      !isSearchPending &&
+      !isPastLLFetching &&
+      page > totalPages
+    ) {
+      setPage(totalPages);
+    }
+  }, [
+    pastLLApplicationsPage,
+    isSearchPending,
+    isPastLLFetching,
+    page,
+    totalPages,
+  ]);
 
   const updateLearnerMutation = useMutation({
     mutationFn: async ({
@@ -166,8 +210,10 @@ const LearnerDetails = () => {
         description: "Learner details updated successfully.",
       });
       // TODO: seperate query keys to be added and called
-      queryClient.invalidateQueries(["learners", "llDetails"]);
-      queryClient.invalidateQueries(["learners", "pastLLApplications"]);
+      queryClient.invalidateQueries({ queryKey: ["learners", "llDetails"] });
+      queryClient.invalidateQueries({
+        queryKey: ["learners", "pastLLApplications"],
+      });
     },
     onError: (error) => {
       toast({
@@ -214,8 +260,10 @@ const LearnerDetails = () => {
         title: "Success",
         description: "Learner LL details updated successfully.",
       });
-      queryClient.invalidateQueries(["learners", "llDetails"]);
-      queryClient.invalidateQueries(["learners", "pastLLApplications"]);
+      queryClient.invalidateQueries({ queryKey: ["learners", "llDetails"] });
+      queryClient.invalidateQueries({
+        queryKey: ["learners", "pastLLApplications"],
+      });
     },
     onError: (error) => {
       toast({
@@ -255,9 +303,6 @@ const LearnerDetails = () => {
             title: "Success",
             description: "Learner details updated successfully.",
           });
-          // TODO: seperate query keys to be added and called
-          queryClient.invalidateQueries(["learners", "llDetails"]);
-          queryClient.invalidateQueries(["learners", "pastLLApplications"]);
         },
         onError: (error) => {
           toast({
@@ -403,13 +448,16 @@ const LearnerDetails = () => {
               <div className="w-80">
                 <AnimatedSearchBar
                   value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
+                  onChange={(e) => {
+                    setSearchTerm(e.target.value);
+                    setPage(1);
+                  }}
                 />
               </div>
             </div>
           </CardHeader>
           <CardContent className="p-0">
-            {isPastLLLoading ? (
+            {isSearchPending || isPastLLLoading ? (
               <div className="py-12 text-center">
                 <div className="text-lg">Loading past applications...</div>
               </div>
@@ -417,7 +465,7 @@ const LearnerDetails = () => {
               <div className="py-12 text-center text-red-500">
                 <div className="text-lg">Error loading past applications</div>
               </div>
-            ) : filteredPastApplications?.length === 0 ? (
+            ) : pastLLApplications?.length === 0 ? (
               <div className="py-12 text-center text-gray-500">
                 <div className="text-lg font-medium">
                   {searchTerm
@@ -474,7 +522,7 @@ const LearnerDetails = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100 bg-white">
-                    {filteredPastApplications?.map((learner, index) => (
+                    {pastLLApplications?.map((learner, index) => (
                       <tr
                         key={learner.id}
                         className={`transition-colors duration-150 hover:bg-gray-50 ${
@@ -784,6 +832,33 @@ const LearnerDetails = () => {
                 </table>
               </div>
             )}
+            <div className="flex items-center justify-between border-t px-6 py-4">
+              <Button
+                variant="outline"
+                onClick={() => setPage((currentPage) => currentPage - 1)}
+                disabled={page === 1 || isSearchPending || isPastLLFetching}
+              >
+                Previous
+              </Button>
+              <span className="text-sm text-gray-600" aria-live="polite">
+                Page {page}
+                {pastLLApplicationsPage &&
+                  !isSearchPending &&
+                  ` of ${totalPages}`}
+              </span>
+              <Button
+                variant="outline"
+                onClick={() => setPage((currentPage) => currentPage + 1)}
+                disabled={
+                  !pastLLApplicationsPage ||
+                  page >= totalPages ||
+                  isSearchPending ||
+                  isPastLLFetching
+                }
+              >
+                Next
+              </Button>
+            </div>
           </CardContent>
         </Card>
       </div>

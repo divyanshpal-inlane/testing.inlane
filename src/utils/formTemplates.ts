@@ -1,7 +1,10 @@
 const cache = new Map<string, ArrayBuffer>();
 
 /** Load a public PDF template once and reuse it across bulk generation. */
-export async function loadPdfTemplate(url: string, label: string): Promise<ArrayBuffer> {
+export async function loadPdfTemplate(
+  url: string,
+  label: string,
+): Promise<ArrayBuffer> {
   const hit = cache.get(url);
   if (hit) return hit.slice(0);
   const res = await fetch(url);

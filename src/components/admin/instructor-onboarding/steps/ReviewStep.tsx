@@ -122,17 +122,15 @@ export function ReviewStep({ data, updateData, onStepClick }: ReviewStepProps) {
       icon: MapPin,
       step: 4,
       items: [
-        { label: "Address", value: data.address || "Not set" },
         {
-          label: "Radius",
-          value: data.radius ? `${data.radius} km` : "Not set",
+          label: "Polygon",
+          value: data.serviceZone
+            ? `Drawn (${data.serviceZone.length} points)`
+            : "Not drawn",
         },
       ],
     },
   ];
-
-  // Areas need special handling for proper display
-  const areasCount = data.areas.length;
 
   return (
     <div className="space-y-4 overflow-hidden">
@@ -187,26 +185,6 @@ export function ReviewStep({ data, updateData, onStepClick }: ReviewStepProps) {
             </Card>
           );
         })}
-
-        {/* Service Areas - Special display with badges */}
-        {areasCount > 0 && (
-          <Card className="overflow-hidden">
-            <CardContent className="px-3 py-2">
-              <div className="flex flex-col gap-1.5">
-                <span className="text-xs text-muted-foreground">
-                  Serviceable Areas ({areasCount})
-                </span>
-                <div className="flex flex-wrap gap-1">
-                  {data.areas.map((area, index) => (
-                    <Badge key={index} variant="outline" className="text-xs">
-                      {area}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
 
         {/* Unavailability */}
         <Card className="overflow-hidden">

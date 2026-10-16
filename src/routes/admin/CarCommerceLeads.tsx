@@ -1,7 +1,8 @@
 import { format } from "date-fns";
 import { ArrowLeft, Car, Download, Loader2, Search } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,43 +16,67 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { carLeadsToCSV, useCarLeads } from "@/queries/carLeads";
+import {
+  CAR_LEADS_PAGE_SIZE,
+  CarLeadPlanningFilter,
+  carLeadsToCSV,
+  fetchCarLeadsPage,
+  useCarLeadAreas,
+  useCarLeads,
+} from "@/queries/carLeads";
 import { downloadCSV } from "@/queries/lessonsDashboard";
 
 export default function CarCommerceLeads() {
-  const { data, isLoading, isFetching, refetch } = useCarLeads();
   const [search, setSearch] = useState("");
   const [area, setArea] = useState("all");
-  const [planning, setPlanning] = useState("all");
+  const [planning, setPlanning] = useState<CarLeadPlanningFilter>("all");
+  const [page, setPage] = useState(1);
+  const [isExporting, setIsExporting] = useState(false);
+  const { data, isLoading, isFetching, error, refetch } = useCarLeads({
+    page,
+    search,
+    area,
+    planning,
+  });
+  const { data: areas = [], refetch: refetchAreas } = useCarLeadAreas();
+  const rows = data?.leads ?? [];
+  const totalCount = data?.totalCount ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalCount / CAR_LEADS_PAGE_SIZE));
 
-  const areas = useMemo(
-    () =>
-      Array.from(
-        new Set((data ?? []).map((r) => r.area).filter((a): a is string => !!a)),
-      ).sort(),
-    [data],
-  );
+  useEffect(() => {
+    if (data && !isFetching && !error && page > totalPages) setPage(totalPages);
+  }, [data, error, isFetching, page, totalPages]);
 
-  const rows = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return (data ?? []).filter((r) => {
-      if (q) {
-        const hay = `${r.name ?? ""} ${r.phone ?? ""}`.toLowerCase();
-        if (!hay.includes(q)) return false;
+  const handleExport = async () => {
+    if (rows.length === 0 || isExporting) return;
+    setIsExporting(true);
+    try {
+      // Preserve export of all filtered results, requesting only ten leads
+      // at a time and retaining CSV text rather than the entire lead dataset.
+      const csvParts: string[] = [];
+      for (let exportPage = 1; ; exportPage++) {
+        const result = await fetchCarLeadsPage({
+          page: exportPage,
+          search,
+          area,
+          planning,
+        });
+        if (exportPage > 1 && result.leads.length === 0) break;
+        const csv = carLeadsToCSV(result.leads);
+        csvParts.push(
+          exportPage === 1 ? csv : csv.slice(csv.indexOf("\n") + 1),
+        );
+        if (exportPage * CAR_LEADS_PAGE_SIZE >= result.totalCount) break;
       }
-      if (area !== "all" && r.area !== area) return false;
-      if (planning === "yes" && r.carIntentPlanning !== "Yes") return false;
-      if (planning === "onboarding" && r.drivingMotivation == null) return false;
-      return true;
-    });
-  }, [data, search, area, planning]);
-
-  const handleExport = () => {
-    if (rows.length === 0) return;
-    downloadCSV(
-      `car_leads_${format(new Date(), "yyyy-MM-dd")}.csv`,
-      carLeadsToCSV(rows),
-    );
+      downloadCSV(
+        `car_leads_${format(new Date(), "yyyy-MM-dd")}.csv`,
+        csvParts.join("\n"),
+      );
+    } catch {
+      toast.error("Failed to export car-commerce leads. Please try again.");
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   const fmtDate = (d: string | null) =>
@@ -82,7 +107,7 @@ export default function CarCommerceLeads() {
           <Button
             size="sm"
             onClick={handleExport}
-            disabled={isLoading || rows.length === 0}
+            disabled={isFetching || isExporting || rows.length === 0}
           >
             <Download className="mr-1 h-4 w-4" />
             Export CSV
@@ -97,11 +122,20 @@ export default function CarCommerceLeads() {
               <Input
                 placeholder="Search name or phone"
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                onChange={(e) => {
+                  setSearch(e.target.value);
+                  setPage(1);
+                }}
                 className="pl-8"
               />
             </div>
-            <Select value={area} onValueChange={setArea}>
+            <Select
+              value={area}
+              onValueChange={(value) => {
+                setArea(value);
+                setPage(1);
+              }}
+            >
               <SelectTrigger className="w-[180px]">
                 <SelectValue placeholder="Area" />
               </SelectTrigger>
@@ -114,7 +148,13 @@ export default function CarCommerceLeads() {
                 ))}
               </SelectContent>
             </Select>
-            <Select value={planning} onValueChange={setPlanning}>
+            <Select
+              value={planning}
+              onValueChange={(value) => {
+                setPlanning(value as CarLeadPlanningFilter);
+                setPage(1);
+              }}
+            >
               <SelectTrigger className="w-[200px]">
                 <SelectValue />
               </SelectTrigger>
@@ -127,7 +167,10 @@ export default function CarCommerceLeads() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => refetch()}
+              onClick={() => {
+                void refetch();
+                void refetchAreas();
+              }}
               disabled={isFetching}
               className="ml-auto"
             >
@@ -137,7 +180,7 @@ export default function CarCommerceLeads() {
               Refresh
             </Button>
             <span className="text-sm text-muted-foreground">
-              {rows.length} lead{rows.length === 1 ? "" : "s"}
+              {totalCount} lead{totalCount === 1 ? "" : "s"}
             </span>
           </CardContent>
         </Card>
@@ -148,6 +191,13 @@ export default function CarCommerceLeads() {
             {isLoading ? (
               <div className="flex h-40 items-center justify-center">
                 <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+              </div>
+            ) : error ? (
+              <div
+                className="p-6 text-center text-sm text-destructive"
+                role="alert"
+              >
+                Failed to load car-commerce leads. Please try refreshing.
               </div>
             ) : rows.length === 0 ? (
               <div className="p-6 text-center text-sm text-muted-foreground">
@@ -177,20 +227,30 @@ export default function CarCommerceLeads() {
                   </thead>
                   <tbody>
                     {rows.map((r) => (
-                      <tr key={r.id} className="border-b [&>td]:p-2 hover:bg-muted/30">
+                      <tr
+                        key={r.id}
+                        className="border-b hover:bg-muted/30 [&>td]:p-2"
+                      >
                         <td className="font-medium">{r.name ?? "—"}</td>
                         <td className="tabular-nums">{r.phone ?? "—"}</td>
                         <td>{r.area ?? "—"}</td>
-                        <td className="max-w-[180px] truncate">{r.pickupLocation ?? "—"}</td>
-                        <td className="max-w-[160px] truncate">{r.drivingMotivation ?? "—"}</td>
+                        <td className="max-w-[180px] truncate">
+                          {r.pickupLocation ?? "—"}
+                        </td>
+                        <td className="max-w-[160px] truncate">
+                          {r.drivingMotivation ?? "—"}
+                        </td>
                         <td>{r.carPurchaseTimeline || "—"}</td>
                         <td>
                           {r.carIntentPlanning === "Yes" ? (
-                            <Badge variant="outline" className="border-emerald-200 bg-emerald-50 text-[10px] text-emerald-700">
+                            <Badge
+                              variant="outline"
+                              className="border-emerald-200 bg-emerald-50 text-[10px] text-emerald-700"
+                            >
                               Yes
                             </Badge>
                           ) : (
-                            r.carIntentPlanning ?? "—"
+                            (r.carIntentPlanning ?? "—")
                           )}
                         </td>
                         <td>{r.carIntentType ?? "—"}</td>
@@ -198,7 +258,10 @@ export default function CarCommerceLeads() {
                         <td>{r.carIntentTimeframe ?? "—"}</td>
                         <td className="whitespace-nowrap text-xs text-muted-foreground">
                           {r.carIntentUpdatedAt
-                            ? format(new Date(r.carIntentUpdatedAt), "d MMM yy, h:mm a")
+                            ? format(
+                                new Date(r.carIntentUpdatedAt),
+                                "d MMM yy, h:mm a",
+                              )
                             : "—"}
                         </td>
                         <td className="whitespace-nowrap text-xs text-muted-foreground">
@@ -225,6 +288,27 @@ export default function CarCommerceLeads() {
                 <ScrollBar orientation="horizontal" />
               </ScrollArea>
             )}
+            <div className="flex items-center justify-end gap-3 border-t p-3">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPage((current) => current - 1)}
+                disabled={page <= 1 || isFetching || !!error}
+              >
+                Previous
+              </Button>
+              <span className="text-sm text-muted-foreground">
+                Page {page} of {totalPages}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPage((current) => current + 1)}
+                disabled={page >= totalPages || isFetching || !!error}
+              >
+                Next
+              </Button>
+            </div>
           </CardContent>
         </Card>
       </div>

@@ -1,11 +1,13 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import QuestionTrivia from "@/components/lesson/question-trivia";
 import { InteractiveImageQuiz } from "@/components/lesson/quiz";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { PaintedText } from "@/components/ui/paint-text";
+import { useQuizAnalytics } from "@/hooks/useQuizAnalytics";
+import type { LearningContext } from "@/lib/learning-analytics/model";
 
 export type ImageGame = {
   type: "image";
@@ -38,11 +40,19 @@ export type GameType = Game["type"];
 
 const LegacyTriviaCard = ({
   finishGame,
+  context,
   game: { type: gameType, games: game },
 }: {
   finishGame: () => void;
   game: ImageGame;
+  context: LearningContext;
 }) => {
+  const analytics = useQuizAnalytics(context);
+  const timedOutIndex = useRef(-1);
+  const finish = () => {
+    analytics.finish();
+    finishGame();
+  };
   const [selectedAnswer, setSelectedAnswer] = useState<number | undefined>(
     undefined,
   );
@@ -52,7 +62,12 @@ const LegacyTriviaCard = ({
   const isCorrect = selectedAnswer === game[gameIndex].correctAnswer;
 
   useEffect(() => {
+    if (selectedAnswer !== undefined) return;
     if (timeLeft === 0) {
+      if (timedOutIndex.current !== gameIndex) {
+        timedOutIndex.current = gameIndex;
+        analytics.answer(game[gameIndex].question, null, 15000);
+      }
       setShowTimeUpDialog(true);
       return;
     }
@@ -62,7 +77,7 @@ const LegacyTriviaCard = ({
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [timeLeft]);
+  }, [timeLeft, selectedAnswer]);
 
   useEffect(() => {
     // Reset timer when moving to next question
@@ -85,7 +100,7 @@ const LegacyTriviaCard = ({
               onClick={() => {
                 setShowTimeUpDialog(false);
                 if (gameIndex + 1 >= game.length) {
-                  finishGame();
+                  finish();
                 } else {
                   setGameIndex((prev) => prev + 1);
                   setSelectedAnswer(undefined);
@@ -124,7 +139,15 @@ const LegacyTriviaCard = ({
           ) : null}
           <Comp
             key={game[gameIndex].imageSrc}
-            setSelectedAnswer={setSelectedAnswer}
+            setSelectedAnswer={(answer) => {
+              if (timeLeft === 0 || selectedAnswer !== undefined) return;
+              analytics.answer(
+                game[gameIndex].question,
+                String(answer),
+                (15 - timeLeft) * 1000,
+              );
+              setSelectedAnswer(answer);
+            }}
             selectedAnswer={selectedAnswer ?? 0}
             game={game[gameIndex]}
           />
@@ -155,7 +178,7 @@ const LegacyTriviaCard = ({
                   onClick={() => {
                     if (isCorrect) {
                       if (gameIndex + 1 >= game.length) {
-                        finishGame();
+                        finish();
                       } else setGameIndex((gameIndex) => gameIndex + 1);
                     }
 
@@ -178,10 +201,19 @@ const LegacyTriviaCard = ({
 export default function TriviaCard(props: {
   finishGame: () => void;
   game: Game;
+  context: LearningContext;
 }) {
   return props.game.type === "question" ? (
-    <QuestionTrivia game={props.game} finishGame={props.finishGame} />
+    <QuestionTrivia
+      game={props.game}
+      finishGame={props.finishGame}
+      context={props.context}
+    />
   ) : (
-    <LegacyTriviaCard game={props.game} finishGame={props.finishGame} />
+    <LegacyTriviaCard
+      game={props.game}
+      finishGame={props.finishGame}
+      context={props.context}
+    />
   );
 }

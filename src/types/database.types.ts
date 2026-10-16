@@ -1,4 +1,4 @@
-﻿export type Json =
+export type Json =
   | string
   | number
   | boolean
@@ -501,8 +501,10 @@ export type Database = {
       enrollment: {
         Row: {
           amount: number | null;
-          course_id: string;
+          case_type: string | null;
+          course_id: string | null;
           created_at: string;
+          four_wheeler_requirement: string | null;
           id: string;
           installment_mode: string | null;
           installment1_amount: number | null;
@@ -511,14 +513,20 @@ export type Database = {
           payment_id: string | null;
           payment_status: string | null;
           progress: Json;
+          rto_address_change_required: boolean | null;
+          rto_fee: number | null;
           status: Database["public"]["Enums"]["enrollment_status"];
+          two_wheeler_requirement: string | null;
           unlocked_lessons: number[] | null;
           updated_at: string;
+          vehicle_type: string | null;
         };
         Insert: {
           amount?: number | null;
-          course_id: string;
+          case_type?: string | null;
+          course_id?: string | null;
           created_at?: string;
+          four_wheeler_requirement?: string | null;
           id?: string;
           installment_mode?: string | null;
           installment1_amount?: number | null;
@@ -527,14 +535,20 @@ export type Database = {
           payment_id?: string | null;
           payment_status?: string | null;
           progress?: Json;
+          rto_address_change_required?: boolean | null;
+          rto_fee?: number | null;
           status?: Database["public"]["Enums"]["enrollment_status"];
+          two_wheeler_requirement?: string | null;
           unlocked_lessons?: number[] | null;
           updated_at?: string;
+          vehicle_type?: string | null;
         };
         Update: {
           amount?: number | null;
-          course_id?: string;
+          case_type?: string | null;
+          course_id?: string | null;
           created_at?: string;
+          four_wheeler_requirement?: string | null;
           id?: string;
           installment_mode?: string | null;
           installment1_amount?: number | null;
@@ -543,9 +557,13 @@ export type Database = {
           payment_id?: string | null;
           payment_status?: string | null;
           progress?: Json;
+          rto_address_change_required?: boolean | null;
+          rto_fee?: number | null;
           status?: Database["public"]["Enums"]["enrollment_status"];
+          two_wheeler_requirement?: string | null;
           unlocked_lessons?: number[] | null;
           updated_at?: string;
+          vehicle_type?: string | null;
         };
         Relationships: [
           {
@@ -588,6 +606,7 @@ export type Database = {
           enabled: boolean | null;
           experience: number | null;
           id_instructor: string;
+          is_company_instructor: boolean;
           latitude: number | null;
           longitude: number | null;
           name: string | null;
@@ -614,6 +633,7 @@ export type Database = {
           enabled?: boolean | null;
           experience?: number | null;
           id_instructor?: string;
+          is_company_instructor?: boolean;
           latitude?: number | null;
           longitude?: number | null;
           name?: string | null;
@@ -640,6 +660,7 @@ export type Database = {
           enabled?: boolean | null;
           experience?: number | null;
           id_instructor?: string;
+          is_company_instructor?: boolean;
           latitude?: number | null;
           longitude?: number | null;
           name?: string | null;
@@ -750,7 +771,7 @@ export type Database = {
           LL_approved_date: string | null;
           LL_application_id: string | null;
           LL_received: boolean | null;
-          LL_received_date: date | null;
+          LL_received_date: string | null;
           LL_result: boolean | null;
           LL_team_appointment_booked: boolean | null;
           LL_test_date: string | null;
@@ -1124,7 +1145,7 @@ export type Database = {
           otp_end: string | null;
           start_time: string;
           status?: string | null;
-          isTentative: boolean | null;
+          isTentative?: boolean | null;
           leadName: string | null;
           started_at: string | null;
           ended_at: string | null;
@@ -1145,7 +1166,7 @@ export type Database = {
           otp_end: string | null;
           start_time?: string;
           status?: string | null;
-          isTentative: boolean | null;
+          isTentative?: boolean | null;
           leadName: string | null;
           started_at: string | null;
           ended_at: string | null;
@@ -1240,11 +1261,176 @@ export type Database = {
         };
         Relationships: [];
       };
+      instructor_service_zones: {
+        Row: {
+          coordinates: Json;
+          created_at: string;
+          description: string | null;
+          id: string;
+          instructor_id: string;
+          is_rough: boolean;
+          kind: string;
+          raw_name: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          coordinates: Json;
+          created_at?: string;
+          description?: string | null;
+          id?: string;
+          instructor_id: string;
+          is_rough?: boolean;
+          kind?: string;
+          raw_name?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          coordinates?: Json;
+          created_at?: string;
+          description?: string | null;
+          id?: string;
+          instructor_id?: string;
+          is_rough?: boolean;
+          kind?: string;
+          raw_name?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       [_ in never]: never;
     };
     Functions: {
+      get_payment_tracker_page: {
+        Args: {
+          p_tab: string;
+          p_page: number;
+          p_search: string;
+          p_course: string;
+          p_urgency: string;
+        };
+        Returns: Json;
+      };
+      get_earnings_instructors: {
+        Args: { p_search?: string };
+        Returns: {
+          id_instructor: string;
+          name: string | null;
+          phone: string | null;
+        }[];
+      };
+      get_lessons_dashboard_page: {
+        Args: {
+          p_from: string;
+          p_to: string;
+          p_page?: number;
+          p_kam_ids?: string[] | null;
+          p_instructor_ids?: string[] | null;
+          p_class_numbers?: number[] | null;
+          p_statuses?: string[] | null;
+          p_search?: string | null;
+        };
+        Returns: Json;
+      };
+      get_car_leads: {
+        Args: {
+          search_term?: string;
+          area_filter?: string;
+          planning_filter?: string;
+        };
+        Returns: Database["public"]["Tables"]["Learner"]["Row"][];
+      };
+      get_car_lead_areas: {
+        Args: Record<PropertyKey, never>;
+        Returns: { area: string }[];
+      };
+      get_leave_requests_paginated: {
+        Args: { p_status: string; p_offset: number; p_limit: number };
+        Returns: Database["public"]["Tables"]["instructor_leave_request"]["Row"][];
+      };
+      get_tentative_customers_paginated: {
+        Args: { p_start_date: string; p_search?: string; p_page?: number };
+        Returns: Json;
+      };
+      get_daily_notification_schedules: {
+        Args: {
+          schedule_date: string;
+          recipient_tab?: string;
+          search_term?: string;
+          page_number?: number;
+        };
+        Returns: Json;
+      };
+
+      get_instructors_by_performance: {
+        Args: {
+          from_date: string;
+          to_date: string;
+          current_local_time: string;
+          search_term: string;
+        };
+        Returns: {
+          id_instructor: string;
+          name: string | null;
+          phone: string | null;
+          enabled: boolean | null;
+          sessions: number;
+        }[];
+      };
+      get_course_feedback: {
+        Args: { search_term: string; checkpoint_filter: string };
+        Returns: {
+          id: string;
+          enrollment_id: string;
+          learner_id: string;
+          checkpoint: string;
+          overall_rating: number;
+          instructor_rating: number;
+          course_rating: number;
+          comment: string | null;
+          created_at: string;
+        }[];
+      };
+      get_course_feedback_stats: {
+        Args: Record<PropertyKey, never>;
+        Returns: Json;
+      };
+      get_learners_with_issues: {
+        Args: { search_term: string; issue_filter: string };
+        Returns: Database["public"]["Tables"]["Learner"]["Row"][];
+      };
+      record_learning_session: {
+        Args: {
+          p_session_id: string;
+          p_course_id: string;
+          p_lesson_number: number;
+          p_content_id: string;
+          p_sequence: number;
+          p_snapshot: Json;
+        };
+        Returns: undefined;
+      };
+      get_learning_analytics: {
+        Args: {
+          p_search: string;
+          p_activity: string;
+          p_course_id: string | null;
+          p_lesson_number: number | null;
+          p_page: number;
+        };
+        Returns: Json;
+      };
+      get_learning_attempts: {
+        Args: {
+          p_learner_id: string;
+          p_course_id: string;
+          p_lesson_number: number;
+          p_content_id: string;
+          p_page: number;
+        };
+        Returns: Json;
+      };
       record_game_launch: {
         Args: { p_event_id: string; p_game_id: string };
         Returns: undefined;

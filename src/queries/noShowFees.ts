@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import { supabase } from "@/lib/supabaseClient";
 
@@ -6,6 +11,7 @@ import { supabase } from "@/lib/supabaseClient";
 // database.types.ts, so route their access through an untyped handle and expose
 // the explicit interfaces below (same approach noShow.ts uses for its own types).
 const sb = supabase as any;
+const NO_SHOW_FEE_BATCH_SIZE = 20;
 
 export const NO_SHOW_FEE_AMOUNT = 300; // ₹ — PRD-confirmed fee
 
@@ -22,7 +28,11 @@ export type AppealReason =
   | "system_error"
   | "emergency"
   | "other";
-export type AppealStatus = "pending" | "approved" | "rejected" | "partial_refund";
+export type AppealStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "partial_refund";
 
 export interface NoShowFee {
   id: string;
@@ -60,7 +70,7 @@ export interface NoShowAppeal {
   created_at: string | null;
 }
 
-const first = <T,>(v: T | T[] | null | undefined): T | null =>
+const first = <T>(v: T | T[] | null | undefined): T | null =>
   Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
 
 // Best-effort WhatsApp/Heltar dispatch — a missing template must never block the
@@ -95,7 +105,8 @@ async function enrichFees(rows: any[]): Promise<NoShowFee[]> {
   const schedById = new Map<number, any>();
   for (const s of scheds ?? []) schedById.set(s.id, s);
   const appealByFee = new Map<string, NoShowAppeal>();
-  for (const a of (appeals ?? []) as NoShowAppeal[]) appealByFee.set(a.fee_id, a);
+  for (const a of (appeals ?? []) as NoShowAppeal[])
+    appealByFee.set(a.fee_id, a);
 
   return rows.map((r) => {
     const s = schedById.get(r.schedule_id);
@@ -112,7 +123,10 @@ async function enrichFees(rows: any[]): Promise<NoShowFee[]> {
       learnerPhone: learner?.phone ?? null,
       instructorName: instr?.name ?? null,
       lessonNumber: lesson?.number ?? null,
-      appeal: appealByFee.get(r.id) ?? null,
+      // The pending section must review the matching pending appeal, even if
+      // this fee also has an older, already-reviewed appeal.
+      appeal:
+        first<NoShowAppeal>(r.pending_appeal) ?? appealByFee.get(r.id) ?? null,
     };
   });
 }
@@ -121,19 +135,49 @@ async function enrichFees(rows: any[]): Promise<NoShowFee[]> {
 // Admin-facing
 // ---------------------------------------------------------------------------
 
-export function useAllNoShowFees(filters?: { status?: FeeStatus }) {
-  return useQuery({
-    queryKey: ["no_show_fees", filters?.status ?? "any"],
-    queryFn: async (): Promise<NoShowFee[]> => {
+export function useAllNoShowFees(filters?: {
+  status?: FeeStatus;
+  pendingAppealsOnly?: boolean;
+}) {
+  return useInfiniteQuery({
+    queryKey: [
+      "no_show_fees",
+      "infinite",
+      filters?.status ?? "any",
+      filters?.pendingAppealsOnly ?? false,
+    ],
+    gcTime: 0,
+    initialPageParam: 0,
+    queryFn: async ({ pageParam, signal }) => {
       let q = sb
         .from("no_show_fee")
-        .select("*")
-        .order("marked_at", { ascending: false });
+        .select(
+          filters?.pendingAppealsOnly
+            ? "*, pending_appeal:no_show_appeal!inner(*)"
+            : "*",
+          { count: "exact" },
+        )
+        .order("marked_at", { ascending: false })
+        .order("id", { ascending: false })
+        .range(pageParam, pageParam + NO_SHOW_FEE_BATCH_SIZE - 1)
+        .abortSignal(signal);
       if (filters?.status) q = q.eq("status", filters.status);
-      const { data, error } = await q;
+      if (filters?.pendingAppealsOnly)
+        q = q.eq("pending_appeal.status", "pending");
+      const { data, error, count } = await q;
       if (error) throw error;
-      return enrichFees(data ?? []);
+      const rows = data ?? [];
+      return {
+        rows: await enrichFees(rows),
+        total: count ?? 0,
+        nextOffset:
+          rows.length === NO_SHOW_FEE_BATCH_SIZE &&
+          (count == null || pageParam + rows.length < count)
+            ? pageParam + rows.length
+            : undefined,
+      };
     },
+    getNextPageParam: (lastPage) => lastPage.nextOffset,
   });
 }
 
@@ -160,7 +204,8 @@ export function useChargeNoShowFee() {
         if (schedErr) throw schedErr;
         learnerId = sched?.learner_id ?? null;
       }
-      if (!learnerId) throw new Error("Could not resolve learner for this lesson.");
+      if (!learnerId)
+        throw new Error("Could not resolve learner for this lesson.");
 
       const { data: fee, error } = await sb
         .from("no_show_fee")
@@ -279,7 +324,10 @@ export function useReviewAppeal() {
         refund = 0;
         feeUpdate = { status: "confirmed" };
       } else {
-        refund = Math.max(0, Math.min(input.refundAmount ?? 0, input.feeAmount));
+        refund = Math.max(
+          0,
+          Math.min(input.refundAmount ?? 0, input.feeAmount),
+        );
         appealStatus = "partial_refund";
         // The standing amount is what remains after the partial refund.
         feeUpdate = { status: "confirmed", amount: input.feeAmount - refund };

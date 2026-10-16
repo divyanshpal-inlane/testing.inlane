@@ -32,6 +32,12 @@ export interface InstructorPerformanceRow {
 
 // A lesson counts as on-time if OTP-started within 10 min of its slot start.
 const PUNCTUALITY_GRACE_MIN = 10;
+export const INSTRUCTOR_PERFORMANCE_PAGE_SIZE = 10;
+
+interface InstructorPerformancePage {
+  rows: InstructorPerformanceRow[];
+  totalCount: number;
+}
 
 const isCancelled = (status: string | null) =>
   !!status && status.toLowerCase().includes("cancel");
@@ -39,46 +45,74 @@ const isCancelled = (status: string | null) =>
 const pct = (num: number, den: number): number | null =>
   den > 0 ? Math.round((num / den) * 100) : null;
 
-export function useInstructorPerformance(fromDate: string, toDate: string) {
+export function useInstructorPerformance(
+  fromDate: string,
+  toDate: string,
+  page = 1,
+  search = "",
+) {
+  const searchTerm = search.trim().toLowerCase();
   return useQuery({
-    queryKey: ["instructor_performance", fromDate, toDate],
+    queryKey: ["instructor_performance", fromDate, toDate, page, searchTerm],
     enabled: !!fromDate && !!toDate && fromDate <= toDate,
-    queryFn: async (): Promise<InstructorPerformanceRow[]> => {
+    queryFn: async ({ signal }): Promise<InstructorPerformancePage> => {
+      const now = new Date();
+      const today = format(now, "yyyy-MM-dd");
+      const offset = (page - 1) * INSTRUCTOR_PERFORMANCE_PAGE_SIZE;
       const [instrRes, schedRes, feedbackRes, noShowRes] = await Promise.all([
+        // Search and session ordering happen before the database page limit.
         supabase
-          .from("Instructor")
-          .select("id_instructor, name, phone, enabled"),
+          .rpc(
+            "get_instructors_by_performance",
+            {
+              from_date: fromDate,
+              to_date: toDate,
+              current_local_time: format(now, "yyyy-MM-dd'T'HH:mm:ss.SSS"),
+              search_term: searchTerm,
+            },
+            { count: "exact" },
+          )
+          .select("id_instructor, name, phone, enabled, sessions")
+          .order("sessions", { ascending: false })
+          .order("id_instructor", { ascending: true })
+          .range(offset, offset + INSTRUCTOR_PERFORMANCE_PAGE_SIZE - 1)
+          .abortSignal(signal),
+        // Keep window-wide metrics so feedback still uses the learner's main
+        // instructor across all their lessons, including other pages.
         supabase
           .from("Schedule")
-          .select("id, instructor_id, learner_id, date, start_time, status, started_at")
+          .select(
+            "id, instructor_id, learner_id, date, start_time, status, started_at",
+          )
           .gte("date", fromDate)
-          .lte("date", toDate),
+          .lte("date", toDate)
+          .abortSignal(signal),
         supabase
           .from("learner_course_feedback" as never)
           .select("learner_id, instructor_rating, created_at")
           .gte("created_at", `${fromDate}T00:00:00`)
-          .lte("created_at", `${toDate}T23:59:59`),
+          .lte("created_at", `${toDate}T23:59:59`)
+          .abortSignal(signal),
         supabase
           .from("schedule_no_show")
           .select("schedule_id, no_show_party, status")
           .eq("no_show_party", "instructor")
           .gte("created_at", `${fromDate}T00:00:00`)
-          .lte("created_at", `${toDate}T23:59:59`),
+          .lte("created_at", `${toDate}T23:59:59`)
+          .abortSignal(signal),
       ]);
       if (instrRes.error) throw instrRes.error;
       if (schedRes.error) throw schedRes.error;
 
       const instructors = instrRes.data ?? [];
       const schedules = schedRes.data ?? [];
-      const feedback =
-        (feedbackRes.data ?? []) as unknown as Array<{
-          learner_id: string | null;
-          instructor_rating: number | null;
-        }>;
-      const noShows = (noShowRes.data ?? []).filter((n) => n.status !== "dismissed");
-
-      const today = format(new Date(), "yyyy-MM-dd");
-      const now = new Date();
+      const feedback = (feedbackRes.data ?? []) as unknown as Array<{
+        learner_id: string | null;
+        instructor_rating: number | null;
+      }>;
+      const noShows = (noShowRes.data ?? []).filter(
+        (n) => n.status !== "dismissed",
+      );
 
       // Map each no-show back to its instructor via the schedule. Cases whose
       // schedule predates the window need a top-up fetch.
@@ -92,16 +126,20 @@ export function useInstructorPerformance(fromDate: string, toDate: string) {
         const { data: extra } = await supabase
           .from("Schedule")
           .select("id, instructor_id")
-          .in("id", missingIds);
-        for (const s of extra ?? []) instructorBySchedule.set(s.id, s.instructor_id);
+          .in("id", missingIds)
+          .abortSignal(signal);
+        for (const s of extra ?? [])
+          instructorBySchedule.set(s.id, s.instructor_id);
       }
 
       // Attribute each learner's feedback to the instructor who taught them
       // most in this window (the feedback table doesn't store instructor_id).
       const lessonCount = new Map<string, Map<string, number>>();
       for (const s of schedules) {
-        if (!s.learner_id || !s.instructor_id || isCancelled(s.status)) continue;
-        if (!lessonCount.has(s.learner_id)) lessonCount.set(s.learner_id, new Map());
+        if (!s.learner_id || !s.instructor_id || isCancelled(s.status))
+          continue;
+        if (!lessonCount.has(s.learner_id))
+          lessonCount.set(s.learner_id, new Map());
         const m = lessonCount.get(s.learner_id)!;
         m.set(s.instructor_id, (m.get(s.instructor_id) ?? 0) + 1);
       }
@@ -144,7 +182,9 @@ export function useInstructorPerformance(fromDate: string, toDate: string) {
       for (const s of schedules) {
         if (!s.instructor_id || isCancelled(s.status)) continue;
         // Only sessions whose slot has passed count toward the rates.
-        const slotStart = s.start_time ? new Date(`${s.date}T${s.start_time}`) : null;
+        const slotStart = s.start_time
+          ? new Date(`${s.date}T${s.start_time}`)
+          : null;
         const isPast = s.date < today || (slotStart != null && slotStart < now);
         if (!isPast) continue;
         const a = get(s.instructor_id);
@@ -171,8 +211,9 @@ export function useInstructorPerformance(fromDate: string, toDate: string) {
         if (instrId) get(instrId).complaints += 1;
       }
 
-      return instructors
-        .map((i): InstructorPerformanceRow => {
+      return {
+        totalCount: instrRes.count ?? 0,
+        rows: instructors.map((i): InstructorPerformanceRow => {
           const a = acc.get(i.id_instructor);
           const ratings = a?.ratings ?? [];
           return {
@@ -193,8 +234,8 @@ export function useInstructorPerformance(fromDate: string, toDate: string) {
             complaintRate: a ? pct(a.complaints, a.past) : null,
             completionRate: a ? pct(a.completed, a.past) : null,
           };
-        })
-        .sort((x, y) => y.sessions - x.sessions);
+        }),
+      };
     },
   });
 }

@@ -14,6 +14,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import invariant from "tiny-invariant";
 
 import TriviaCard from "@/components/lesson/trivia";
+import { MaskedCallButton } from "@/components/MaskedCallButton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,10 +23,9 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
-import { usePhoneVisibility } from "@/context/phone-visibility-context";
 import { COURSES_DATA } from "@/constants/courses";
+import { usePhoneVisibility } from "@/context/phone-visibility-context";
 import { numberToText } from "@/lib/utils";
-import { maskCarNumber, maskPhoneNumber } from "@/utils/phoneMasking";
 import {
   useLearner,
   useLearnerEnrollment,
@@ -33,6 +33,7 @@ import {
   useSchedule,
 } from "@/queries/learner";
 import { Database } from "@/types/database.types";
+import { maskCarNumber } from "@/utils/phoneMasking";
 
 import Signature from "./signature";
 
@@ -134,8 +135,7 @@ export function LessonPlan({
     lessonId: lesson.id,
     learnerId: learner.id,
   });
-  const { canViewUnmaskedPhoneNumbers, canViewUnmaskedCarNumbers } =
-    usePhoneVisibility();
+  const { canViewUnmaskedCarNumbers } = usePhoneVisibility();
 
   const {
     menu,
@@ -354,15 +354,14 @@ export function LessonPlan({
                         : "Not available"}
                     </p>
                   </div>
-                  <div className="flex flex-col gap-0">
-                    <p className="text-sm font-light">Mobile number</p>
-                    <p className="text-base">
-                      {schedule?.Instructor?.phone
-                        ? canViewUnmaskedPhoneNumbers
-                          ? schedule?.Instructor?.phone
-                          : maskPhoneNumber(schedule?.Instructor?.phone)
-                        : "Not available"}
-                    </p>
+                  <div className="flex flex-col gap-1">
+                    <p className="text-sm font-light">Call Instructor</p>
+                    <MaskedCallButton
+                      callerPhone={learner.phone}
+                      calleePhone={schedule?.Instructor?.phone}
+                      label="Call Now"
+                      className="flex w-fit items-center gap-1.5 text-sm font-medium"
+                    />
                   </div>
 
                   {/* Row 3 */}

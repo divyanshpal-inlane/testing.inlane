@@ -6,7 +6,7 @@ alter table "public"."Admin" drop constraint "Admin_pkey";
 
 drop index if exists "public"."Admin_pkey";
 
-alter table "public"."Admin" add column "password" text not null;
+alter table "public"."Admin" add column "password" text;
 
 alter table "public"."Admin" alter column "created_at" drop not null;
 

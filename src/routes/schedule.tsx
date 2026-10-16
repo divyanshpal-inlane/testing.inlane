@@ -220,9 +220,8 @@ export default function Schedule() {
                                 (scheduledLessons ?? []) as Array<{
                                   status?: string;
                                 }>
-                              ).filter(
-                                (l) => l.status === "pending_payment",
-                              ).length,
+                              ).filter((l) => l.status === "pending_payment")
+                                .length,
                             );
                             navigate(
                               `/payment?phone=${learner?.phone}&type=topup&hours=${topupHours}`,

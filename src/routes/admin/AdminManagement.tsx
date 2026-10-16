@@ -73,7 +73,7 @@ export default function AdminManagement() {
       ...prev,
       phone: value,
     }));
-    
+
     if (value && !isValidPhone(value)) {
       setPhoneError("Phone number must be exactly 10 digits");
     } else {
@@ -208,7 +208,7 @@ export default function AdminManagement() {
 
   const selectAllPermissions = (isNew: boolean) => {
     const allKeys = Object.keys(ADMIN_PERMISSIONS).filter(
-      (key) => key !== "admin_management"
+      (key) => key !== "admin_management",
     ) as PermissionKey[];
     if (isNew) {
       setNewAdminForm((prev) => ({ ...prev, permissions: allKeys }));
@@ -302,11 +302,7 @@ export default function AdminManagement() {
                   )}
                   {admin.is_super_admin && (
                     <div className="flex gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled
-                      >
+                      <Button variant="outline" size="sm" disabled>
                         Edit Permissions
                       </Button>
                     </div>
@@ -417,32 +413,32 @@ export default function AdminManagement() {
                   {Object.values(ADMIN_PERMISSIONS)
                     .filter((perm) => perm.key !== "admin_management")
                     .map((perm) => (
-                    <div
-                      key={perm.key}
-                      className="flex items-start space-x-3 rounded p-2 hover:bg-gray-50"
-                    >
-                      <Checkbox
-                        id={`new-${perm.key}`}
-                        checked={newAdminForm.permissions.includes(
-                          perm.key as PermissionKey,
-                        )}
-                        onCheckedChange={() =>
-                          toggleNewPermission(perm.key as PermissionKey)
-                        }
-                      />
-                      <div className="flex-1">
-                        <label
-                          htmlFor={`new-${perm.key}`}
-                          className="cursor-pointer text-sm font-medium"
-                        >
-                          {perm.label}
-                        </label>
-                        <p className="text-xs text-muted-foreground">
-                          {perm.description}
-                        </p>
+                      <div
+                        key={perm.key}
+                        className="flex items-start space-x-3 rounded p-2 hover:bg-gray-50"
+                      >
+                        <Checkbox
+                          id={`new-${perm.key}`}
+                          checked={newAdminForm.permissions.includes(
+                            perm.key as PermissionKey,
+                          )}
+                          onCheckedChange={() =>
+                            toggleNewPermission(perm.key as PermissionKey)
+                          }
+                        />
+                        <div className="flex-1">
+                          <label
+                            htmlFor={`new-${perm.key}`}
+                            className="cursor-pointer text-sm font-medium"
+                          >
+                            {perm.label}
+                          </label>
+                          <p className="text-xs text-muted-foreground">
+                            {perm.description}
+                          </p>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
                 </div>
               </div>
             </div>
@@ -507,32 +503,32 @@ export default function AdminManagement() {
                 {Object.values(ADMIN_PERMISSIONS)
                   .filter((perm) => perm.key !== "admin_management")
                   .map((perm) => (
-                  <div
-                    key={perm.key}
-                    className="flex items-start space-x-3 rounded p-2 hover:bg-gray-50"
-                  >
-                    <Checkbox
-                      id={`edit-${perm.key}`}
-                      checked={editPermissions.includes(
-                        perm.key as PermissionKey,
-                      )}
-                      onCheckedChange={() =>
-                        toggleEditPermission(perm.key as PermissionKey)
-                      }
-                    />
-                    <div className="flex-1">
-                      <label
-                        htmlFor={`edit-${perm.key}`}
-                        className="cursor-pointer text-sm font-medium"
-                      >
-                        {perm.label}
-                      </label>
-                      <p className="text-xs text-muted-foreground">
-                        {perm.description}
-                      </p>
+                    <div
+                      key={perm.key}
+                      className="flex items-start space-x-3 rounded p-2 hover:bg-gray-50"
+                    >
+                      <Checkbox
+                        id={`edit-${perm.key}`}
+                        checked={editPermissions.includes(
+                          perm.key as PermissionKey,
+                        )}
+                        onCheckedChange={() =>
+                          toggleEditPermission(perm.key as PermissionKey)
+                        }
+                      />
+                      <div className="flex-1">
+                        <label
+                          htmlFor={`edit-${perm.key}`}
+                          className="cursor-pointer text-sm font-medium"
+                        >
+                          {perm.label}
+                        </label>
+                        <p className="text-xs text-muted-foreground">
+                          {perm.description}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
               </div>
             </div>
             <DialogFooter>

@@ -162,12 +162,19 @@ function PaymentPage() {
             return;
           }
 
-          // If URL has type=topup, prefill topup with N hours × ₹599
+          // If URL has type=topup, prefill topup with either explicit amount
+          // (admin-set) or N hours × DEMO_COURSE.price (fallback)
           if (urlType === "topup") {
             const rawHours = parseInt(searchParams.get("hours") || "1", 10);
             const topupHours =
               Number.isFinite(rawHours) && rawHours > 0 ? rawHours : 1;
-            const topupAmount = topupHours * DEMO_COURSE.price;
+            // Use explicit amount from URL if provided (admin-set per-lesson cost),
+            // otherwise fall back to hours × default price
+            const rawAmount = parseInt(searchParams.get("amount") || "0", 10);
+            const topupAmount =
+              Number.isFinite(rawAmount) && rawAmount > 0
+                ? rawAmount
+                : topupHours * DEMO_COURSE.price;
             setPaymentDetails((prev) => ({
               ...prev,
               email: learner.email || "",
@@ -238,7 +245,11 @@ function PaymentPage() {
               1,
               enrollment?.progress?.total_hours || 1,
             );
-            const topupAmount = topupHours * DEMO_COURSE.price;
+            // Use enrollment amount if set (admin-configured), otherwise fall back to hours × default price
+            const topupAmount =
+              enrollment?.amount && enrollment.amount > 0
+                ? enrollment.amount
+                : topupHours * DEMO_COURSE.price;
             setPaymentDetails((prev) => ({
               ...prev,
               email: learner.email || "",
@@ -432,8 +443,12 @@ function PaymentPage() {
 
   // Update payment amount when payment option changes
   useEffect(() => {
-    // Skip for demo and test - fixed price
-    if (courseSelectionType === "demo" || courseSelectionType === "test")
+    // Skip for demo, test, and topup - fixed price set by admin/URL
+    if (
+      courseSelectionType === "demo" ||
+      courseSelectionType === "test" ||
+      courseSelectionType === "topup"
+    )
       return;
 
     // Use functional update to get the latest state values
@@ -607,8 +622,13 @@ function PaymentPage() {
       finalAmount = paymentDetails.amount || DEMO_COURSE.price;
       finalInstallmentType = "full";
     } else if (courseSelectionType === "topup") {
+      // Use the pre-set amount (from URL's admin-set per-lesson cost) if available,
+      // otherwise fall back to hours × default price
       const topupHours = Math.max(1, paymentDetails.totalHours || 1);
-      finalAmount = topupHours * DEMO_COURSE.price;
+      finalAmount =
+        paymentDetails.amount && paymentDetails.amount > 0
+          ? paymentDetails.amount
+          : topupHours * DEMO_COURSE.price;
       finalInstallmentType = "full";
     } else if (courseSelectionType === "test") {
       finalAmount = 10;
@@ -1057,8 +1077,8 @@ function PaymentPage() {
               <div className="space-y-3">
                 <Alert className="border-blue-200 bg-blue-50">
                   <AlertDescription>
-                    <strong>Topup Class</strong> - ₹{DEMO_COURSE.price} per
-                    hour.
+                    <strong>Topup Class</strong> -{" "}
+                    {paymentDetails.totalHours ?? 1} hour(s)
                   </AlertDescription>
                 </Alert>
                 <div>
@@ -1077,7 +1097,7 @@ function PaymentPage() {
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Total: ₹
-                    {(paymentDetails.totalHours ?? 1) * DEMO_COURSE.price}
+                    {paymentDetails.amount ?? paymentDetails.totalAmount}
                   </p>
                 </div>
               </div>

@@ -1,14 +1,9 @@
-import {
-  ArrowUpLeft,
-  ArrowUpRight,
-  Download,
-  ImageOff,
-  RefreshCw,
-} from "lucide-react";
-import { useEffect, useState } from "react";
+import { ArrowUpRight, ImageOff, RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/lib/supabaseClient";
+import { getAllPhoneFormats } from "@/utils/phoneNormalization";
 
 interface LearnerLLDisplayProps {
   learnerPhone: string;
@@ -19,7 +14,7 @@ export const LearnerLLDisplay = ({ learnerPhone }: LearnerLLDisplayProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchLLImages = async () => {
+  const fetchLLImages = useCallback(async () => {
     if (!learnerPhone) {
       setError("No phone number available");
       return;
@@ -29,21 +24,38 @@ export const LearnerLLDisplay = ({ learnerPhone }: LearnerLLDisplayProps) => {
     setError(null);
 
     try {
-      // List files from the LL bucket in the folder matching the phone number
-      const { data, error } = await supabase.storage
-        .from("LL")
-        .list(learnerPhone);
+      // Get all possible phone formats to handle different storage formats
+      // LL images might be stored under different phone formats:
+      // - 10 digits only: "8344261941"
+      // - With country code: "918344261941"
+      // - E.164 format: "+918344261941"
+      const phoneFormats = getAllPhoneFormats(learnerPhone);
 
-      // console.log("LL data", data);
-      if (error) throw error;
+      let foundFiles: { name: string; folderPath: string }[] = [];
 
-      if (data && data.length > 0) {
+      // Try each phone format to find the LL images
+      for (const phoneFormat of phoneFormats) {
+        const { data, error } = await supabase.storage
+          .from("LL")
+          .list(phoneFormat);
+
+        if (!error && data && data.length > 0) {
+          // Found files with this format, add them to our list
+          foundFiles = data.map((file) => ({
+            name: file.name,
+            folderPath: phoneFormat,
+          }));
+          break; // Stop searching once we find files
+        }
+      }
+
+      if (foundFiles.length > 0) {
         // Create signed URLs for each file
         const signedUrls = await Promise.all(
-          data.map(async (file) => {
+          foundFiles.map(async (file) => {
             const { data: signedUrlData } = await supabase.storage
               .from("LL")
-              .createSignedUrl(`${learnerPhone}/${file.name}`, 3600); // 1 hour expiry
+              .createSignedUrl(`${file.folderPath}/${file.name}`, 3600); // 1 hour expiry
 
             return signedUrlData?.signedUrl || null;
           }),
@@ -60,14 +72,14 @@ export const LearnerLLDisplay = ({ learnerPhone }: LearnerLLDisplayProps) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [learnerPhone]);
 
   // Only fetch when the component is mounted and we have a phone number
   useEffect(() => {
     if (learnerPhone) {
       fetchLLImages();
     }
-  }, [learnerPhone]);
+  }, [learnerPhone, fetchLLImages]);
 
   if (loading) {
     return (

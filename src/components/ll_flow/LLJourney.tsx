@@ -3,20 +3,22 @@ import { differenceInCalendarDays, format } from "date-fns";
 import {
   AlertTriangle,
   BadgeCheck,
+  BookOpen,
   CalendarClock,
   CalendarDays,
   Clock,
   Download,
-  BookOpen,
   ExternalLink,
   FileWarning,
   Home,
-  PlayCircle,
   Hourglass,
   PartyPopper,
+  PlayCircle,
   ShieldCheck,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,6 +30,7 @@ import {
   LL_TEST_VIDEO_URL,
   llDocSlotLabel,
   PARIVAHAN_LL_TEST_URL,
+  shouldShowLLExpiryWarning,
 } from "@/constants/llPipeline";
 import { whatsappHref } from "@/constants/support";
 import { useLearner, useLearnerUpdate } from "@/queries/learner";
@@ -105,7 +108,9 @@ function BookAppointmentButton({ label }: { label: string }) {
  */
 export default function LLJourney() {
   const { data: learner } = useLearner();
-  const { mutate: updateLearner } = useLearnerUpdate();
+  const { mutate: updateLearner, isPending: isUpdatingLearner } =
+    useLearnerUpdate();
+  const navigate = useNavigate();
   const { data: mine } = useMyLLApplication(learner?.id);
   const { data: paymentDate } = useFirstCoursePaymentDate(learner?.id);
   const statusUpdate = useCustomerLLStatusUpdate();
@@ -594,13 +599,35 @@ export default function LLJourney() {
   }
 
   // ── 16. LL approved / issued ───────────────────────────────────────────
-  const setPreferences = () =>
-    updateLearner({
-      LL_received: true,
-      LL_result: true,
-      LL_application_approved: true,
-      LL_team_appointment_booked: true,
-    });
+  const setPreferences = () => {
+    if (isUpdatingLearner) return;
+
+    // When LL is approved, allow learners to set preferences for classes
+    // But only mark LL_received as true if the LL number is actually issued
+    // This way they can start class setup while waiting for LL number
+    const llNumberIssued = !!application?.ll_number;
+
+    updateLearner(
+      {
+        LL_received: llNumberIssued,
+        LL_result: true,
+        LL_application_approved: true,
+        LL_team_appointment_booked: true,
+      },
+      {
+        // Navigate to first step of schedule setup (details/location page)
+        // This ensures learner goes through all 4 steps:
+        // Step 1: /createSchedule/details (pickup location)
+        // Step 2: /createSchedule/onboardingQuestions (start date)
+        // Step 3: /createSchedule/uploadLL (licence upload)
+        // Step 4: /createSchedule/preferences (time slots)
+        onSuccess: () => navigate("/createSchedule/details"),
+        onError: () => {
+          toast.error("Unable to open your preferences. Please try again.");
+        },
+      },
+    );
+  };
 
   const llCardDoc = documents.find((d) => d.doc_type === "ll_card") ?? null;
   const expiryDays = application?.ll_expiry_date
@@ -657,18 +684,32 @@ export default function LLJourney() {
         </Button>
       )}
 
-      {expiryDays !== null && expiryDays >= 0 && expiryDays <= 30 && (
-        <LLExpiryWarning
-          application={application!}
-          expiryDays={expiryDays}
-          helpRequested={helpRequested}
-          pending={requestHelp.isPending}
-          onRequest={requestOnce}
-        />
-      )}
+      {expiryDays !== null &&
+        expiryDays >= 0 &&
+        expiryDays <= 30 &&
+        shouldShowLLExpiryWarning(
+          {
+            ll_test_passed_achieved: application?.ll_test_passed_achieved,
+            dl_test_passed_achieved: application?.dl_test_passed_achieved,
+          },
+          application?.status,
+        ) && (
+          <LLExpiryWarning
+            application={application!}
+            expiryDays={expiryDays}
+            helpRequested={helpRequested}
+            pending={requestHelp.isPending}
+            onRequest={requestOnce}
+          />
+        )}
 
-      <Button className="w-full py-3 text-lg" onClick={setPreferences}>
-        Set Your Preferences
+      <Button
+        type="button"
+        className="w-full py-3 text-lg"
+        onClick={setPreferences}
+        disabled={isUpdatingLearner}
+      >
+        {isUpdatingLearner ? "Opening Preferences..." : "Set Your Preferences"}
       </Button>
     </JourneyCard>
   );

@@ -25,6 +25,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
+import { fetchAdminSchedules } from "@/lib/admin-schedules";
 import { supabase } from "@/lib/supabaseClient";
 import { Schedule } from "@/queries/learner";
 import { TIME_SLOT_LABELS } from "@/types/schedule";
@@ -71,19 +72,20 @@ interface SchedulePreference {
 }
 
 interface LearnerSchedule {
-  id: string;
+  id: number;
   date: string;
-  start_time: string;
-  end_time: string;
-  instructor_id: string;
-  lesson_id: string;
-  course_id: string;
-  status: string;
+  start_time: string | null;
+  end_time: string | null;
+  instructor_id: string | null;
+  lesson_id: string | null;
+  course_id: string | null;
+  status: string | null;
   instructor_name?: string;
   lesson_number?: number;
+  lesson_end_number?: number;
   course_name?: string;
-  started_at?: string;
-  ended_at?: string;
+  started_at?: string | null;
+  ended_at?: string | null;
 }
 
 interface CourseInfo {
@@ -112,7 +114,8 @@ export const LearnerInfoDialog = ({
   const [courseInfo, setCourseInfo] = useState<CourseInfo | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingSchedules, setIsLoadingSchedules] = useState(false);
-  const [isLoadingCourse, setIsLoadingCourse] = useState(false);
+  const [scheduleError, setScheduleError] = useState("");
+  const [scheduleReload, setScheduleReload] = useState(0);
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [fullLearnerData, setFullLearnerData] =
     useState<LearnerEditData | null>(null);
@@ -122,59 +125,72 @@ export const LearnerInfoDialog = ({
   const { toast } = useToast();
 
   useEffect(() => {
+    const controller = new AbortController();
+    const { signal } = controller;
     const fetchLatestComments = async () => {
       if (!learner.id || !open) return;
 
+      setComments("");
       setIsLoadingComments(true);
       try {
         const { data, error } = await supabase
           .from("Learner")
           .select("comments")
           .eq("id", learner.id)
+          .abortSignal(signal)
           .single();
 
         if (error) throw error;
 
         // Update comments with the latest from the database
-        setComments(data?.comments || "");
+        if (!signal.aborted) setComments(data?.comments || "");
       } catch (error) {
-        console.error("Error fetching comments:", error);
+        if (!signal.aborted) console.error("Error fetching comments:", error);
       } finally {
-        setIsLoadingComments(false);
+        if (!signal.aborted) setIsLoadingComments(false);
       }
     };
 
     if (open) {
       fetchLatestComments();
     }
+    return () => controller.abort();
   }, [learner.id, open]);
 
   // Fetch full learner data for editing
   useEffect(() => {
+    const controller = new AbortController();
+    const { signal } = controller;
     const fetchFullLearnerData = async () => {
       if (!learner.id || !open) return;
 
+      setFullLearnerData(null);
       try {
         const { data, error } = await supabase
           .from("Learner")
           .select("*")
           .eq("id", learner.id)
+          .abortSignal(signal)
           .single();
 
         if (error) throw error;
 
-        setFullLearnerData(data as LearnerEditData);
+        if (!signal.aborted) setFullLearnerData(data as LearnerEditData);
       } catch (error) {
-        console.error("Error fetching full learner data:", error);
+        if (!signal.aborted)
+          console.error("Error fetching full learner data:", error);
       }
     };
 
     if (open) {
       fetchFullLearnerData();
     }
+    return () => controller.abort();
   }, [learner.id, open]);
 
   useEffect(() => {
+    const controller = new AbortController();
+    const { signal } = controller;
     const fetchSchedulePreferences = async () => {
       if (!learner.id || !open) return;
 
@@ -183,14 +199,16 @@ export const LearnerInfoDialog = ({
         const { data, error } = await supabase
           .from("schedule_preferences")
           .select("day_of_week, time_slot")
-          .eq("learner_id", learner.id);
+          .eq("learner_id", learner.id)
+          .abortSignal(signal);
 
         if (error) throw error;
-        setSchedulePreferences(data || []);
+        if (!signal.aborted) setSchedulePreferences(data || []);
       } catch (error) {
-        console.error("Error fetching schedule preferences:", error);
+        if (!signal.aborted)
+          console.error("Error fetching schedule preferences:", error);
       } finally {
-        setIsLoading(false);
+        if (!signal.aborted) setIsLoading(false);
       }
     };
 
@@ -198,130 +216,84 @@ export const LearnerInfoDialog = ({
       if (!learner.id || !open) return;
 
       setIsLoadingSchedules(true);
+      setScheduleError("");
+      setCurrentSchedules([]);
       try {
-        // First, get the enrollment information for this learner
-        const { data: enrollmentData, error: enrollmentError } = await supabase
+        const schedules = await fetchAdminSchedules(
+          "learner_id",
+          learner.id,
+          signal,
+        );
+        if (signal.aborted) return;
+        // Same duration-aware chronological numbering as the schedule manager.
+        let lessonNumber = 1;
+        setCurrentSchedules(
+          schedules.map((schedule) => {
+            const minutes = (time: string | null | undefined) => {
+              const [hours, mins] = (time ?? "00:00").split(":").map(Number);
+              return (
+                (Number.isFinite(hours) ? hours : 0) * 60 +
+                (Number.isFinite(mins) ? mins : 0)
+              );
+            };
+            const hours = Math.max(
+              1,
+              Math.round(
+                (minutes(schedule.end_time) - minutes(schedule.start_time)) /
+                  60,
+              ),
+            );
+            const number = lessonNumber;
+            lessonNumber += hours;
+            return {
+              ...schedule,
+              instructor_name: schedule.Instructor?.name || "Unassigned",
+              course_name: schedule.Courses?.name || "Standalone class",
+              lesson_number: number,
+              lesson_end_number: hours > 1 ? number + hours - 1 : undefined,
+            };
+          }),
+        );
+      } catch (error) {
+        if (!signal.aborted) {
+          console.error("Error fetching current schedules:", error);
+          setScheduleError("Schedules could not be loaded. Please retry.");
+        }
+      } finally {
+        if (!signal.aborted) setIsLoadingSchedules(false);
+      }
+    };
+    // Course progress is optional metadata, never a prerequisite for showing
+    // existing classes (completed enrollments and course-less classes are valid).
+    const fetchCourseInfo = async () => {
+      setCourseInfo(null);
+      if (!learner.id || !open) return;
+      try {
+        const { data, error } = await supabase
           .from("enrollment")
-          .select("course_id, status")
+          .select("Courses(id, name, total_lessons)")
           .eq("learner_id", learner.id)
           .eq("status", "active")
           .order("created_at", { ascending: false })
-          .limit(1);
-
-        if (enrollmentError) throw enrollmentError;
-
-        // If we have an active enrollment, use that course_id
-        const courseId =
-          enrollmentData && enrollmentData.length > 0
-            ? enrollmentData[0].course_id
-            : null;
-
-        if (courseId) {
-          // Fetch course information including total lessons
-          setIsLoadingCourse(true);
-          const { data: courseDetailData, error: courseDetailError } =
-            await supabase
-              .from("Courses")
-              .select("id, name, total_lessons")
-              .eq("id", courseId)
-              .single();
-
-          if (!courseDetailError && courseDetailData) {
-            setCourseInfo(courseDetailData);
-          }
-          setIsLoadingCourse(false);
-        }
-
-        // Fetch schedules for this learner
-        const { data: scheduleData, error: scheduleError } = await supabase
-          .from("Schedule")
-          .select(
-            `
-            id, 
-            date, 
-            start_time, 
-            end_time, 
-            instructor_id, 
-            lesson_id, 
-            course_id,
-            status,
-            started_at,
-            ended_at
-          `,
-          )
-          .eq("learner_id", learner.id)
-          .order("date", { ascending: true })
-          .order("start_time", { ascending: true });
-
-        if (scheduleError) throw scheduleError;
-
-        if (scheduleData && scheduleData.length > 0) {
-          // Fetch instructor names
-          const instructorIds = [
-            ...new Set(scheduleData.map((s) => s.instructor_id)),
-          ];
-          const { data: instructorData, error: instructorError } =
-            await supabase
-              .from("Instructor")
-              .select("id_instructor, name")
-              .in("id_instructor", instructorIds);
-
-          if (instructorError) throw instructorError;
-
-          // Fetch course names
-          const courseIds = [...new Set(scheduleData.map((s) => s.course_id))];
-          const { data: courseData, error: courseError } = await supabase
-            .from("Courses")
-            .select("id, name")
-            .in("id", courseIds);
-
-          if (courseError) throw courseError;
-
-          // Sort schedules by date and time to determine chronological order
-          const sortedScheduleData = [...scheduleData].sort((a, b) => {
-            const dateTimeA = new Date(
-              `${a.date}T${a.start_time || "00:00:00"}`,
-            ).getTime();
-            const dateTimeB = new Date(
-              `${b.date}T${b.start_time || "00:00:00"}`,
-            ).getTime();
-            return dateTimeA - dateTimeB;
-          });
-
-          // Combine all data with lesson numbers based on chronological order
-          const enrichedSchedules = sortedScheduleData.map(
-            (schedule, index) => {
-              const instructor = instructorData?.find(
-                (i) => i.id_instructor === schedule.instructor_id,
-              );
-              const course = courseData?.find(
-                (c) => c.id === schedule.course_id,
-              );
-
-              return {
-                ...schedule,
-                instructor_name: instructor?.name || "Unknown",
-                course_name: course?.name || "Unknown Course",
-                lesson_number: index + 1, // Use chronological position as lesson number
-              };
-            },
-          );
-
-          setCurrentSchedules(enrichedSchedules);
-        } else {
-          setCurrentSchedules([]);
-        }
+          .order("id", { ascending: false })
+          .limit(1)
+          .abortSignal(signal)
+          .maybeSingle();
+        if (error) throw error;
+        if (!signal.aborted && data?.Courses)
+          setCourseInfo(data.Courses as CourseInfo);
       } catch (error) {
-        console.error("Error fetching current schedules:", error);
-      } finally {
-        setIsLoadingSchedules(false);
+        if (!signal.aborted)
+          console.error("Error fetching course progress:", error);
       }
     };
     if (open) {
       fetchSchedulePreferences();
       fetchCurrentSchedules();
+      fetchCourseInfo();
     }
-  }, [learner.id, open]);
+    return () => controller.abort();
+  }, [learner.id, open, scheduleReload]);
 
   const saveComments = async () => {
     if (!learner.id) return;
@@ -722,6 +694,21 @@ export const LearnerInfoDialog = ({
                   <div className="flex items-center justify-center p-6">
                     <div className="border-3 h-6 w-6 animate-spin rounded-full border-primary border-t-transparent"></div>
                   </div>
+                ) : scheduleError ? (
+                  <div
+                    role="alert"
+                    className="rounded-md bg-red-50 p-4 text-red-700"
+                  >
+                    <p>{scheduleError}</p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="mt-2"
+                      onClick={() => setScheduleReload((n) => n + 1)}
+                    >
+                      Retry schedules
+                    </Button>
+                  </div>
                 ) : currentSchedules.length === 0 ? (
                   <div className="rounded-md bg-gray-100 p-4 text-gray-500">
                     No schedules found for this learner
@@ -737,7 +724,11 @@ export const LearnerInfoDialog = ({
                           <div>
                             <div className="flex items-center gap-2">
                               <h4 className="font-medium">
-                                Lesson {schedule.lesson_number} -{" "}
+                                Lesson {schedule.lesson_number}
+                                {schedule.lesson_end_number
+                                  ? ` & ${schedule.lesson_end_number}`
+                                  : ""}{" "}
+                                -{" "}
                               </h4>
                               {getStatusBadge(schedule.status || "booked")}
                               {schedule.status === "completed" && (

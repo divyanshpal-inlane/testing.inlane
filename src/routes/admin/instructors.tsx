@@ -1,10 +1,12 @@
 import { describe } from "node:test";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { maskCarNumber, maskPhoneNumber } from "@/utils/phoneMasking";
-import { useCurrentAdmin } from "@/queries/adminPermissions";
-import { useCurrentUser } from "@/queries/userManagement";
-import { usePhoneVisibility } from "@/context/phone-visibility-context";
+import {
+  InfiniteData,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   addDays,
   addHours,
@@ -41,6 +43,7 @@ import {
   ExternalLink,
   Info,
   Loader2,
+  Map,
   MapPin,
   Phone,
   Plus,
@@ -51,20 +54,30 @@ import {
   Wrench,
   X,
 } from "lucide-react";
+import type { UIEvent } from "react";
 import {
   Fragment,
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import {
+  useLocation,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
 
 import { SearchInstructorScheduleInfo } from "@/components/admin/InstructorScheduleInfo";
 import { ReviewInstructorCard } from "@/components/admin/ReviewInstructorCard";
 import { CalendarImport } from "@/components/instructor/CalendarImport";
+import type { ZoneCoordinate } from "@/components/instructor-zones/types";
+import ZoneDrawingEditor from "@/components/instructor-zones/ZoneDrawingEditor";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -79,17 +92,13 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
-import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import {
   Tooltip,
   TooltipContent,
@@ -110,9 +119,116 @@ import {
   instructorStatusToEnabled,
   resolveInstructorStatus,
 } from "@/constants/instructorStatus";
+import { usePhoneVisibility } from "@/context/phone-visibility-context";
+import { useAdminImportedCalendar } from "@/hooks/useAdminImportedCalendar";
+import { fetchInstructorModuleSchedules } from "@/lib/admin-schedules";
+import {
+  deleteZoneById,
+  insertZone,
+  invalidateDbZoneCache,
+  updateZoneById,
+} from "@/lib/sales-dashboard/zones-db";
+import { supabase } from "@/lib/supabaseClient";
+import { cn } from "@/lib/utils";
+import { useCurrentAdmin } from "@/queries/adminPermissions";
+import { useCurrentUser } from "@/queries/userManagement";
 import { SlotConfig } from "@/types/schedule";
+import { googleMapsLoader } from "@/utils/googleMaps";
+import { maskCarNumber, maskPhoneNumber } from "@/utils/phoneMasking";
 
 import { Schedule } from "./schedules";
+
+// --- Instructor slot-booking proxy -----------------------------------------
+// Learner/customer phone numbers must never reach the browser inside the
+// Instructor Management module, and the Cratio CRM token must never live in
+// client code. Both the CRM lead lookup and the server-side slot validation go
+// through this edge function, which strips phone numbers from every response.
+const SLOT_BOOKING_FUNCTION = "instructor-slot-booking";
+
+type LeadLookupResult = {
+  success?: boolean;
+  configured?: boolean;
+  found?: boolean;
+  customer?: {
+    name?: string;
+    address?: string;
+    leadName?: string;
+    course?: string;
+    payment?: string;
+  } | null;
+  error?: string;
+  code?: string;
+};
+
+// Thin wrapper over the slot-booking function. Surfaces the function's own
+// error text (which supabase-js hides behind a generic non-2xx message).
+async function invokeSlotBooking<T = Record<string, unknown>>(
+  body: Record<string, unknown>,
+): Promise<T> {
+  const { data, error } = await supabase.functions.invoke(
+    SLOT_BOOKING_FUNCTION,
+    { body },
+  );
+  if (error) {
+    let message = error.message;
+    const context = (error as { context?: Response }).context;
+    if (context && typeof context.json === "function") {
+      try {
+        const parsed = (await context.json()) as { error?: string };
+        if (parsed?.error) message = parsed.error;
+      } catch {
+        // Non-JSON body — keep the generic message.
+      }
+    }
+    throw new Error(message);
+  }
+  return (data ?? {}) as T;
+}
+
+// Best-effort match of the CRM's free-text course (e.g. "4 Wheeler 10 days")
+// to one of our courses by name; undefined leaves the selection untouched.
+function matchCourseId(
+  crmCourse: string | undefined,
+  courses: { id: number | string; name: string | null }[] | undefined,
+): string | undefined {
+  const norm = (v: string) =>
+    v
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  const target = crmCourse ? norm(crmCourse) : "";
+  if (!target || !courses) return undefined;
+  return courses
+    .find((c) => {
+      const name = norm(c.name ?? "");
+      if (!name) return false;
+      return name === target || name.includes(target) || target.includes(name);
+    })
+    ?.id.toString();
+}
+
+type LeadLookupBy = "email" | "leadId";
+
+async function lookupCratioLead(
+  leadId: string,
+  by: LeadLookupBy,
+): Promise<LeadLookupResult> {
+  return invokeSlotBooking<LeadLookupResult>({
+    action: "lookup",
+    leadId,
+    by,
+  });
+}
+
+async function validateSlotsViaEdge(
+  instructorId: string,
+  slots: { date: string; start_time: string; end_time: string }[],
+): Promise<Record<string, { available: boolean; reason: string }>> {
+  const data = await invokeSlotBooking<{
+    availabilityMap?: Record<string, { available: boolean; reason: string }>;
+  }>({ action: "validate", instructorId, slots });
+  return data.availabilityMap ?? {};
+}
 
 // Define a type for the instructor data that comes from the database
 interface Unavailability {
@@ -161,20 +277,81 @@ interface InstructorData {
   car_mode: string;
   experience: number;
   car_number: string;
-  areas: string[];
   address: string;
   latitude: number | null; // Added for storing coordinates
   longitude: number | null; // Added for storing coordinates
-  radius: number;
   car_fuel_type: "petrol" | "diesel" | "ev" | "cng" | "lpg" | null;
   unavailability: Unavailability[];
+  // Drawn service-area polygon (instructor_service_zones, kind='polygon').
+  // null means none is stored yet. The Instructor Service Zone Map is the
+  // authoring surface for it.
+  //
+  // An instructor has AT MOST ONE polygon — UNIQUE(instructor_id) in
+  // 20260928_create_instructor_service_zones.sql enforces it. This dialog edits
+  // that one polygon, so it carries the row id to write against precisely.
+  serviceZone: ZoneCoordinate[] | null;
+  serviceZoneId: string | null;
+  /**
+   * Whether the edited polygon is provisional. Seeded from the stored row when
+   * the dialog opens (so editing preserves the flag) and defaulting to `false`
+   * here, because an Ops-shaped edit on this screen is normally a verified area
+   * being corrected rather than a new approximation.
+   */
+  serviceZoneIsRough: boolean;
 }
 
-interface ServiceableArea {
-  id: string;
-  name: string;
-  postal_code?: string;
+const INSTRUCTOR_PAGE_SIZE = 6;
+type InstructorStatusFilter = "all" | InstructorStatus;
+
+interface InstructorListPage {
+  instructors: (InstructorFromDB & { schedules: Schedule[] })[];
+  hasMore: boolean;
+  nextOffset: number;
 }
+
+interface InstructorListReturnState {
+  statusFilter: InstructorStatusFilter;
+  searchTerm: string;
+  debouncedSearchTerm: string;
+  listSession: number;
+  scrollY: number;
+  data: InfiniteData<InstructorListPage, number>;
+  dataUpdatedAt: number;
+}
+
+// One pending return from View Schedule; retain pages even if the query expires.
+let instructorListReturnState: InstructorListReturnState | undefined;
+
+const INSTRUCTOR_STATUS_FILTERS = [
+  {
+    value: "all" as const,
+    label: "All",
+    badgeClass: "bg-primary/10 text-primary",
+    dotClass: "bg-primary",
+  },
+  ...INSTRUCTOR_STATUSES,
+];
+
+// Supabase's `.or()` accepts raw PostgREST filter syntax, so strip the
+// characters that can break an individual filter expression before using a
+// user-entered search term in it.
+const instructorSearchFilter = (searchTerm: string) => {
+  const safeTerm = searchTerm
+    .trim()
+    .replace(/[(),"\\]/g, " ")
+    .replace(/\s+/g, " ");
+
+  if (!safeTerm) return "";
+
+  return [
+    `name.ilike.*${safeTerm}*`,
+    `phone.ilike.*${safeTerm}*`,
+    `car_make.ilike.*${safeTerm}*`,
+    `car_mode.ilike.*${safeTerm}*`,
+    `car_number.ilike.*${safeTerm}*`,
+    `areas.cs.{"${safeTerm}"}`,
+  ].join(",");
+};
 
 // Three-way status setter (Active / On Break / Inactive) shared by the list
 // cards and the instructor profile header. Updates Instructor.status, keeps
@@ -337,13 +514,16 @@ const initialInstructorData: InstructorData = {
   car_mode: "",
   experience: 0,
   car_number: "",
-  areas: [],
   address: "",
   latitude: null,
   longitude: null,
-  radius: 0,
   car_fuel_type: null,
   unavailability: [],
+  serviceZone: null,
+  serviceZoneId: null,
+  // Overwritten from the stored row by handleEditInstructor. A blank form has no
+  // polygon yet, so a new draw defaults to a verified area.
+  serviceZoneIsRough: false,
 };
 
 // Google Maps Autocomplete Component
@@ -489,9 +669,13 @@ const AddressAutocomplete = memo(
   ({
     value,
     onChange,
+    readOnly = false,
+    className,
   }: {
     value: string;
     onChange: (address: string, lat: number | null, lng: number | null) => void;
+    readOnly?: boolean;
+    className?: string;
   }) => {
     const inputRef = useRef<HTMLInputElement>(null);
     const autocompleteRef = useRef<google.maps.places.Autocomplete | null>(
@@ -499,6 +683,8 @@ const AddressAutocomplete = memo(
     );
     const onChangeRef = useRef(onChange);
     const [isScriptLoaded, setIsScriptLoaded] = useState(false);
+    // Flip on first focus/typing; the `places` download waits for this.
+    const [engaged, setEngaged] = useState(false);
     const [internalValue, setInternalValue] = useState(value);
 
     // Keep onChange ref updated to avoid stale closure
@@ -511,49 +697,30 @@ const AddressAutocomplete = memo(
       setInternalValue(value);
     }, [value]);
 
-    // Script loading logic - properly load Google Maps Places API
+    // Script loading logic — delegate to the app-wide single loader.
+    // Injecting the Maps script from here as well made Google warn
+    // "You have included the Google Maps JavaScript API multiple times" and
+    // reject its internal module graph ("Loader.provide not called by
+    // module 'poly'"/"onion"), because the two <script> tags raced.
+    //
+    // Deferred until the field is focused: `places` costs ~486 KB on top of
+    // the 315 KB Maps bootstrap, and this component mounts on several pages
+    // where the user may never open the address field at all.
     useEffect(() => {
-      // Check if already loaded
-      if (window.google?.maps?.places) {
-        setIsScriptLoaded(true);
-        return;
-      }
-
-      // Check if script is already being loaded
-      const existingScript = document.querySelector(
-        'script[src*="maps.googleapis.com/maps/api/js"]',
-      );
-
-      if (existingScript) {
-        // Wait for existing script to load
-        const checkLoaded = setInterval(() => {
-          if (window.google?.maps?.places) {
-            setIsScriptLoaded(true);
-            clearInterval(checkLoaded);
-          }
-        }, 100);
-
-        // Cleanup interval after 10 seconds
-        setTimeout(() => clearInterval(checkLoaded), 10000);
-        return;
-      }
-
-      // Load the script
-      const googleMapScript = document.createElement("script");
-      googleMapScript.src = `https://maps.googleapis.com/maps/api/js?key=${import.meta.env.VITE_GOOGLE_MAPS_API_KEY}&libraries=places`;
-      googleMapScript.async = true;
-      googleMapScript.defer = true;
-
-      googleMapScript.onload = () => {
-        setIsScriptLoaded(true);
+      if (!engaged) return;
+      let active = true;
+      googleMapsLoader
+        .importLibrary("places")
+        .then(() => {
+          if (active) setIsScriptLoaded(true);
+        })
+        .catch(() => {
+          if (active) setIsScriptLoaded(false);
+        });
+      return () => {
+        active = false;
       };
-
-      googleMapScript.onerror = () => {
-        console.error("Failed to load Google Maps script");
-      };
-
-      document.head.appendChild(googleMapScript);
-    }, []);
+    }, [engaged]);
 
     // Add CSS to ensure the dropdown is visible
     useEffect(() => {
@@ -575,7 +742,12 @@ const AddressAutocomplete = memo(
     }, []);
 
     useEffect(() => {
-      if (!inputRef.current || !isScriptLoaded || !window.google?.maps?.places)
+      if (
+        readOnly ||
+        !inputRef.current ||
+        !isScriptLoaded ||
+        !window.google?.maps?.places
+      )
         return;
 
       // Clear previous instance if it exists
@@ -612,7 +784,7 @@ const AddressAutocomplete = memo(
       return () => {
         if (listener) google.maps.event.removeListener(listener);
       };
-    }, [isScriptLoaded]);
+    }, [isScriptLoaded, readOnly]);
 
     const handleManualTyping = (e: React.ChangeEvent<HTMLInputElement>) => {
       const val = e.target.value;
@@ -626,15 +798,27 @@ const AddressAutocomplete = memo(
         <Input
           ref={inputRef}
           value={internalValue}
-          onChange={handleManualTyping}
+          readOnly={readOnly}
+          onChange={(e) => {
+            if (readOnly) return;
+            setEngaged(true);
+            handleManualTyping(e);
+          }}
+          onFocus={() => {
+            if (!readOnly) setEngaged(true);
+          }}
           placeholder="Search address..."
-          className="w-full"
+          className={cn(
+            "w-full",
+            className,
+            readOnly && "bg-muted text-muted-foreground",
+          )}
           autoComplete="off"
           onKeyDown={(e) => {
             if (e.key === "Enter") e.preventDefault();
           }}
         />
-        {!isScriptLoaded && (
+        {engaged && !isScriptLoaded && !readOnly && (
           <div className="mt-1 text-xs text-gray-500">
             Loading address autocomplete...
           </div>
@@ -682,6 +866,26 @@ export default function InstructorsManagement() {
 
   // Review instructors are already filtered by backend based on stage parameter
   const filteredReviewInstructors = reviewInstructors;
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Keep list filters in the route so returning from a schedule restores them.
+  const searchTerm = searchParams.get("search") ?? "";
+  const statusFilter: InstructorStatusFilter =
+    INSTRUCTOR_STATUS_FILTERS.find(
+      ({ value }) => value === searchParams.get("status"),
+    )?.value ?? "all";
+
+  const updateListFilter = (key: "search" | "status", value: string) => {
+    setSearchParams(
+      (previous) => {
+        const next = new URLSearchParams(previous);
+        if (value) next.set(key, value);
+        else next.delete(key);
+        return next;
+      },
+      { replace: true },
+    );
+  };
 
   const { data: currentAdmin } = useCurrentAdmin();
   const { data: currentUser } = useCurrentUser();
@@ -701,9 +905,6 @@ export default function InstructorsManagement() {
     initialInstructorData,
   );
 
-  const [newArea, setNewArea] = useState<string>("");
-  const [areaSearchQuery, setAreaSearchQuery] = useState<string>("");
-  const [isAddingCustomArea, setIsAddingCustomArea] = useState<boolean>(false);
   const [openScheduleDialogId, setOpenScheduleDialogId] = useState<
     string | null
   >(null); // Track which instructor's schedule dialog is open
@@ -719,9 +920,6 @@ export default function InstructorsManagement() {
   const [unavailabilityData, setUnavailabilityData] = useState<
     Partial<Unavailability>
   >({});
-
-  // instructor search bar
-  const [searchTerm, setSearchTerm] = useState("");
 
   // Delete instructor
   const [deleteConfirmInstructorId, setDeleteConfirmInstructorId] = useState<
@@ -874,47 +1072,35 @@ export default function InstructorsManagement() {
     serviceableAreas?.filter((area) =>
       area.name.toLowerCase().includes(areaSearchQuery.toLowerCase()),
     ) || [];
+  const [returnState] = useState(() =>
+    instructorListReturnState?.statusFilter === statusFilter &&
+    instructorListReturnState.searchTerm === searchTerm
+      ? instructorListReturnState
+      : undefined,
+  );
+  const [listSession, setListSession] = useState(returnState?.listSession ?? 0);
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(
+    returnState?.debouncedSearchTerm ?? searchTerm,
+  );
+  const pendingScrollRestorationRef = useRef(returnState);
 
-  // Handle selecting an area from the dropdown
-  const handleSelectArea = (area: ServiceableArea) => {
-    if (!instructorData.areas.includes(area.name)) {
-      setInstructorData({
-        ...instructorData,
-        areas: [...instructorData.areas, area.name],
-      });
-    } else {
-      toast({
-        title: "Area already exists",
-        description: "This area is already added",
-        variant: "destructive",
-      });
-    }
-    setAreaSearchQuery("");
+  const selectStatusFilter = (status: InstructorStatusFilter) => {
+    queryClient.cancelQueries({ queryKey: ["instructors", "list"] });
+    updateListFilter("status", status === "all" ? "" : status);
+    setListSession((session) => session + 1);
   };
 
-  // Handle adding a custom area that's not in the suggestions
-  const handleAddCustomArea = () => {
-    if (!areaSearchQuery.trim()) return;
-
-    // Check if area already exists in instructor's areas
-    if (instructorData.areas.includes(areaSearchQuery.trim())) {
-      toast({
-        title: "Area already exists",
-        description: "This area is already added to the instructor",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    // Add to instructor's areas in local state only
-    setInstructorData({
-      ...instructorData,
-      areas: [...instructorData.areas, areaSearchQuery.trim()],
-    });
-
-    setAreaSearchQuery("");
-    setIsAddingCustomArea(false);
+  const clearStatusFilter = () => {
+    selectStatusFilter("all");
   };
+
+  useEffect(() => {
+    const timeout = window.setTimeout(
+      () => setDebouncedSearchTerm(searchTerm),
+      300,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [searchTerm]);
 
   const handleCarFuelChange = (
     value: "petrol" | "diesel" | "ev" | "cng" | "lpg" | null,
@@ -945,169 +1131,184 @@ export default function InstructorsManagement() {
     [],
   );
 
-  // Fetch all instructors along with their schedules
-  // const { data: instructors, isLoading } = useQuery({
-  //   queryKey: ["instructors"],
-  //   queryFn: async () => {
-  //     const { data, error } = await supabase
-  //       .from("Instructor")
-  //       .select(
-  //         `
-  //         *,
-  //         schedules:Schedule (
-  //           id,
-  //           date,
-  //           start_time,
-  //           end_time,
-  //           learner:learner_id ( name )
-  //         )
-  //       `,
-  //       )
-  //       .order("name");
+  const searchFilter = useMemo(
+    () => instructorSearchFilter(debouncedSearchTerm),
+    [debouncedSearchTerm],
+  );
 
-  //     if (error) throw error;
-  //     return data as (InstructorFromDB & { schedules: Schedule[] })[];
-  //   },
-  // });
-
-  const { data: instructors, isLoading } = useQuery({
-    queryKey: ["instructors"],
+  // Counts are independent HEAD requests: Postgres returns only each exact
+  // count, never the instructor rows used by the card list.
+  const {
+    data: statusCounts = { all: 0, active: 0, on_break: 0, inactive: 0 },
+    isLoading: areStatusCountsLoading,
+    isError: areStatusCountsError,
+  } = useQuery({
+    queryKey: ["instructors", "status-counts"],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("Instructor")
-        .select(
-          `
-          *,
-          schedules:Schedule (
-            id,
-            date,
-            status,
-            pause_reason,
-            pause_notes,
-            start_time,
-            end_time,
-            course_id,
-            isTentative,
-            tentative_details,
-            learner:learner_id ( name, phone, pick_up_location, address_lat, address_lng),
-            lesson:lesson_id (number)
-          )
-        `,
-          {
-            // This is the options object, placed outside the string
-            count: "exact",
-            head: false,
-            foreignTableJoins: "schedules(left)",
-          },
-        )
-        .order("name");
+      const entries = await Promise.all(
+        INSTRUCTOR_STATUS_FILTERS.map(async ({ value }) => {
+          let query = supabase
+            .from("Instructor")
+            .select("id_instructor", { count: "exact", head: true });
 
-      if (error) throw error;
-      return data as (InstructorFromDB & { schedules: Schedule[] })[];
+          if (value !== "all") query = query.eq("status", value);
+
+          const { count, error } = await query;
+          if (error) throw error;
+          return [value, count ?? 0] as const;
+        }),
+      );
+
+      return Object.fromEntries(entries) as Record<
+        InstructorStatusFilter,
+        number
+      >;
     },
   });
 
-  // Memoized to avoid re-rendering full calender when filling calender events input fields
-  const memoizedInstructors = useMemo(() => instructors, [instructors]);
+  const isReturningToList =
+    returnState?.statusFilter === statusFilter &&
+    returnState.debouncedSearchTerm === debouncedSearchTerm &&
+    returnState.listSession === listSession;
 
-  const searchedInstructors = useMemo(() => {
-    if (!memoizedInstructors) return [];
+  const {
+    data: instructorPages,
+    dataUpdatedAt,
+    isLoading: isInstructorListLoading,
+    isError: isInstructorListError,
+    error: instructorListError,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery<
+    InstructorListPage,
+    Error,
+    InfiniteData<InstructorListPage, number>,
+    (string | number)[],
+    number
+  >({
+    queryKey: [
+      "instructors",
+      "list",
+      statusFilter,
+      debouncedSearchTerm,
+      listSession,
+    ],
+    initialData: isReturningToList ? returnState.data : undefined,
+    initialDataUpdatedAt: isReturningToList
+      ? returnState.dataUpdatedAt
+      : undefined,
+    // Reuse the loaded pages on return, but still refresh explicitly invalidated data.
+    refetchOnMount: (query) => !isReturningToList || query.state.isInvalidated,
+    initialPageParam: 0,
+    queryFn: async ({ pageParam, signal }) => {
+      // Fetch one extra row so we can detect another page without running an
+      // additional count query for the card list.
+      let query = supabase
+        .from("Instructor")
+        .select("*")
+        .order("name")
+        .order("id_instructor")
+        .range(pageParam, pageParam + INSTRUCTOR_PAGE_SIZE)
+        .abortSignal(signal);
 
-    const query = searchTerm.toLowerCase();
+      if (statusFilter !== "all") query = query.eq("status", statusFilter);
+      if (searchFilter) query = query.or(searchFilter);
 
-    return memoizedInstructors.filter((instructor) => {
-      const nameMatch = instructor.name?.toLowerCase().includes(query);
-      const phoneMatch = instructor.phone?.toLowerCase().includes(query);
-      const carMatch = `${instructor.car_mode ?? ''}${instructor.car_number ?? ''}`
-        .toLowerCase()
-        .includes(query);
-      const areaMatch = instructor.areas?.some((area) =>
-        area.toLowerCase().includes(query),
-      );
+      const { data, error } = await query;
+      if (error) throw error;
 
-      return nameMatch || phoneMatch || carMatch || areaMatch;
-    });
-  }, [searchTerm, memoizedInstructors]);
+      // Schedule-heavy detail views fetch their own data. Keeping schedules
+      // out of the card query prevents one instructor page from expanding
+      // into an unbounded schedule download.
+      const rows = (data ?? []).map((instructor) => ({
+        ...instructor,
+        schedules: [] as Schedule[],
+      })) as unknown as (InstructorFromDB & { schedules: Schedule[] })[];
 
-  // Per-status counts shown beside the filter chips, computed on the
-  // search-filtered list so they always describe what's on screen.
-  const statusCounts = useMemo(() => {
-    const counts: Record<InstructorStatus, number> = {
-      active: 0,
-      on_break: 0,
-      inactive: 0,
-    };
-    for (const instructor of searchedInstructors) {
-      counts[resolveInstructorStatus(instructor)] += 1;
-    }
-    return counts;
-  }, [searchedInstructors]);
-
-  const filteredInstructors = useMemo(() => {
-    if (statusFilter.length === 0) return searchedInstructors;
-    return searchedInstructors.filter((instructor) =>
-      statusFilter.includes(resolveInstructorStatus(instructor)),
-    );
-  }, [searchedInstructors, statusFilter]);
-
-  // Fixes mutation refresh lag
-  // Define a stable function to update the schedule cache
-  const updateScheduleCache = useCallback(
-    (instructorId: string, updatedSchedule: Schedule) => {
-      queryClient.setQueryData(
-        ["instructors"],
-        (
-          oldInstructors:
-            | (InstructorFromDB & { schedules: Schedule[] })[]
-            | undefined,
-        ) => {
-          if (!oldInstructors) return oldInstructors;
-
-          return oldInstructors.map((instructor) => {
-            if (instructor.id_instructor !== instructorId) {
-              return instructor;
-            }
-
-            // Update the schedules array for the matching instructor: replace or add
-            const newSchedules = instructor.schedules.some(
-              (sch) => sch.id === updatedSchedule.id,
-            )
-              ? instructor.schedules.map((sch) =>
-                  sch.id === updatedSchedule.id ? updatedSchedule : sch,
-                )
-              : [...instructor.schedules, updatedSchedule]; // Add if new
-
-            return { ...instructor, schedules: newSchedules };
-          });
-        },
-      );
+      return {
+        instructors: rows.slice(0, INSTRUCTOR_PAGE_SIZE),
+        hasMore: rows.length > INSTRUCTOR_PAGE_SIZE,
+        nextOffset: pageParam + INSTRUCTOR_PAGE_SIZE,
+      };
     },
-    [queryClient],
+    getNextPageParam: (lastPage) =>
+      lastPage.hasMore ? lastPage.nextOffset : undefined,
+  });
+
+  const instructors = useMemo(
+    () => instructorPages?.pages.flatMap((page) => page.instructors) ?? [],
+    [instructorPages],
   );
+
+  useLayoutEffect(() => {
+    const saved = pendingScrollRestorationRef.current;
+    if (!saved || !instructorPages || isInstructorListLoading) return;
+
+    if (
+      saved.statusFilter === statusFilter &&
+      saved.searchTerm === searchTerm
+    ) {
+      window.scrollTo({ top: saved.scrollY, behavior: "instant" });
+    }
+    pendingScrollRestorationRef.current = undefined;
+    if (instructorListReturnState === saved)
+      instructorListReturnState = undefined;
+  }, [instructorPages, isInstructorListLoading, searchTerm, statusFilter]);
+
+  const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const sentinel = loadMoreSentinelRef.current;
+    if (!sentinel || !hasNextPage) return;
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting && !isFetchingNextPage) {
+          fetchNextPage();
+        }
+      },
+      { rootMargin: "0px 0px 200px" },
+    );
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
+
+  // Reverse sync: pick up Schedule changes made elsewhere (e.g. a tentative
+  // slot booked from the Sales Dashboard) without requiring a manual reload.
+  // Broadly invalidates on any Schedule change rather than filtering by
+  // instructor server-side -- this list can show many instructors' schedules
+  // at once (each row's embedded `schedules`), so there's no single id to
+  // filter on. Mirrors the same invalidateQueries(["instructors"]) call this
+  // component already makes after its own tentative-schedule mutations
+  // succeed. Requires Realtime replication to be enabled for the "Schedule"
+  // table in Supabase (Database -> Replication, or `alter publication
+  // supabase_realtime add table "Schedule";` in the SQL editor) -- without
+  // it this subscription connects but never receives events.
+  useEffect(() => {
+    const channel = supabase
+      .channel("instructor-mgmt-schedule-sync")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "Schedule" },
+        () => {
+          void queryClient.invalidateQueries({ queryKey: ["instructors"] });
+        },
+      )
+      .subscribe();
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [queryClient]);
 
   // Add or update an instructor
   const mutation = useMutation({
     mutationFn: async (data: InstructorData) => {
-      // First, check for any new areas that need to be added to Serviceable_Areas table
-      const newAreas = [];
-      for (const area of data.areas) {
-        const { data: existingArea } = await supabase
-          .from("Serviceable_Areas")
-          .select("id, name")
-          .ilike("name", area)
-          .maybeSingle();
-
-        if (!existingArea) {
-          newAreas.push(area);
-        }
-      }
-
-      // Add any new areas to the Serviceable_Areas table
-      if (newAreas.length > 0) {
-        const areasToInsert = newAreas.map((area) => ({ name: area }));
-        await supabase.from("Serviceable_Areas").insert(areasToInsert);
-      }
-
+      // Note: `areas` and `radius` are intentionally not written here. Coverage
+      // is now expressed by the service-area polygon in instructor_service_zones,
+      // so editing an instructor leaves the legacy columns untouched rather than
+      // clobbering them with an empty value.
       // Now proceed with instructor update/insert
       if (formMode === "add") {
         const { data: newInstructor, error } = await supabase
@@ -1122,11 +1323,9 @@ export default function InstructorsManagement() {
               car_mode: data.car_mode,
               experience: data.experience,
               car_number: data.car_number,
-              areas: data.areas,
               address: data.address,
               latitude: data.latitude,
               longitude: data.longitude,
-              radius: data.radius,
               car_fuel_type: data.car_fuel_type,
               unavailability: data.unavailability,
             },
@@ -1151,11 +1350,9 @@ export default function InstructorsManagement() {
             car_mode: data.car_mode,
             experience: data.experience,
             car_number: data.car_number,
-            areas: data.areas,
             address: data.address,
             latitude: data.latitude,
             longitude: data.longitude,
-            radius: data.radius,
             car_fuel_type: data.car_fuel_type,
             unavailability: data.unavailability,
           })
@@ -1163,12 +1360,49 @@ export default function InstructorsManagement() {
           .select();
 
         if (error) throw error;
+
+        // Service-area polygon: one row per instructor, keyed by instructor_id.
+        // A null serviceZone means the admin cleared it, so delete the row.
+        const zone =
+          data.serviceZone && data.serviceZone.length >= 3
+            ? data.serviceZone
+            : null;
+
+        // Written against the zone row id so exactly one row is touched. A null
+        // serviceZoneId means the admin drew a polygon for an instructor who
+        // had none.
+        if (zone) {
+          // `isRough` is always sent, including `false`: refining a rough
+          // boundary through this dialog is how an area gets promoted to a
+          // verified serviceability zone, and omitting the key would leave
+          // is_rough = true behind.
+          if (data.serviceZoneId) {
+            await updateZoneById({
+              zoneId: data.serviceZoneId,
+              coordinates: zone,
+              isRough: data.serviceZoneIsRough,
+            });
+          } else {
+            await insertZone({
+              instructorId: data.id_instructor,
+              coordinates: zone,
+              isRough: data.serviceZoneIsRough,
+            });
+          }
+        } else if (data.serviceZoneId) {
+          await deleteZoneById(data.serviceZoneId);
+        }
+
         return updatedInstructor;
       }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["instructors"] });
       queryClient.invalidateQueries({ queryKey: ["serviceable-areas"] });
+      // The sales dashboard caches instructor_service_zones at module scope, so
+      // a polygon just written (or deleted) would otherwise be served stale for
+      // the rest of the SPA session.
+      invalidateDbZoneCache();
       setIsDialogOpen(false);
       resetForm();
       toast({
@@ -1234,15 +1468,6 @@ export default function InstructorsManagement() {
       return;
     }
 
-    if (instructorData.areas.length === 0) {
-      toast({
-        title: "Error",
-        description: "At least one area is required",
-        variant: "destructive",
-      });
-      return;
-    }
-
     if (!instructorData.latitude || !instructorData.longitude) {
       toast({
         title: "Error",
@@ -1267,11 +1492,9 @@ export default function InstructorsManagement() {
       car_mode: instructor.car_mode || "",
       experience: instructor.experience || 0,
       car_number: instructor.car_number || "",
-      areas: instructor.areas || [],
       address: instructor.address || "",
       latitude: instructor.latitude || null,
       longitude: instructor.longitude || null,
-      radius: instructor.radius || 0,
       car_fuel_type: instructor.car_fuel_type as
         | "petrol"
         | "diesel"
@@ -1280,8 +1503,71 @@ export default function InstructorsManagement() {
         | "lpg"
         | null,
       unavailability: instructor.unavailability || [],
+      serviceZone: null,
+      serviceZoneId: null,
+      // Replaced from the stored row below; this is only the pre-load value.
+      serviceZoneIsRough: false,
     });
     setIsDialogOpen(true);
+
+    // Load the stored polygon so the drawing editor opens on the existing area.
+    // `.limit(1)` + array rather than `maybeSingle()`: maybeSingle() raises an
+    // error when it finds more than one row, and a row could appear here if an
+    // instructor is re-created with a reused id. Taking the first row keeps the
+    // dialog opening instead of failing.
+    void (async () => {
+      type ZoneRow = {
+        id: string;
+        coordinates: unknown;
+        is_rough?: boolean | null;
+      };
+      let zoneRow: ZoneRow | undefined;
+      {
+        const base = () =>
+          supabase
+            .from("instructor_service_zones")
+            .select("id,coordinates,is_rough")
+            .eq("instructor_id", instructor.id_instructor)
+            .eq("kind", "polygon")
+            .limit(1);
+        const first = await base();
+        if (first.error) {
+          // `is_rough` arrives with migration 20261001_100000, which is DDL and
+          // manually applied. A not-yet-migrated database rejects the whole
+          // select instead of omitting the column, so retry without it and treat
+          // the row as NOT rough: on a database that has never stored the flag
+          // there are no rough polygons, and every existing row is a verified
+          // service area.
+          const retry = await supabase
+            .from("instructor_service_zones")
+            .select("id,coordinates")
+            .eq("instructor_id", instructor.id_instructor)
+            .eq("kind", "polygon")
+            .limit(1);
+          if (retry.error) return;
+          zoneRow = (retry.data?.[0] ?? undefined) as ZoneRow | undefined;
+          if (zoneRow) zoneRow.is_rough = false;
+        } else {
+          zoneRow = (first.data?.[0] ?? undefined) as ZoneRow | undefined;
+        }
+      }
+      if (!zoneRow || !Array.isArray(zoneRow.coordinates)) return;
+      const coords = zoneRow.coordinates as ZoneCoordinate[];
+      if (coords.length < 3) return;
+
+      // Guard against a slow response landing after the dialog was reopened
+      // for a different instructor.
+      setInstructorData((prev) =>
+        prev.id_instructor === instructor.id_instructor
+          ? {
+              ...prev,
+              serviceZone: coords,
+              serviceZoneId: zoneRow.id as string,
+              serviceZoneIsRough: zoneRow.is_rough === true,
+            }
+          : prev,
+      );
+    })();
   };
 
   const handleAddNewInstructor = () => {
@@ -1297,28 +1583,22 @@ export default function InstructorsManagement() {
 
   const resetForm = () => {
     setInstructorData(initialInstructorData);
-    setNewArea("");
-    setAreaSearchQuery("");
-    setIsAddingCustomArea(false);
-  };
-
-  const handleRemoveArea = (areaToRemove: string) => {
-    setInstructorData({
-      ...instructorData,
-      areas: instructorData.areas.filter((area) => area !== areaToRemove),
-    });
-  };
-
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      handleAddCustomArea();
-    }
   };
 
   const handleOpenScheduleDialog = (id: string) => {
     console.log("Open schedule fo id`", id);
-    navigate(id);
+    if (instructorPages) {
+      instructorListReturnState = {
+        statusFilter,
+        searchTerm,
+        debouncedSearchTerm,
+        listSession,
+        scrollY: window.scrollY,
+        data: instructorPages,
+        dataUpdatedAt,
+      };
+    }
+    navigate({ pathname: id, search: searchParams.toString() });
     // setOpenScheduleDialogId(id); // Set the ID of the instructor whose dialog is open
   };
 
@@ -1355,6 +1635,13 @@ export default function InstructorsManagement() {
         </Button>
         <h1 className="text-2xl font-bold">Instructor Management</h1>
         <div className="flex gap-2">
+          <Button
+            variant="outline"
+            onClick={() => navigate("/admin/instructor-zone-map")}
+          >
+            <Map className="mr-2 h-4 w-4" />
+            Instructor Polygon Map
+          </Button>
           <Button onClick={handleAddNewInstructor}>
             <PlusCircle className="mr-2 h-4 w-4" />
             Onboard Instructor
@@ -1373,44 +1660,61 @@ export default function InstructorsManagement() {
           <Input
             placeholder="Search instructors by name, phone, car, or area..."
             value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
+            onChange={(e) => updateListFilter("search", e.target.value)}
             className="pl-10"
           />
         </div>
       </div>
 
-      {/* Status Filter — multi-select chips with OR logic; none selected
-          shows everyone. Counts reflect the current search results. */}
+      {/* Each status opens its own paginated instructor list. */}
       <div className="mb-6 flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium text-muted-foreground">
           Status:
         </span>
-        {INSTRUCTOR_STATUSES.map((s) => {
-          const selected = statusFilter.includes(s.value);
+        {INSTRUCTOR_STATUS_FILTERS.map((s) => {
+          const selected = statusFilter === s.value;
+          const displayedCount = areStatusCountsLoading
+            ? "…"
+            : areStatusCountsError
+              ? "—"
+              : statusCounts[s.value];
+
           return (
-            <button
+            <div
               key={s.value}
               type="button"
               onClick={() => handleStatusFilterClick(s.value)}
               className={cn(
-                "flex items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors",
+                "inline-flex items-center overflow-hidden rounded-full border text-sm transition-colors",
                 selected
                   ? cn(s.badgeClass, "border-transparent font-semibold")
-                  : "border-input bg-white text-muted-foreground hover:bg-muted",
+                  : "border-input bg-white text-muted-foreground",
               )}
             >
-              {selected && <Check className="h-3.5 w-3.5" />}
-              <span className={cn("h-2 w-2 rounded-full", s.dotClass)} />
-              {s.label}
-              <span
+              <button
+                type="button"
+                aria-pressed={selected}
+                onClick={() => selectStatusFilter(s.value)}
                 className={cn(
-                  "rounded-full px-1.5 text-xs font-semibold",
-                  selected ? "bg-white/60" : "bg-muted",
+                  "flex items-center gap-2 py-1 pl-3 pr-2 transition-colors",
+                  !selected && "hover:bg-muted",
                 )}
               >
-                {statusCounts[s.value]}
-              </span>
-            </button>
+                {selected && <Check className="h-3.5 w-3.5" />}
+                <span className={cn("h-2 w-2 rounded-full", s.dotClass)} />
+                {s.label}
+              </button>
+              <button
+                type="button"
+                disabled={areStatusCountsLoading}
+                onClick={() => selectStatusFilter(s.value)}
+                aria-label={`Load ${s.label} instructors (${displayedCount})`}
+                title={`Load ${s.label} instructors`}
+                className="hover:ring-current/20 mr-1 cursor-pointer rounded-full bg-white/60 px-1.5 text-xs font-semibold transition-shadow hover:ring-2 disabled:cursor-wait"
+              >
+                {displayedCount}
+              </button>
+            </div>
           );
         })}
         <button
@@ -1524,229 +1828,257 @@ export default function InstructorsManagement() {
           </div>
         )
       ) : isLoading ? (
+          onClick={clearStatusFilter}
+          className="flex items-center gap-1 text-sm text-muted-foreground underline-offset-2 hover:underline"
+        >
+          <X className="h-3.5 w-3.5" />
+          Clear filter
+        </button>
+      </div>
+      {isInstructorListLoading ? (
         <div className="flex h-64 items-center justify-center">
           <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent">
             <ChevronsUpDown> </ChevronsUpDown>
           </div>
         </div>
+      ) : isInstructorListError ? (
+        <div className="flex h-48 items-center justify-center rounded-lg border border-destructive/30 bg-destructive/5 px-6 text-center text-sm text-destructive">
+          {instructorListError instanceof Error
+            ? instructorListError.message
+            : "Unable to load instructors."}
+        </div>
+      ) : instructors.length === 0 ? (
+        <div className="flex h-48 items-center justify-center rounded-lg border border-dashed bg-white/70 px-6 text-center text-sm text-muted-foreground">
+          No instructors match the selected status and search.
+        </div>
       ) : (
-        <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-          {filteredInstructors?.map((instructor) => (
-            <Card
-              key={instructor.id_instructor}
-              className="flex h-full flex-col overflow-hidden rounded-lg shadow-lg"
-            >
-              <CardHeader className="bg-primary p-4 text-white">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <CardTitle className="text-lg font-bold">
-                      {instructor.name}
-                    </CardTitle>
-                    <p className="text-sm">
-                      {instructor.email || "No email provided"}
-                    </p>
+        <>
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+            {instructors.map((instructor) => (
+              <Card
+                key={instructor.id_instructor}
+                className="flex h-full flex-col overflow-hidden rounded-lg shadow-lg"
+              >
+                <CardHeader className="bg-primary p-4 text-white">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <CardTitle className="text-lg font-bold">
+                        {instructor.name}
+                      </CardTitle>
+                      <p className="text-sm">
+                        {instructor.email || "No email provided"}
+                      </p>
+                    </div>
+                    <span
+                      className={cn(
+                        "shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold",
+                        instructorStatusMeta(
+                          resolveInstructorStatus(instructor),
+                        ).badgeClass,
+                      )}
+                    >
+                      {
+                        instructorStatusMeta(
+                          resolveInstructorStatus(instructor),
+                        ).label
+                      }
+                    </span>
                   </div>
-                  <span
-                    className={cn(
-                      "shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold",
-                      instructorStatusMeta(resolveInstructorStatus(instructor))
-                        .badgeClass,
-                    )}
-                  >
-                    {
-                      instructorStatusMeta(resolveInstructorStatus(instructor))
-                        .label
+                </CardHeader>
+                <CardContent className="space-y-4 p-4">
+                  <div className="space-y-2">
+                    <div>
+                      <span className="text-sm font-medium text-muted-foreground">
+                        Phone:
+                      </span>
+                      <p>
+                        {canViewUnmaskedPhoneNumbers
+                          ? instructor.phone
+                          : maskPhoneNumber(instructor.phone)}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-muted-foreground">
+                        Address:
+                      </span>
+                      <p>{instructor.address || "No address provided"}</p>
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-muted-foreground">
+                        Radius:
+                      </span>
+                      <p>
+                        {instructor.radius
+                          ? `${instructor.radius} km`
+                          : "No radius provided"}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-muted-foreground">
+                        DL Number:
+                      </span>
+                      <p>{instructor.DL_number || "Not provided"}</p>
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-muted-foreground">
+                        Car Details:
+                      </span>
+                      <p>
+                        {instructor.car_make || "N/A"} -{" "}
+                        {instructor.car_mode || "N/A"} (
+                        {instructor.car_number
+                          ? canViewUnmaskedCarNumbers
+                            ? instructor.car_number
+                            : maskCarNumber(instructor.car_number)
+                          : "N/A"}
+                        )
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-muted-foreground">
+                        Experience:
+                      </span>
+                      <p>{instructor.experience || "Not provided"}</p>
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-muted-foreground">
+                        Areas:
+                      </span>
+                      <div className="mt-1 flex flex-wrap gap-2">
+                        {instructor.areas?.map((area: string) => (
+                          <span
+                            key={area}
+                            className="inline-block rounded bg-muted px-2 py-1 text-xs"
+                          >
+                            {area}
+                          </span>
+                        )) || "No areas assigned"}
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+                {/* View Schedule Button */}
+                <div className="mt-auto flex flex-col gap-2 p-4">
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    onClick={() =>
+                      handleOpenScheduleDialog(instructor.id_instructor)
                     }
-                  </span>
+                  >
+                    View Schedule
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    onClick={() =>
+                      handleOpenSearchScheduleDialog(instructor.id_instructor)
+                    }
+                  >
+                    Search Schedule
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => handleEditInstructor(instructor)}
+                  >
+                    Edit Details
+                  </Button>
+                  <div className="flex w-full items-center justify-between gap-2 rounded-md border px-3 py-1.5">
+                    <span className="text-sm text-muted-foreground">
+                      Status
+                    </span>
+                    <InstructorStatusControl
+                      instructorId={instructor.id_instructor}
+                      status={resolveInstructorStatus(instructor)}
+                      size="compact"
+                    />
+                  </div>
+                  <Button
+                    variant="destructive"
+                    className="w-full"
+                    onClick={() =>
+                      setDeleteConfirmInstructorId(instructor.id_instructor)
+                    }
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    Delete Instructor
+                  </Button>
                 </div>
-              </CardHeader>
-              <CardContent className="space-y-4 p-4">
-                <div className="space-y-2">
-                  <div>
-                    <span className="text-sm font-medium text-muted-foreground">
-                      Phone:
-                    </span>
-                    <p>{canViewUnmaskedPhoneNumbers ? instructor.phone : maskPhoneNumber(instructor.phone)}</p>
-                  </div>
-                  <div>
-                    <span className="text-sm font-medium text-muted-foreground">
-                      Address:
-                    </span>
-                    <p>{instructor.address || "No address provided"}</p>
-                  </div>
-                  <div>
-                    <span className="text-sm font-medium text-muted-foreground">
-                      Radius:
-                    </span>
-                    <p>
-                      {instructor.radius
-                        ? `${instructor.radius} km`
-                        : "No radius provided"}
-                    </p>
-                  </div>
-                  <div>
-                    <span className="text-sm font-medium text-muted-foreground">
-                      DL Number:
-                    </span>
-                    <p>{instructor.DL_number || "Not provided"}</p>
-                  </div>
-                  <div>
-                    <span className="text-sm font-medium text-muted-foreground">
-                      Car Details:
-                    </span>
-                    <p>
-                      {instructor.car_make || "N/A"} -{" "}
-                      {instructor.car_mode || "N/A"} (
-                      {instructor.car_number
-                        ? canViewUnmaskedCarNumbers
-                          ? instructor.car_number
-                          : maskCarNumber(instructor.car_number)
-                        : "N/A"})
-                    </p>
-                  </div>
-                  <div>
-                    <span className="text-sm font-medium text-muted-foreground">
-                      Experience:
-                    </span>
-                    <p>{instructor.experience || "Not provided"}</p>
-                  </div>
-                  <div>
-                    <span className="text-sm font-medium text-muted-foreground">
-                      Areas:
-                    </span>
-                    <div className="mt-1 flex flex-wrap gap-2">
-                      {instructor.areas?.map((area: string) => (
-                        <span
-                          key={area}
-                          className="inline-block rounded bg-muted px-2 py-1 text-xs"
+
+                {/* Delete Confirmation Dialog */}
+                {deleteConfirmInstructorId === instructor.id_instructor && (
+                  <Dialog
+                    open={true}
+                    onOpenChange={() => setDeleteConfirmInstructorId(null)}
+                  >
+                    <DialogContent>
+                      <DialogHeader>
+                        <DialogTitle>Delete Instructor</DialogTitle>
+                        <DialogDescription>
+                          Are you sure you want to delete{" "}
+                          <strong>{instructor.name}</strong>? This will:
+                          <ul className="mt-2 list-disc space-y-1 pl-5 text-left">
+                            <li>
+                              Remove all upcoming booked schedules for this
+                              instructor
+                            </li>
+                            <li>
+                              Mark affected learners as needing rescheduling
+                            </li>
+                            <li>Permanently delete the instructor record</li>
+                          </ul>
+                          <p className="mt-2 font-semibold text-destructive">
+                            This action cannot be undone.
+                          </p>
+                        </DialogDescription>
+                      </DialogHeader>
+                      <DialogFooter className="gap-2">
+                        <Button
+                          variant="outline"
+                          onClick={() => setDeleteConfirmInstructorId(null)}
                         >
-                          {area}
-                        </span>
-                      )) || "No areas assigned"}
-                    </div>
-                  </div>
-                </div>
-              </CardContent>
-              {/* View Schedule Button */}
-              <div className="mt-auto flex flex-col gap-2 p-4">
-                <Button
-                  variant="outline"
-                  className="w-full"
-                  onClick={() =>
-                    handleOpenScheduleDialog(instructor.id_instructor)
-                  }
-                >
-                  View Schedule
-                </Button>
-                <Button
-                  variant="outline"
-                  className="w-full"
-                  onClick={() =>
-                    handleOpenSearchScheduleDialog(instructor.id_instructor)
-                  }
-                >
-                  Search Schedule
-                </Button>
-                <Button
-                  variant="outline"
-                  className="w-full"
-                  onClick={() => handleEditInstructor(instructor)}
-                >
-                  Edit Details
-                </Button>
-                <div className="flex w-full items-center justify-between gap-2 rounded-md border px-3 py-1.5">
-                  <span className="text-sm text-muted-foreground">Status</span>
-                  <InstructorStatusControl
-                    instructorId={instructor.id_instructor}
-                    status={resolveInstructorStatus(instructor)}
-                    size="compact"
-                  />
-                </div>
-                <Button
-                  variant="destructive"
-                  className="w-full"
-                  onClick={() =>
-                    setDeleteConfirmInstructorId(instructor.id_instructor)
-                  }
-                >
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  Delete Instructor
-                </Button>
-              </div>
+                          Cancel
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          disabled={deleteInstructorMutation.isPending}
+                          onClick={() =>
+                            deleteInstructorMutation.mutate(
+                              instructor.id_instructor,
+                            )
+                          }
+                        >
+                          {deleteInstructorMutation.isPending
+                            ? "Deleting..."
+                            : "Delete"}
+                        </Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
+                )}
 
-              {/* Delete Confirmation Dialog */}
-              {deleteConfirmInstructorId === instructor.id_instructor && (
-                <Dialog
-                  open={true}
-                  onOpenChange={() => setDeleteConfirmInstructorId(null)}
-                >
-                  <DialogContent>
-                    <DialogHeader>
-                      <DialogTitle>Delete Instructor</DialogTitle>
-                      <DialogDescription>
-                        Are you sure you want to delete{" "}
-                        <strong>{instructor.name}</strong>? This will:
-                        <ul className="mt-2 list-disc space-y-1 pl-5 text-left">
-                          <li>
-                            Remove all upcoming booked schedules for this
-                            instructor
-                          </li>
-                          <li>
-                            Mark affected learners as needing rescheduling
-                          </li>
-                          <li>Permanently delete the instructor record</li>
-                        </ul>
-                        <p className="mt-2 font-semibold text-destructive">
-                          This action cannot be undone.
-                        </p>
-                      </DialogDescription>
-                    </DialogHeader>
-                    <DialogFooter className="gap-2">
-                      <Button
-                        variant="outline"
-                        onClick={() => setDeleteConfirmInstructorId(null)}
-                      >
-                        Cancel
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        disabled={deleteInstructorMutation.isPending}
-                        onClick={() =>
-                          deleteInstructorMutation.mutate(
-                            instructor.id_instructor,
-                          )
-                        }
-                      >
-                        {deleteInstructorMutation.isPending
-                          ? "Deleting..."
-                          : "Delete"}
-                      </Button>
-                    </DialogFooter>
-                  </DialogContent>
-                </Dialog>
-              )}
-
-              {/* Schedule Dialog */}
-              {openScheduleDialogId === instructor.id_instructor && (
-                <Dialog open={true} onOpenChange={handleCloseScheduleDialog}>
-                  <DialogContent className="p-4 sm:max-w-[1200px]">
-                    <DialogHeader className="mb-0 p-0">
-                      <DialogTitle className="p-0 text-base font-semibold">
-                        {instructor.name}'s Weekly Schedule
-                      </DialogTitle>
-                    </DialogHeader>
-                    <div className="mt-1">
-                      <WeeklyScheduleView
-                        instructor_id={instructor.id_instructor}
-                        instructorName={instructor.name}
-                        // Pass schedules and unavailability to the schedule view
-                        schedules={instructor.schedules}
-                        unavailability={instructor.unavailability || []}
-                      />
-                    </div>
-                    {/* <DialogFooter className="pt-0 p-0 mt-2 flex justify-end">  */}
-                    {/* Reduced vertical padding (p-0, pt-0) and kept small top margin (mt-2) */}
-                    {/* <Button
+                {/* Schedule Dialog */}
+                {openScheduleDialogId === instructor.id_instructor && (
+                  <Dialog open={true} onOpenChange={handleCloseScheduleDialog}>
+                    <DialogContent className="p-4 sm:max-w-[1200px]">
+                      <DialogHeader className="mb-0 p-0">
+                        <DialogTitle className="p-0 text-base font-semibold">
+                          {instructor.name}'s Weekly Schedule
+                        </DialogTitle>
+                      </DialogHeader>
+                      <div className="mt-1">
+                        <WeeklyScheduleView
+                          instructor_id={instructor.id_instructor}
+                          instructorName={instructor.name}
+                          // Pass schedules and unavailability to the schedule view
+                          schedules={instructor.schedules}
+                          unavailability={instructor.unavailability || []}
+                        />
+                      </div>
+                      {/* <DialogFooter className="pt-0 p-0 mt-2 flex justify-end">  */}
+                      {/* Reduced vertical padding (p-0, pt-0) and kept small top margin (mt-2) */}
+                      {/* <Button
                         variant="outline"
                         size="xs" 
                         className="h-6 px-2 py-0 text-xs" // Explicitly set height, horizontal padding, zero vertical padding, and smallest text size
@@ -1754,45 +2086,63 @@ export default function InstructorsManagement() {
                       >
                         Close
                       </Button> */}
-                    {/* </DialogFooter> */}
-                  </DialogContent>
-                </Dialog>
-              )}
-              {/* Search schedule dialog */}
-              {openSearchScheduleDialogId === instructor.id_instructor && (
-                <Dialog
-                  key={instructor.id_instructor}
-                  open={true}
-                  onOpenChange={handleCloseSearchScheduleDialog}
-                >
-                  <DialogContent className="sm:max-w-[1200px]">
-                    <DialogHeader>
-                      <DialogTitle>
-                        Search {instructor.name}'s Schedule
-                      </DialogTitle>
-                    </DialogHeader>
-                    <div className="mt-4">
-                      {/* {instructor.id_instructor} */}
-                      <SearchInstructorScheduleInfo
-                        instructorId={instructor.id_instructor}
-                        openFlag={!!openSearchScheduleDialogId}
-                        closeAction={() => setOpenSearchScheduleDialogId(null)}
-                      />
-                    </div>
-                    <DialogFooter>
-                      <Button
-                        variant="outline"
-                        onClick={handleCloseSearchScheduleDialog}
-                      >
-                        Close
-                      </Button>
-                    </DialogFooter>
-                  </DialogContent>
-                </Dialog>
-              )}
-            </Card>
-          ))}
-        </div>
+                      {/* </DialogFooter> */}
+                    </DialogContent>
+                  </Dialog>
+                )}
+                {/* Search schedule dialog */}
+                {openSearchScheduleDialogId === instructor.id_instructor && (
+                  <Dialog
+                    key={instructor.id_instructor}
+                    open={true}
+                    onOpenChange={handleCloseSearchScheduleDialog}
+                  >
+                    <DialogContent className="sm:max-w-[1200px]">
+                      <DialogHeader>
+                        <DialogTitle>
+                          Search {instructor.name}'s Schedule
+                        </DialogTitle>
+                      </DialogHeader>
+                      <div className="mt-4">
+                        {/* {instructor.id_instructor} */}
+                        <SearchInstructorScheduleInfo
+                          instructorId={instructor.id_instructor}
+                          openFlag={!!openSearchScheduleDialogId}
+                          closeAction={() =>
+                            setOpenSearchScheduleDialogId(null)
+                          }
+                        />
+                      </div>
+                      <DialogFooter>
+                        <Button
+                          variant="outline"
+                          onClick={handleCloseSearchScheduleDialog}
+                        >
+                          Close
+                        </Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
+                )}
+              </Card>
+            ))}
+          </div>
+          <div
+            ref={loadMoreSentinelRef}
+            className="flex min-h-16 items-center justify-center py-4 text-sm text-muted-foreground"
+          >
+            {isFetchingNextPage ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Loading more instructors…
+              </>
+            ) : hasNextPage ? (
+              "Scroll to load more"
+            ) : (
+              `All ${instructors.length} matching instructor${instructors.length === 1 ? "" : "s"} loaded`
+            )}
+          </div>
+        </>
       )}
 
       {/* Add/Edit Instructor Dialog */}
@@ -1877,24 +2227,59 @@ export default function InstructorsManagement() {
                   />
                 </div>
               </div>
-              <div className="grid grid-cols-4 items-center gap-4">
-                <Label htmlFor="radius" className="text-right">
-                  Radius (km)
-                </Label>
-                <Input
-                  id="radius"
-                  type="number"
-                  value={instructorData.radius}
-                  onChange={(e) =>
-                    setInstructorData({
-                      ...instructorData,
-                      radius: parseFloat(e.target.value) || 0,
-                    })
-                  }
-                  min={0}
-                  className="col-span-3"
-                  onWheel={(e) => e.currentTarget.blur()}
-                />
+              <div className="grid grid-cols-4 gap-4">
+                <Label className="pt-2 text-right">Service Area</Label>
+                <div className="col-span-3">
+                  <ZoneDrawingEditor
+                    coordinates={instructorData.serviceZone}
+                    onChange={(serviceZone) =>
+                      setInstructorData((prev) => ({
+                        ...prev,
+                        serviceZone,
+                      }))
+                    }
+                    center={
+                      instructorData.latitude != null &&
+                      instructorData.longitude != null
+                        ? {
+                            lat: instructorData.latitude,
+                            lng: instructorData.longitude,
+                          }
+                        : null
+                    }
+                    emptyHint="No service area drawn yet. Draw the area this instructor covers, then save the instructor."
+                  />
+                  {/* Inside the instructor <form>, so this is a Switch (a
+                      <button type="button">) rather than a submit control —
+                      Enter in a field here must not save the instructor. */}
+                  <div className="mt-2 flex items-start justify-between gap-3 rounded-md border border-dashed p-2">
+                    <div className="min-w-0 space-y-0.5">
+                      <Label
+                        htmlFor="instructor-rough-polygon"
+                        className="text-xs font-medium"
+                      >
+                        Rough polygon
+                      </Label>
+                      <p className="text-[11px] text-muted-foreground">
+                        {instructorData.serviceZoneIsRough
+                          ? "Provisional area, hidden by default and never used to match customers. Operations can refine and clear this later."
+                          : "Verified service area, used to match customers to this instructor."}
+                      </p>
+                    </div>
+                    <Switch
+                      id="instructor-rough-polygon"
+                      aria-label="Rough polygon"
+                      checked={instructorData.serviceZoneIsRough}
+                      onCheckedChange={(serviceZoneIsRough) =>
+                        setInstructorData((prev) => ({
+                          ...prev,
+                          serviceZoneIsRough,
+                        }))
+                      }
+                      className="mt-0.5 shrink-0"
+                    />
+                  </div>
+                </div>
               </div>
               <div className="grid grid-cols-4 items-center gap-4">
                 <Label htmlFor="email" className="text-right">
@@ -2028,102 +2413,6 @@ export default function InstructorsManagement() {
                   }
                   className="col-span-3"
                 />
-              </div>
-              <div className="grid grid-cols-4 gap-4">
-                <Label className="pt-2 text-right">Servicable Areas</Label>
-                <div className="col-span-3">
-                  {/* Area search dropdown */}
-                  <Popover>
-                    <PopoverTrigger asChild>
-                      <Button
-                        variant="outline"
-                        role="combobox"
-                        className="w-full justify-between"
-                      >
-                        {areaSearchQuery || "Search areas..."}
-                        <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent className="w-full p-0">
-                      <div className="p-2">
-                        <Input
-                          placeholder="Search areas..."
-                          value={areaSearchQuery}
-                          onChange={(e) => setAreaSearchQuery(e.target.value)}
-                          onKeyPress={handleKeyPress}
-                          className="mb-2"
-                        />
-                      </div>
-
-                      {areasLoading ? (
-                        <div className="flex justify-center p-4">
-                          <div className="h-6 w-6 animate-spin rounded-full border-4 border-primary border-t-transparent"></div>
-                        </div>
-                      ) : filteredAreas.length > 0 ? (
-                        <div
-                          className="max-h-60 overflow-y-auto"
-                          onWheel={(e) => e.stopPropagation()}
-                        >
-                          {filteredAreas.map((area) => (
-                            <div
-                              key={area.id}
-                              className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm hover:bg-primary/10"
-                              onClick={() => handleSelectArea(area)}
-                            >
-                              <span>{area.name}</span>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="py-6 text-center">
-                          {areaSearchQuery ? (
-                            <div className="px-4 py-2">
-                              <p className="mb-2 text-sm">
-                                No matching areas found.
-                              </p>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => handleAddCustomArea()}
-                                className="w-full"
-                              >
-                                Add '{areaSearchQuery}' as new area
-                              </Button>
-                            </div>
-                          ) : (
-                            <p className="text-sm text-muted-foreground">
-                              Type to search areas
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </PopoverContent>
-                  </Popover>
-
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {instructorData.areas.map((area) => (
-                      <div
-                        key={area}
-                        className="flex items-center gap-1 rounded-full bg-muted px-3 py-1 text-sm"
-                      >
-                        {area}
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveArea(area)}
-                          className="text-gray-500 hover:text-gray-700"
-                        >
-                          <X size={14} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-
-                  {instructorData.areas.length === 0 && (
-                    <p className="mt-2 text-sm text-muted-foreground">
-                      No areas added. Please add at least one area.
-                    </p>
-                  )}
-                </div>
               </div>
               {/* Add this inside the form's grid of inputs */}
               <div className="grid grid-cols-4 gap-4">
@@ -2539,7 +2828,6 @@ function WeeklyScheduleView({
     isTentative: true,
     tentative_details: {
       name: "",
-      phone: "",
       paid_info: "",
       pickup_location: "",
       description: "",
@@ -2559,7 +2847,6 @@ function WeeklyScheduleView({
     isTentative: true,
     tentative_details: {
       name: "",
-      phone: "",
       paid_info: "",
       pickup_location: "",
       description: "",
@@ -2674,7 +2961,6 @@ function WeeklyScheduleView({
       instructor_id: instructorId,
       tentative_details: {
         name: schedule?.tentative_details?.name || "",
-        phone: schedule?.tentative_details?.phone || "",
         paid_info: schedule?.tentative_details?.paid_info || "",
         pickup_location: schedule?.tentative_details?.pickup_location || "",
         description: schedule?.tentative_details?.description || "",
@@ -2696,7 +2982,6 @@ function WeeklyScheduleView({
     instructor_id: instructorId,
     tentative_details: {
       name: "",
-      phone: "",
       paid_info: "",
       pickup_location: "",
       description: "",
@@ -2721,7 +3006,6 @@ function WeeklyScheduleView({
       instructor_id: instructorId,
       tentative_details: {
         name: "",
-        phone: "",
         paid_info: "",
         pickup_location: "",
         description: "",
@@ -2748,10 +3032,15 @@ function WeeklyScheduleView({
               end_time: tentativeSchedule.end_time,
               enabled: tentativeSchedule.enabled,
               isTentative: tentativeSchedule.isTentative,
+              // Every tentative row must carry status "hold" -- the Sales
+              // Dashboard (and this table's own "hold"+isTentative
+              // convention, see sql/override_tentative_slot.sql) treats
+              // isTentative rows without it as real bookings, since the
+              // Schedule.status column otherwise defaults to "booked".
+              status: "hold",
               instructor_id: instructorId,
               tentative_details: {
                 name: tentativeSchedule.tentative_details.name,
-                phone: tentativeSchedule.tentative_details.phone,
                 paid_info: tentativeSchedule.tentative_details.paid_info,
                 pickup_location:
                   tentativeSchedule.tentative_details.pickup_location,
@@ -2779,10 +3068,10 @@ function WeeklyScheduleView({
             end_time: tentativeSchedule.end_time,
             enabled: tentativeSchedule.enabled,
             isTentative: tentativeSchedule.isTentative,
+            status: "hold",
             instructor_id: instructorId,
             tentative_details: {
               name: tentativeSchedule.tentative_details.name,
-              phone: tentativeSchedule.tentative_details.phone,
               paid_info: tentativeSchedule.tentative_details.paid_info,
               pickup_location:
                 tentativeSchedule.tentative_details.pickup_location,
@@ -2870,14 +3159,6 @@ function WeeklyScheduleView({
       return false;
     }
 
-    if (formDataSchedule.tentative_details.phone.length === 0) {
-      toast({
-        title: "Error",
-        description: "Customer phone is required",
-        variant: "destructive",
-      });
-      return false;
-    }
     if (formDataSchedule.tentative_details.paid_info.length === 0) {
       toast({
         title: "Error",
@@ -3141,7 +3422,6 @@ function WeeklyScheduleView({
         instructor_id: instructorId,
         tentative_details: {
           name: schedule.tentative_details?.name || "",
-          phone: schedule.tentative_details?.phone || "",
           paid_info: schedule.tentative_details?.paid_info || "",
           pickup_location: schedule.tentative_details?.pickup_location || "",
           description: schedule.tentative_details?.description || "",
@@ -3300,10 +3580,10 @@ function WeeklyScheduleView({
             end_time: tentativeScheduleCopy.end_time,
             enabled: true,
             isTentative: true,
+            status: "hold",
             instructor_id: instructorId,
             tentative_details: {
               name: tentativeScheduleCopy.tentative_details.name,
-              phone: tentativeScheduleCopy.tentative_details.phone,
               paid_info: tentativeScheduleCopy.tentative_details.paid_info,
               pickup_location:
                 tentativeScheduleCopy.tentative_details.pickup_location,
@@ -3694,6 +3974,11 @@ function WeeklyScheduleView({
                           <td
                             key={dayIndex}
                             className={tdClasses}
+                            title={
+                              !schedule && unavailable
+                                ? "Instructor unavailable at this time"
+                                : undefined
+                            }
                             style={{
                               width: `${columnWidthPercentage}%`,
                               height: "40px",
@@ -4128,27 +4413,6 @@ function WeeklyScheduleView({
                 />
               </div>
               <div className="grid grid-cols-4 items-center gap-4">
-                <Label htmlFor="tentative_details-phone" className="text-right">
-                  Phone<span className="text-red-500">*</span>
-                </Label>
-                <Input
-                  id="tentative_details-phone"
-                  value={tentativeSchedule.tentative_details.phone}
-                  onChange={(e) =>
-                    setTentativeSchedule({
-                      ...tentativeSchedule,
-                      // Correctly update the nested 'tentative_details' object
-                      tentative_details: {
-                        ...tentativeSchedule.tentative_details,
-                        phone: e.target.value,
-                      },
-                    })
-                  }
-                  className="col-span-3"
-                  required
-                />
-              </div>
-              <div className="grid grid-cols-4 items-center gap-4">
                 <Label
                   htmlFor="tentative_details-description"
                   className="text-right"
@@ -4341,21 +4605,6 @@ function WeeklyScheduleView({
                 <Input
                   id="tentative_copy_details-name"
                   value={tentativeScheduleCopy.tentative_details.name}
-                  disabled={true}
-                  className="col-span-3"
-                  required
-                />
-              </div>
-              <div className="grid grid-cols-4 items-center gap-4">
-                <Label
-                  htmlFor="tentative_copy_details-phone"
-                  className="text-right"
-                >
-                  Phone<span className="text-red-500">*</span>
-                </Label>
-                <Input
-                  id="tentative_copy_details-phone"
-                  value={tentativeScheduleCopy.tentative_details.phone}
                   disabled={true}
                   className="col-span-3"
                   required
@@ -4683,7 +4932,6 @@ export const AddTentativeSchedule = ({
 
   const [tentativeDetails, setTentativeDetails] = useState({
     name: "",
-    phone: "",
     paid_info: "Unpaid",
     pickup_location: "",
     leadName: "",
@@ -4692,6 +4940,101 @@ export const AddTentativeSchedule = ({
     lat: null as number | null,
     lng: null as number | null,
   });
+
+  // Cratio CRM lead lookup. `crmFilled` marks the CRM-sourced fields
+  // (name/address/sales lead); every field stays editable afterwards.
+  const [leadId, setLeadId] = useState("");
+  const [lookupBy, setLookupBy] = useState<LeadLookupBy>("leadId");
+  const [isLookingUpLead, setIsLookingUpLead] = useState(false);
+  const [crmFilled, setCrmFilled] = useState(false);
+
+  const handleLeadLookup = async () => {
+    const id = leadId.trim();
+    if (!id) {
+      toast({
+        title: "E-mail required",
+        description: "Enter the customer's e-mail to look up.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setIsLookingUpLead(true);
+    try {
+      const result = await lookupCratioLead(id, lookupBy);
+      if (result.configured === false) {
+        toast({
+          title: "CRM not configured",
+          description:
+            "The CRM lookup endpoint is not set up yet. Enter the details manually.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (result.error) {
+        toast({
+          title: "CRM lookup failed",
+          description:
+            "Could not fetch the lead from the CRM. Enter the details manually.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (result.code === "CRM_LOOKUP_LEAD_ID_UNAVAILABLE") {
+        toast({
+          title: "Lead ID search not available yet",
+          description:
+            "The CRM does not expose Lead ID yet. Switch to the E-mail tab and enter the customer's e-mail.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (result.code === "CRM_LOOKUP_USE_EMAIL") {
+        toast({
+          title: "Enter a valid e-mail",
+          description: "That doesn't look like an e-mail address.",
+          variant: "destructive",
+        });
+        return;
+      }
+      const customer = result.customer;
+      if (!result.found || !customer) {
+        toast({
+          title: "Lead not found",
+          description:
+            lookupBy === "email"
+              ? `No Cratio lead has the e-mail ${id}. If the lead has no e-mail in Cratio, add one to the lead there first.`
+              : `No CRM lead matched ${id}.`,
+          variant: "destructive",
+        });
+        return;
+      }
+      setTentativeDetails((prev) => ({
+        ...prev,
+        name: customer.name ?? prev.name,
+        leadName: customer.leadName ?? prev.leadName,
+        address: customer.address ?? prev.address,
+        pickup_location: customer.address ?? prev.pickup_location,
+        course_id: matchCourseId(customer.course, courses) ?? prev.course_id,
+        paid_info: customer.payment ?? prev.paid_info,
+      }));
+      setCrmFilled(true);
+      toast({
+        title: "Lead loaded",
+        description: `Details pulled from CRM lead ${id}.`,
+        variant: "success",
+      });
+    } catch (err) {
+      console.error("CRM lead lookup failed:", err);
+      toast({
+        title: "Lookup failed",
+        description:
+          "Could not reach the CRM. Enter the details manually and try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLookingUpLead(false);
+    }
+  };
 
   const [availabilityMap, setAvailabilityMap] = useState<Record<string, any>>(
     {},
@@ -4724,8 +5067,8 @@ export const AddTentativeSchedule = ({
           });
           setAvailabilityMap(mockMap);
         } else {
-          // 2. Fetch Instructor Conflicts from DB
-          const result = await checkInstructorAvailability(slots, instructorId);
+          // 2. Fetch Instructor Conflicts via the edge function (phone-free).
+          const result = await validateSlotsViaEdge(instructorId, slots);
 
           // 3. Merge Results: Local duplicates take priority over DB status
           const mergedResult: Record<string, any> = { ...result };
@@ -4760,9 +5103,7 @@ export const AddTentativeSchedule = ({
 
   const getValidationErrors = () => {
     const errors = [];
-    const cleanPhone = tentativeDetails.phone.replace(/\D/g, "");
     if (!tentativeDetails.name.trim()) errors.push("Name is required");
-    if (cleanPhone.length !== 10) errors.push("Phone must be 10 digits");
     if (!tentativeDetails.leadName.trim())
       errors.push("Sales Lead is required");
     if (stats.blocked > 0) errors.push("Remove blocked slots");
@@ -4850,26 +5191,28 @@ export const AddTentativeSchedule = ({
 
   const AddTentativeScheduleMutation = useMutation({
     mutationFn: async () => {
-      const schedulesToInsert = slots.map((slot) => ({
-        date: slot.date,
-        start_time: slot.start_time,
-        end_time: slot.end_time,
-        instructor_id: instructorId,
-        isTentative: true,
-        course_id:
-          tentativeDetails.course_id === "none" ||
-          tentativeDetails.course_id === "topup"
-            ? null
-            : parseInt(tentativeDetails.course_id),
-        tentative_details: {
-          ...tentativeDetails,
+      await invokeSlotBooking({
+        action: "create",
+        instructorId,
+        leadId: leadId.trim() || undefined,
+        leadBy: lookupBy,
+        slots: slots.map((slot) => ({
+          date: slot.date,
+          start_time: slot.start_time,
+          end_time: slot.end_time,
           description: slot.description,
+        })),
+        details: {
+          name: tentativeDetails.name,
+          paid_info: tentativeDetails.paid_info,
+          pickup_location: tentativeDetails.pickup_location,
+          leadName: tentativeDetails.leadName,
+          address: tentativeDetails.address,
+          course_id: tentativeDetails.course_id,
+          lat: tentativeDetails.lat,
+          lng: tentativeDetails.lng,
         },
-      }));
-      const { error } = await supabase
-        .from("Schedule")
-        .insert(schedulesToInsert);
-      if (error) throw error;
+      });
     },
     onSuccess: () => {
       toast({
@@ -4903,6 +5246,65 @@ export const AddTentativeSchedule = ({
           {/* Input Fields - Stacked on separate lines with smaller font */}
           <div className="flex max-w-md flex-col gap-3">
             <div className="space-y-1">
+              <div className="flex gap-1">
+                {(["leadId", "email"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => {
+                      setLookupBy(mode);
+                      setLeadId("");
+                    }}
+                    className={cn(
+                      "rounded-md border px-2 py-1 text-[11px] font-medium",
+                      lookupBy === mode
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "bg-background text-muted-foreground",
+                    )}
+                  >
+                    {mode === "leadId" ? "Lead ID" : "E-mail"}
+                  </button>
+                ))}
+              </div>
+              <Label className="text-xs">
+                {lookupBy === "email" ? "Customer e-mail" : "Lead ID"}
+              </Label>
+              <div className="flex gap-2">
+                <Input
+                  className="h-8 text-xs"
+                  value={leadId}
+                  onChange={(e) => setLeadId(e.target.value)}
+                  placeholder={
+                    lookupBy === "email"
+                      ? "Enter customer e-mail"
+                      : "Enter CRM Lead ID"
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") e.preventDefault();
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 shrink-0 text-xs"
+                  onClick={handleLeadLookup}
+                  disabled={isLookingUpLead}
+                >
+                  {isLookingUpLead ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    "Look up"
+                  )}
+                </Button>
+              </div>
+              {crmFilled && (
+                <p className="text-[10px] font-medium text-emerald-600">
+                  Loaded from CRM — you can still edit any field.
+                </p>
+              )}
+            </div>
+            <div className="space-y-1">
               <Label className="text-xs">Name*</Label>
               <Input
                 className="h-8 text-xs"
@@ -4913,20 +5315,6 @@ export const AddTentativeSchedule = ({
                     name: e.target.value,
                   })
                 }
-              />
-            </div>
-            <div className="space-y-1">
-              <Label className="text-xs">Phone Number*</Label>
-              <Input
-                className="h-8 text-xs"
-                value={tentativeDetails.phone}
-                onChange={(e) =>
-                  setTentativeDetails({
-                    ...tentativeDetails,
-                    phone: e.target.value,
-                  })
-                }
-                maxLength={10}
               />
             </div>
             <div className="space-y-1">
@@ -5269,6 +5657,7 @@ export const EditTentativeSchedule = ({
   instructorName?: string;
 }) => {
   const navigate = useNavigate();
+  const location = useLocation();
   const { toast } = useToast();
   const instructorId = schedule?.instructor_id;
 
@@ -5291,7 +5680,6 @@ export const EditTentativeSchedule = ({
 
       const newDetails = {
         name: schedule.tentative_details?.name || "",
-        phone: schedule.tentative_details?.phone || "",
         paid_info: schedule.tentative_details?.paid_info || "N/A",
         pickup_location: schedule.tentative_details?.pickup_location || "",
         leadName: schedule.tentative_details?.leadName || "",
@@ -5313,7 +5701,6 @@ export const EditTentativeSchedule = ({
   const [slots, setSlots] = useState([]);
   const [tentativeDetails, setTentativeDetails] = useState({
     name: "",
-    phone: "",
     paid_info: "Unpaid",
     pickup_location: "",
     leadName: "",
@@ -5322,6 +5709,100 @@ export const EditTentativeSchedule = ({
     lat: null as number | null,
     lng: null as number | null,
   });
+
+  // See AddTentativeSchedule: CRM lookup + phone-free write path.
+  const [leadId, setLeadId] = useState("");
+  const [lookupBy, setLookupBy] = useState<LeadLookupBy>("leadId");
+  const [isLookingUpLead, setIsLookingUpLead] = useState(false);
+  const [crmFilled, setCrmFilled] = useState(false);
+
+  const handleLeadLookup = async () => {
+    const id = leadId.trim();
+    if (!id) {
+      toast({
+        title: "E-mail required",
+        description: "Enter the customer's e-mail to look up.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setIsLookingUpLead(true);
+    try {
+      const result = await lookupCratioLead(id, lookupBy);
+      if (result.configured === false) {
+        toast({
+          title: "CRM not configured",
+          description:
+            "The CRM lookup endpoint is not set up yet. Enter the details manually.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (result.error) {
+        toast({
+          title: "CRM lookup failed",
+          description:
+            "Could not fetch the lead from the CRM. Enter the details manually.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (result.code === "CRM_LOOKUP_LEAD_ID_UNAVAILABLE") {
+        toast({
+          title: "Lead ID search not available yet",
+          description:
+            "The CRM does not expose Lead ID yet. Switch to the E-mail tab and enter the customer's e-mail.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (result.code === "CRM_LOOKUP_USE_EMAIL") {
+        toast({
+          title: "Enter a valid e-mail",
+          description: "That doesn't look like an e-mail address.",
+          variant: "destructive",
+        });
+        return;
+      }
+      const customer = result.customer;
+      if (!result.found || !customer) {
+        toast({
+          title: "Lead not found",
+          description:
+            lookupBy === "email"
+              ? `No Cratio lead has the e-mail ${id}. If the lead has no e-mail in Cratio, add one to the lead there first.`
+              : `No CRM lead matched ${id}.`,
+          variant: "destructive",
+        });
+        return;
+      }
+      setTentativeDetails((prev) => ({
+        ...prev,
+        name: customer.name ?? prev.name,
+        leadName: customer.leadName ?? prev.leadName,
+        address: customer.address ?? prev.address,
+        pickup_location: customer.address ?? prev.pickup_location,
+        course_id: matchCourseId(customer.course, courses) ?? prev.course_id,
+        paid_info: customer.payment ?? prev.paid_info,
+      }));
+      setCrmFilled(true);
+      toast({
+        title: "Lead loaded",
+        description: `Details pulled from CRM lead ${id}.`,
+        variant: "success",
+      });
+    } catch (err) {
+      console.error("CRM lead lookup failed:", err);
+      toast({
+        title: "Lookup failed",
+        description:
+          "Could not reach the CRM. Enter the details manually and try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLookingUpLead(false);
+    }
+  };
 
   const { data: courses } = useQuery({
     queryKey: ["courses"],
@@ -5346,7 +5827,6 @@ export const EditTentativeSchedule = ({
 
       setTentativeDetails({
         name: schedule.tentative_details?.name || "",
-        phone: schedule.tentative_details?.phone || "",
         paid_info: schedule.tentative_details?.paid_info || "Unpaid",
         pickup_location: schedule.tentative_details?.pickup_location || "",
         leadName: schedule.tentative_details?.leadName || "",
@@ -5366,7 +5846,7 @@ export const EditTentativeSchedule = ({
     const validateAllSlots = async () => {
       if (!instructorId || slots.length === 0) return;
       try {
-        const result = await checkInstructorAvailability(slots, instructorId);
+        const result = await validateSlotsViaEdge(instructorId, slots);
         setAvailabilityMap(result);
       } catch (err) {
         console.error("Availability Check Failed:", err);
@@ -5386,9 +5866,7 @@ export const EditTentativeSchedule = ({
 
   const validationErrors = useMemo(() => {
     const errors = [];
-    const cleanPhone = (tentativeDetails.phone || "").replace(/\D/g, "");
     if (!tentativeDetails.name?.trim()) errors.push("Name is required");
-    if (cleanPhone.length !== 10) errors.push("Phone must be 10 digits");
     if (!tentativeDetails.leadName?.trim())
       errors.push("Sales Lead is required");
     if (stats.blocked > 0) errors.push("Remove blocked slots");
@@ -5401,28 +5879,29 @@ export const EditTentativeSchedule = ({
     mutationFn: async () => {
       if (!slots[0]) return;
 
-      const updatedData = {
-        date: slots[0].date,
-        start_time: slots[0].start_time,
-        end_time: slots[0].end_time,
-        // SANITIZE HERE: If it's a special string, send null to the DB
-        course_id:
-          tentativeDetails.course_id === "none" ||
-          tentativeDetails.course_id === "topup"
-            ? null
-            : tentativeDetails.course_id,
-        tentative_details: {
-          ...tentativeDetails,
+      await invokeSlotBooking({
+        action: "update",
+        id: schedule.id,
+        instructorId,
+        leadId: leadId.trim() || undefined,
+        leadBy: lookupBy,
+        slot: {
+          date: slots[0].date,
+          start_time: slots[0].start_time,
+          end_time: slots[0].end_time,
           description: slots[0].description,
         },
-      };
-
-      const { error } = await supabase
-        .from("Schedule")
-        .update(updatedData)
-        .eq("id", schedule.id);
-
-      if (error) throw error;
+        details: {
+          name: tentativeDetails.name,
+          paid_info: tentativeDetails.paid_info,
+          pickup_location: tentativeDetails.pickup_location,
+          leadName: tentativeDetails.leadName,
+          address: tentativeDetails.address,
+          course_id: tentativeDetails.course_id,
+          lat: tentativeDetails.lat,
+          lng: tentativeDetails.lng,
+        },
+      });
     },
     onSuccess: () => {
       toast({
@@ -5430,7 +5909,10 @@ export const EditTentativeSchedule = ({
         description: "Schedule updated successfully",
         variant: "success",
       });
-      navigate("/admin/instructors/" + instructorId);
+      navigate({
+        pathname: "/admin/instructors/" + instructorId,
+        search: location.search,
+      });
       window.location.reload();
     },
   });
@@ -5455,6 +5937,63 @@ export const EditTentativeSchedule = ({
 
         <div className="space-y-6">
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="space-y-2 md:col-span-2">
+              <div className="flex gap-1">
+                {(["leadId", "email"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => {
+                      setLookupBy(mode);
+                      setLeadId("");
+                    }}
+                    className={cn(
+                      "rounded-md border px-3 py-1.5 text-xs font-medium",
+                      lookupBy === mode
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "bg-background text-muted-foreground",
+                    )}
+                  >
+                    {mode === "leadId" ? "Lead ID" : "E-mail"}
+                  </button>
+                ))}
+              </div>
+              <Label>
+                {lookupBy === "email" ? "Customer e-mail" : "Lead ID"}
+              </Label>
+              <div className="flex gap-2">
+                <Input
+                  value={leadId}
+                  onChange={(e) => setLeadId(e.target.value)}
+                  placeholder={
+                    lookupBy === "email"
+                      ? "Enter customer e-mail"
+                      : "Enter CRM Lead ID"
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") e.preventDefault();
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="shrink-0"
+                  onClick={handleLeadLookup}
+                  disabled={isLookingUpLead}
+                >
+                  {isLookingUpLead ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    "Look up"
+                  )}
+                </Button>
+              </div>
+              {crmFilled && (
+                <p className="text-xs font-medium text-emerald-600">
+                  Loaded from CRM — you can still edit any field.
+                </p>
+              )}
+            </div>
             <div className="space-y-2">
               <Label>Name*</Label>
               <Input
@@ -5465,19 +6004,6 @@ export const EditTentativeSchedule = ({
                     name: e.target.value,
                   })
                 }
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>Phone Number*</Label>
-              <Input
-                value={tentativeDetails.phone}
-                onChange={(e) =>
-                  setTentativeDetails({
-                    ...tentativeDetails,
-                    phone: e.target.value,
-                  })
-                }
-                maxLength={10}
               />
             </div>
             <div className="space-y-2">
@@ -5872,6 +6398,7 @@ function getImportedEventsForSlot(
 export const InstructorSchedulePage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
 
   const [selectedSlot, setSelectedSlot] = useState(null);
@@ -5901,6 +6428,21 @@ export const InstructorSchedulePage = () => {
   // After a drag finalises we set this so the trailing onClick (which fires
   // after mouseup) doesn't overwrite our prefilled add-form state.
   const dragJustEndedRef = useRef(false);
+  // The time-axis (hour labels) and the grid cells are two separate scroll
+  // containers side by side -- kept in sync here so scrolling one moves
+  // the other by the same amount, the same "frozen column" pattern used
+  // for spreadsheet-like UIs. Needed once row heights have a real minimum
+  // (see minmax() below) instead of always compressing to fit: previously
+  // neither side ever actually had anything to scroll, since 1fr rows
+  // just shrank to whatever space was available, however small.
+  const timeAxisRef = useRef<HTMLDivElement>(null);
+  const gridCellsRef = useRef<HTMLDivElement>(null);
+  const syncScroll =
+    (from: "axis" | "grid") => (e: UIEvent<HTMLDivElement>) => {
+      const target =
+        from === "axis" ? gridCellsRef.current : timeAxisRef.current;
+      if (target) target.scrollTop = e.currentTarget.scrollTop;
+    };
   useEffect(() => {
     dragStartRef.current = dragStart;
   }, [dragStart]);
@@ -5940,19 +6482,18 @@ export const InstructorSchedulePage = () => {
     }
     const status = schedule.status?.toLowerCase();
     if (status === "paused") {
+      if (schedule.pause_reason?.toLowerCase() === "payment") {
+        return {
+          block: "border-red-700 bg-red-500 text-white",
+          card: "border-red-200 bg-red-50",
+        };
+      }
 
-  if (schedule.pause_reason?.toLowerCase() === "payment") {
-    return {
-      block: "border-red-700 bg-red-500 text-white",
-      card: "border-red-200 bg-red-50",
-    };
-  }
-
-  return {
-    block: "border-slate-700 bg-slate-500 text-white",
-    card: "border-slate-200 bg-slate-50",
-  };
-}
+      return {
+        block: "border-slate-700 bg-slate-500 text-white",
+        card: "border-slate-200 bg-slate-50",
+      };
+    }
     if (status === "ongoing") {
       return {
         block: "border-blue-700 bg-blue-500 text-white",
@@ -5998,43 +6539,110 @@ export const InstructorSchedulePage = () => {
       const date = parse(i.toString(), "H", new Date());
       slots.push({
         hour24: i.toString().padStart(2, "0"),
-        display: format(date, "h a"),
+        // 24-hour, matching Sales Dashboard and this file's own
+        // WeeklyScheduleView, which both already use "HH:mm" -- this page
+        // was the odd one out with 12-hour AM/PM labels.
+        display: format(date, "HH:mm"),
       });
     }
     return slots;
   }, []);
 
-  const { data: instructor, isLoading } = useQuery({
+  const {
+    data: instructor,
+    isLoading,
+    error: scheduleError,
+    refetch: refetchSchedules,
+    isRefetching,
+  } = useQuery({
     queryKey: ["instructor-full", id],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("Instructor")
-        .select(
-          `
-          *,
-          schedules:Schedule (
-            *,
-            learner:learner_id (
-              name, phone, pick_up_location, address_lat, address_lng
-            ),
-            lesson:lesson_id (number)
-          )
-        `,
-        )
-        .eq("id_instructor", id)
-        .single();
-      if (error) throw error;
-
-      return data;
+    enabled: !!id,
+    queryFn: async ({ signal }) => {
+      if (!id) throw new Error("Instructor ID is required");
+      const [profile, schedules] = await Promise.all([
+        supabase
+          .from("Instructor")
+          .select("*")
+          .eq("id_instructor", id)
+          .abortSignal(signal)
+          .single(),
+        fetchInstructorModuleSchedules(id, signal),
+      ]);
+      if (profile.error) throw profile.error;
+      return {
+        ...profile.data,
+        schedules: schedules.map((row) => ({ ...row, lesson: row.Lesson })),
+      };
     },
+    // Fallback for databases without Schedule Realtime publication enabled.
+    refetchInterval: 30_000,
   });
+
+  // Reverse sync: pick up Schedule changes made elsewhere (e.g. a tentative
+  // slot booked from the Sales Dashboard) without requiring a manual
+  // reload. INSERT/UPDATE are filtered server-side to this page's own
+  // instructor since, unlike the list page, there's exactly one id to care
+  // about here. DELETE gets its own unfiltered handler: a server-side
+  // filter can't be evaluated for a delete under Postgres's default REPLICA
+  // IDENTITY (only the deleted row's primary key is available, not
+  // instructor_id), so a filtered subscription would silently never see
+  // deletions at all. Invalidating unconditionally on any delete is cheap
+  // here -- one instructor's query, not a list. Requires Realtime
+  // replication to be enabled for the "Schedule" table in Supabase
+  // (Database -> Replication, or `alter publication supabase_realtime add
+  // table "Schedule";` in the SQL editor) -- without it this subscription
+  // connects but never receives events.
+  useEffect(() => {
+    if (!id) return;
+    const invalidate = () =>
+      void queryClient.invalidateQueries({
+        queryKey: ["instructor-full", id],
+      });
+    const channel = supabase
+      .channel(`instructor-schedule-sync-${id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "Schedule",
+          filter: `instructor_id=eq.${id}`,
+        },
+        invalidate,
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "Schedule",
+          filter: `instructor_id=eq.${id}`,
+        },
+        invalidate,
+      )
+      .on(
+        "postgres_changes",
+        { event: "DELETE", schema: "public", table: "Schedule" },
+        invalidate,
+      )
+      .subscribe();
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [id, queryClient]);
 
   const deleteMutation = useMutation({
     mutationFn: async (scheduleId) => {
-      await supabase.from("Schedule").delete().eq("id", scheduleId);
+      const { error } = await supabase
+        .from("Schedule")
+        .delete()
+        .eq("id", scheduleId);
+      if (error) throw error;
     },
     onSuccess: () => {
-      queryClient.invalidateQueries(["instructor-full"]);
+      queryClient.invalidateQueries({ queryKey: ["instructor-full"] });
+      queryClient.invalidateQueries({ queryKey: ["activeLearners-infinite"] });
+      queryClient.invalidateQueries({ queryKey: ["learner-schedules-admin"] });
       if (selectedSlot) setSelectedSlot(null);
     },
   });
@@ -6076,7 +6684,7 @@ export const InstructorSchedulePage = () => {
       if (error) throw error;
     },
     onSuccess: () => {
-      queryClient.invalidateQueries(["instructor-full"]);
+      queryClient.invalidateQueries({ queryKey: ["instructor-full"] });
     },
   });
 
@@ -6151,7 +6759,12 @@ export const InstructorSchedulePage = () => {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => navigate("/admin/instructors")}
+            onClick={() =>
+              navigate({
+                pathname: "/admin/instructors",
+                search: location.search,
+              })
+            }
             className="rounded-full"
           >
             <ChevronLeft className="h-5 w-5" />
@@ -6254,21 +6867,30 @@ export const InstructorSchedulePage = () => {
               Paused
             </span>
             <span className="flex items-center gap-1">
-  <span className="h-2 w-2 rounded-sm bg-red-500" />
-  Payment Due
-</span>
+              <span className="h-2 w-2 rounded-sm bg-red-500" />
+              Payment Due
+            </span>
           </div>
 
           <div className="relative w-full max-w-xs">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input
-              placeholder="Search name or phone..."
+              placeholder="Search name..."
               className="h-8 w-full rounded-md border-none bg-slate-50 pl-9 text-xs outline-none focus:ring-1 focus:ring-slate-200"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
           </div>
 
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={isRefetching}
+            onClick={() => void refetchSchedules()}
+          >
+            {isRefetching ? "Refreshing..." : "Refresh schedules"}
+          </Button>
           {/* Import Calendar Button */}
           <Button
             variant="outline"
@@ -6284,6 +6906,11 @@ export const InstructorSchedulePage = () => {
         </div>
       </header>
 
+      {scheduleError && (
+        <div role="alert" className="bg-red-50 px-4 py-3 text-sm text-red-700">
+          Schedules could not be loaded. Use Refresh schedules to retry.
+        </div>
+      )}
       {/* Calendar Import Dialog */}
       <Dialog open={showCalendarImport} onOpenChange={setShowCalendarImport}>
         <DialogContent className="max-w-md">
@@ -6467,17 +7094,21 @@ export const InstructorSchedulePage = () => {
                             </span>
                           </div>
 
-                          {/* 3. PHONE */}
-                          <div className="flex items-center gap-2">
+                          {/* 2b. PHONE -- arrives masked from the server unless
+                              the viewer holds "View Unmasked Customer Phone
+                              Numbers" (or is a super admin). */}
+                          <div className="flex items-center gap-2 text-slate-700">
                             <Phone className="h-3.5 w-3.5 text-slate-400" />
-                            <span className="text-[11px] font-semibold text-slate-600">
-                              {isTentative
-                                ? display(details.phone)
-                                : display(schedule.learner?.phone)}
+                            <span className="text-xs font-semibold tracking-tight">
+                              {display(
+                                isTentative
+                                  ? details.phone
+                                  : schedule.learner?.phone,
+                              )}
                             </span>
                           </div>
 
-                          {/* 4. LOCATION (Conditional Link) */}
+                          {/* 3. LOCATION (Conditional Link) */}
                           {mapUrl && pickupLocation !== "N/A" ? (
                             <a
                               href={mapUrl}
@@ -6511,20 +7142,21 @@ export const InstructorSchedulePage = () => {
                                 : "N/A"}
                             </span>
                           </div>
-                      
-                          {schedule.status?.toLowerCase() === "paused" && (
-  <div className="rounded-lg border border-dashed border-slate-200 bg-slate-100/40 p-2.5 text-[11px] text-slate-600">
-    <p className="mb-1 text-[9px] font-bold uppercase tracking-wider text-slate-400">
-      Pause Notes
-    </p>
 
-    <span className="block italic leading-relaxed">
-      {schedule.pause_reason?.toLowerCase() === "payment"
-        ? "Due to payment"
-        : schedule.pause_notes || "N/A"}
-    </span>
-  </div>
-)}
+                          {schedule.status?.toLowerCase() === "paused" && (
+                            <div className="rounded-lg border border-dashed border-slate-200 bg-slate-100/40 p-2.5 text-[11px] text-slate-600">
+                              <p className="mb-1 text-[9px] font-bold uppercase tracking-wider text-slate-400">
+                                Pause Notes
+                              </p>
+
+                              <span className="block italic leading-relaxed">
+                                {schedule.pause_reason?.toLowerCase() ===
+                                "payment"
+                                  ? "Due to payment"
+                                  : schedule.pause_notes || "N/A"}
+                              </span>
+                            </div>
+                          )}
                           {/* 6. LEAD NAME */}
                           <div className="flex items-center gap-2 pt-1">
                             <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
@@ -6649,37 +7281,49 @@ export const InstructorSchedulePage = () => {
           <div className="z-20 flex w-14 shrink-0 flex-col border-r bg-slate-50">
             <div className="h-10 border-b bg-white" />
             <div
-              className="grid flex-1"
-              style={{ gridTemplateRows: `repeat(${timeSlots.length}, 1fr)` }}
+              ref={timeAxisRef}
+              onScroll={syncScroll("axis")}
+              className="min-h-0 flex-1 overflow-y-auto"
             >
-              {timeSlots.map((slot, idx) => {
-                const isRowHovered = hoveredHour === idx;
+              <div
+                className="grid"
+                style={{
+                  gridTemplateRows: `repeat(${timeSlots.length}, minmax(44px, 1fr))`,
+                }}
+              >
+                {timeSlots.map((slot, idx) => {
+                  const isRowHovered = hoveredHour === idx;
 
-                return (
-                  <div
-                    key={slot.hour24}
-                    className={cn(
-                      "flex items-start justify-end border-b border-slate-100 pr-2 pt-1 transition-colors",
-                      // Theme Update: White on Dark Grey
-                      isRowHovered ? "bg-slate-500" : "bg-white",
-                    )}
-                  >
-                    <span
+                  return (
+                    <div
+                      key={slot.hour24}
                       className={cn(
-                        "text-[9px] font-bold uppercase transition-colors",
-                        // Toggle text color based on hover
-                        isRowHovered ? "text-white" : "text-slate-400",
+                        "flex items-start justify-end border-b border-slate-100 pr-2 pt-1 transition-colors",
+                        // Theme Update: White on Dark Grey
+                        isRowHovered ? "bg-slate-500" : "bg-white",
                       )}
                     >
-                      {slot.display}
-                    </span>
-                  </div>
-                );
-              })}
+                      <span
+                        className={cn(
+                          "text-[9px] font-bold uppercase transition-colors",
+                          // Toggle text color based on hover
+                          isRowHovered ? "text-white" : "text-slate-400",
+                        )}
+                      >
+                        {slot.display}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
 
-          <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+          <div
+            ref={gridCellsRef}
+            onScroll={syncScroll("grid")}
+            className="flex min-w-0 flex-1 flex-col overflow-y-auto"
+          >
             {/* GRID HEADERS */}
             <div className="sticky top-0 z-30 grid shrink-0 grid-cols-7 border-b bg-white">
               {weekDates.map((date, idx) => {
@@ -6738,7 +7382,9 @@ export const InstructorSchedulePage = () => {
             {/* GRID CELLS */}
             <div
               className="relative grid min-h-0 flex-1 grid-cols-7"
-              style={{ gridTemplateRows: `repeat(${timeSlots.length}, 1fr)` }}
+              style={{
+                gridTemplateRows: `repeat(${timeSlots.length}, minmax(44px, 1fr))`,
+              }}
             >
               {timeSlots.map((slot, rowIdx) => (
                 <Fragment key={slot.hour24}>
@@ -6783,9 +7429,21 @@ export const InstructorSchedulePage = () => {
 
                     const inDrag = isInDragRange(date, slot.hour24);
                     const isCellEmpty = slotSchedules.length === 0;
+                    // Cells with a scheduled class already explain
+                    // themselves via the class block's own hover detail --
+                    // this is only for an otherwise-blank cell that's
+                    // greyed out by unavailability, which had no
+                    // explanation at all for why it can't be booked.
+                    const unavailableTitle =
+                      isCellEmpty && (isTopUnavailable || isBottomUnavailable)
+                        ? isTopUnavailable && isBottomUnavailable
+                          ? "Instructor unavailable this whole hour"
+                          : `Instructor unavailable ${isTopUnavailable ? "the first half of this hour" : "the second half of this hour"}`
+                        : undefined;
                     return (
                       <div
                         key={`${dateStr}-${slot.hour24}`}
+                        title={unavailableTitle}
                         className={cn(
                           "group relative cursor-pointer select-none border-b border-r border-slate-50 transition-colors",
                           "hover:bg-slate-200",
@@ -6926,7 +7584,7 @@ export const InstructorSchedulePage = () => {
                                       "HH:mm:ss",
                                       new Date(),
                                     ),
-                                    "h:mm a",
+                                    "HH:mm",
                                   )}{" "}
                                   -{" "}
                                   {format(
@@ -6935,7 +7593,7 @@ export const InstructorSchedulePage = () => {
                                       "HH:mm:ss",
                                       new Date(),
                                     ),
-                                    "h:mm a",
+                                    "HH:mm",
                                   )}
                                 </div>
                               </div>
@@ -6987,14 +7645,14 @@ export const InstructorSchedulePage = () => {
                                     <Clock className="h-1.5 w-1.5" />
                                     {format(
                                       new Date(event.start.dateTime),
-                                      "h:mm a",
+                                      "HH:mm",
                                     )}
                                     {event.end?.dateTime && (
                                       <>
                                         {" - "}
                                         {format(
                                           new Date(event.end.dateTime),
-                                          "h:mm a",
+                                          "HH:mm",
                                         )}
                                       </>
                                     )}

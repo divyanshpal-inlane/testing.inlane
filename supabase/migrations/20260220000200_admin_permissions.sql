@@ -2,17 +2,18 @@
 ALTER TABLE "Admin" ADD COLUMN IF NOT EXISTS is_super_admin BOOLEAN DEFAULT false;
 
 -- Create admin_permissions table
+-- Note: Admin table uses phone as primary key (changed in 20250316164819_add_direct_changes.sql)
 CREATE TABLE IF NOT EXISTS admin_permissions (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    admin_id uuid NOT NULL REFERENCES "Admin"(id) ON DELETE CASCADE,
+    admin_phone TEXT NOT NULL REFERENCES "Admin"(phone) ON DELETE CASCADE,
     permission TEXT NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(admin_id, permission)
+    UNIQUE(admin_phone, permission)
 );
 
 -- Create index for faster lookups
-CREATE INDEX IF NOT EXISTS idx_admin_permissions_admin_id ON admin_permissions(admin_id);
+CREATE INDEX IF NOT EXISTS idx_admin_permissions_admin_phone ON admin_permissions(admin_phone);
 
 -- Enable RLS on admin_permissions
 ALTER TABLE admin_permissions ENABLE ROW LEVEL SECURITY;
@@ -32,11 +33,7 @@ CREATE POLICY "Super admins can manage permissions"
 CREATE POLICY "Admins can view own permissions"
     ON admin_permissions FOR SELECT
     USING (
-        EXISTS (
-            SELECT 1 FROM "Admin"
-            WHERE "Admin".id = admin_permissions.admin_id
-            AND "Admin".phone = auth.jwt()->>'phone'
-        )
+        admin_permissions.admin_phone = auth.jwt()->>'phone'
     );
 
 -- Insert super admin (phone: 9831270111)

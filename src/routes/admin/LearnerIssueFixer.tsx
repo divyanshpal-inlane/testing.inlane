@@ -4,11 +4,11 @@ import {
   CheckCircle,
   ChevronRight,
   Copy,
+  FileSignature,
   History,
   Link2,
-  Lock,
-  FileSignature,
   Loader2,
+  Lock,
   MessageCircle,
   RefreshCw,
   Save,
@@ -20,10 +20,9 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { supabase } from "@/lib/supabaseClient";
 
-import { Badge } from "@/components/ui/badge";
 import Form14Generator from "@/components/admin/Form14Generator";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -49,8 +48,11 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/components/ui/use-toast";
+import { supabase } from "@/lib/supabaseClient";
 import {
   EnrollmentPlanAuditChange,
+  LEARNER_ISSUE_PAGE_SIZE,
+  LearnerIssueFilter,
   useCreateEnrollmentAdmin,
   useCreateEnrollmentPlanAudit,
   useCreatePaymentAdmin,
@@ -58,6 +60,7 @@ import {
   useEnrollmentPlanAudit,
   useLearnerSchedulesAdmin,
   useLearnersWithIssues,
+  useLearnerWithIssuesAdmin,
   useUpdateEnrollmentAdmin,
   useUpdateLearnerAdmin,
   useUpdatePaymentAdmin,
@@ -74,16 +77,40 @@ type Payment = Database["public"]["Tables"]["payment"]["Row"];
 // the create-learner flow in LearnerManagement.tsx so an edited plan offers the
 // same packages a learner could have been created with. `duration` = lessons.
 const PREDEFINED_COURSES: { id: string; name: string; duration: number }[] = [
-  { id: "e129f667-0510-4f07-9847-edb58356dc74", name: "Beginner Course", duration: 10 },
+  {
+    id: "e129f667-0510-4f07-9847-edb58356dc74",
+    name: "Beginner Course",
+    duration: 10,
+  },
   { id: "f60e5fdb-787a-4b40-844d-4e66416a6c8f", name: "Flyover", duration: 2 },
   { id: "0ce6680f-6e12-49d7-8cf9-4388e81d2e27", name: "Parking", duration: 2 },
   { id: "cc5fb06a-419f-4766-a79b-221c81bf9826", name: "Slopes", duration: 2 },
   { id: "7ff8818e-5b52-4030-bc2d-f54071e8ed7f", name: "Traffic", duration: 4 },
-  { id: "05a5f57f-c3e2-48ac-b29f-4299e30442eb", name: "Parking + Flyover", duration: 4 },
-  { id: "abddddb8-3f54-41ea-a64b-5ba55988b12a", name: "Slopes + Parking", duration: 4 },
-  { id: "ddbbfbbf-2222-4742-947b-ccd4e25e7936", name: "Traffic + Parking", duration: 6 },
-  { id: "14552c29-e7e5-4e76-a350-1ae7d8ffc7f3", name: "Traffic + Flyover", duration: 6 },
-  { id: "b991363c-6791-411e-9cb8-6723e40d0a0a", name: "Traffic + Parking + Flyover", duration: 8 },
+  {
+    id: "05a5f57f-c3e2-48ac-b29f-4299e30442eb",
+    name: "Parking + Flyover",
+    duration: 4,
+  },
+  {
+    id: "abddddb8-3f54-41ea-a64b-5ba55988b12a",
+    name: "Slopes + Parking",
+    duration: 4,
+  },
+  {
+    id: "ddbbfbbf-2222-4742-947b-ccd4e25e7936",
+    name: "Traffic + Parking",
+    duration: 6,
+  },
+  {
+    id: "14552c29-e7e5-4e76-a350-1ae7d8ffc7f3",
+    name: "Traffic + Flyover",
+    duration: 6,
+  },
+  {
+    id: "b991363c-6791-411e-9cb8-6723e40d0a0a",
+    name: "Traffic + Parking + Flyover",
+    duration: 8,
+  },
 ];
 
 const PAYMENT_LINK_BASE = "https://inlane-web-app.vercel.app/payment";
@@ -187,7 +214,8 @@ function detectIssues(
       type: "learner",
       severity: "info",
       title: "Missing Learner Signature",
-      description: "This learner does not have a signature available for Form 15",
+      description:
+        "This learner does not have a signature available for Form 15",
       fix: "Upload the learner's signature in the Learner tab",
     });
   }
@@ -257,103 +285,86 @@ function getStatusDot(issues: Issue[]) {
 
 export default function LearnerIssueFixer() {
   const [searchQuery, setSearchQuery] = useState("");
-  const [issueFilter, setIssueFilter] = useState<string>("all");
+  const [issueFilter, setIssueFilter] = useState<LearnerIssueFilter>("all");
+  const [page, setPage] = useState(1);
   const [selectedLearnerId, setSelectedLearnerId] = useState<string | null>(
     null,
   );
 
-  const { data: learnersData, isLoading, refetch } = useLearnersWithIssues();
+  const {
+    data: learnersData,
+    isLoading,
+    isFetching,
+    isError,
+    error,
+    refetch,
+  } = useLearnersWithIssues({ page, searchQuery, issueFilter });
+  const { data: selectedLearner, refetch: refetchSelectedLearner } =
+    useLearnerWithIssuesAdmin(selectedLearnerId);
+  const totalCount = learnersData?.totalCount ?? 0;
+  const totalPages = Math.max(
+    1,
+    Math.ceil(totalCount / LEARNER_ISSUE_PAGE_SIZE),
+  );
   const { data: schedules } = useLearnerSchedulesAdmin({
     learnerId: selectedLearnerId ?? undefined,
   });
 
+  // A fix or deletion can remove the last result from the current page.
+  useEffect(() => {
+    if (learnersData && page > totalPages) setPage(totalPages);
+  }, [learnersData, page, totalPages]);
+
   // Real-time subscription: Auto-refresh when payments complete
   useEffect(() => {
     const channel = supabase
-      .channel('learners-payment-updates')
+      .channel("learners-payment-updates")
       .on(
-        'postgres_changes',
+        "postgres_changes",
         {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'payment',
-          filter: 'status=eq.completed'
+          event: "UPDATE",
+          schema: "public",
+          table: "payment",
+          filter: "status=eq.completed",
         },
         () => {
-          console.log('[LearnerIssueFixer] Payment completed, refreshing data...');
+          console.log(
+            "[LearnerIssueFixer] Payment completed, refreshing data...",
+          );
           refetch();
-        }
+          if (selectedLearnerId) refetchSelectedLearner();
+        },
       )
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [refetch]);
-
-  // Auto-refresh fallback: Every 5 seconds as safety net
-  useEffect(() => {
-    const interval = setInterval(() => {
-      refetch();
-    }, 5000);
-
-    return () => clearInterval(interval);
-  }, [refetch]);
-
-  // Get selected learner data
-  const selectedLearner = useMemo(() => {
-    if (!selectedLearnerId || !learnersData) return null;
-    return learnersData.find((l) => l.id === selectedLearnerId) || null;
-  }, [selectedLearnerId, learnersData]);
+  }, [refetch, refetchSelectedLearner, selectedLearnerId]);
 
   // Calculate issues for each learner
   const learnersWithIssues = useMemo(() => {
     if (!learnersData) return [];
-    return learnersData.map((learner) => {
-      const enrollments = (learner as any).enrollment || [];
-      const payments = (learner as any).payment || [];
+    return learnersData.learners.map((learner) => {
+      const enrollments = learner.enrollment || [];
+      const payments = learner.payment || [];
       // Don't include schedule check here since we don't have schedule data for all learners
       const issues = detectIssues(learner, enrollments, payments, 0, false);
       return { ...learner, enrollments, payments, issues };
     });
   }, [learnersData]);
 
-  // Filter learners
-  const filteredLearners = useMemo(() => {
-    return learnersWithIssues.filter((learner) => {
-      // Search filter
-      const matchesSearch =
-        !searchQuery ||
-        learner.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        learner.phone?.includes(searchQuery) ||
-        learner.area?.toLowerCase().includes(searchQuery.toLowerCase());
-
-      // Issue type filter
-      const matchesIssue =
-        issueFilter === "all" ||
-        (issueFilter === "has-issues" && learner.issues.length > 0) ||
-        (issueFilter === "no-issues" && learner.issues.length === 0) ||
-        learner.issues.some((i) => i.type === issueFilter);
-
-      return matchesSearch && matchesIssue;
-    });
-  }, [learnersWithIssues, searchQuery, issueFilter]);
-
   // Current learner's issues (with schedule count - include schedule check)
   const currentIssues = useMemo(() => {
     if (!selectedLearner) return [];
-    const learnerData = learnersWithIssues.find(
-      (l) => l.id === selectedLearnerId,
-    );
-    if (!learnerData) return [];
     return detectIssues(
       selectedLearner,
-      learnerData.enrollments,
-      learnerData.payments,
+      selectedLearner.enrollment || [],
+      selectedLearner.payment || [],
       schedules?.length || 0,
       true, // Include schedule check since we have actual schedule data
     );
-  }, [selectedLearner, learnersWithIssues, schedules, selectedLearnerId]);
+  }, [selectedLearner, schedules]);
 
   return (
     <div className="flex h-screen flex-col bg-gray-50">
@@ -370,7 +381,14 @@ export default function LearnerIssueFixer() {
             <h1 className="text-lg font-semibold">Learner Issue Fixer</h1>
           </div>
           <div className="ml-auto">
-            <Button variant="outline" size="sm" onClick={() => refetch()}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                refetch();
+                if (selectedLearnerId) refetchSelectedLearner();
+              }}
+            >
               <RefreshCw className="mr-2 h-4 w-4" />
               Refresh
             </Button>
@@ -386,11 +404,20 @@ export default function LearnerIssueFixer() {
             <Input
               placeholder="Search by name, phone, or area..."
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setPage(1);
+              }}
               className="pl-9"
             />
           </div>
-          <Select value={issueFilter} onValueChange={setIssueFilter}>
+          <Select
+            value={issueFilter}
+            onValueChange={(value) => {
+              setIssueFilter(value as LearnerIssueFilter);
+              setPage(1);
+            }}
+          >
             <SelectTrigger className="w-[180px]">
               <SelectValue placeholder="Filter by issue" />
             </SelectTrigger>
@@ -410,25 +437,28 @@ export default function LearnerIssueFixer() {
       {/* Main Content */}
       <div className="grid flex-1 grid-cols-12 gap-3 overflow-hidden p-3">
         {/* Learner List */}
-        <Card className="col-span-4 flex flex-col">
+        <Card className="col-span-4 flex min-h-0 flex-col">
           <CardHeader className="p-3">
-            <CardTitle className="text-sm">
-              Learners ({filteredLearners.length})
-            </CardTitle>
+            <CardTitle className="text-sm">Learners ({totalCount})</CardTitle>
           </CardHeader>
-          <CardContent className="flex-1 overflow-hidden p-0">
-            <ScrollArea className="h-[calc(100vh-220px)]">
+          <CardContent className="min-h-0 flex-1 overflow-hidden p-0">
+            <ScrollArea className="h-full">
               <div className="space-y-1 p-3 pt-0">
                 {isLoading ? (
                   <div className="py-8 text-center text-muted-foreground">
                     Loading...
                   </div>
-                ) : filteredLearners.length === 0 ? (
+                ) : isError ? (
+                  <div className="py-8 text-center text-destructive">
+                    {error?.message ||
+                      "Unable to load learners. Please try Refresh."}
+                  </div>
+                ) : learnersWithIssues.length === 0 ? (
                   <div className="py-8 text-center text-muted-foreground">
                     No learners found
                   </div>
                 ) : (
-                  filteredLearners.map((learner) => (
+                  learnersWithIssues.map((learner) => (
                     <div
                       key={learner.id}
                       onClick={() => setSelectedLearnerId(learner.id)}
@@ -461,6 +491,30 @@ export default function LearnerIssueFixer() {
               </div>
             </ScrollArea>
           </CardContent>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t p-3">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page === 1 || isFetching}
+              onClick={() => setPage((current) => current - 1)}
+            >
+              Previous
+            </Button>
+            <span className="text-xs text-muted-foreground" aria-live="polite">
+              Page {page}
+              {learnersData && ` of ${totalPages}`}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={
+                !learnersData || page >= totalPages || isFetching || isError
+              }
+              onClick={() => setPage((current) => current + 1)}
+            >
+              Next
+            </Button>
+          </div>
         </Card>
 
         {/* Issue Panel */}
@@ -525,14 +579,8 @@ export default function LearnerIssueFixer() {
                 <DataEditor
                   key={selectedLearner.id}
                   learner={selectedLearner}
-                  enrollments={
-                    learnersWithIssues.find((l) => l.id === selectedLearnerId)
-                      ?.enrollments || []
-                  }
-                  payments={
-                    learnersWithIssues.find((l) => l.id === selectedLearnerId)
-                      ?.payments || []
-                  }
+                  enrollments={selectedLearner.enrollment || []}
+                  payments={selectedLearner.payment || []}
                   schedules={schedules || []}
                   onDeleteSuccess={() => setSelectedLearnerId(null)}
                 />
@@ -749,7 +797,11 @@ const LEARNER_FIELD_GROUPS: LearnerFieldGroup[] = [
         type: "boolean",
       },
       { key: "enabled", label: "Enabled", type: "boolean" },
-      { key: "has_lesson10_booked", label: "Lesson 10 Booked", type: "boolean" },
+      {
+        key: "has_lesson10_booked",
+        label: "Lesson 10 Booked",
+        type: "boolean",
+      },
       { key: "start_date", label: "Start Date", type: "date" },
       {
         key: "preferred_start_date",
@@ -784,7 +836,11 @@ const LEARNER_FIELD_GROUPS: LearnerFieldGroup[] = [
     title: "Car Commerce / Intent",
     fields: [
       { key: "car_intent_type", label: "Car Intent Type", type: "text" },
-      { key: "car_intent_planning", label: "Car Intent Planning", type: "text" },
+      {
+        key: "car_intent_planning",
+        label: "Car Intent Planning",
+        type: "text",
+      },
       {
         key: "car_intent_condition",
         label: "Car Intent Condition",
@@ -1017,10 +1073,7 @@ function LearnerEditor({ learner }: { learner: Learner }) {
     try {
       for (const field of EDITABLE_LEARNER_FIELDS) {
         if (changedKeys.includes(field.key)) {
-          updates[field.key] = learnerFormValueToDb(
-            field,
-            formData[field.key],
-          );
+          updates[field.key] = learnerFormValueToDb(field, formData[field.key]);
         }
       }
     } catch {
@@ -1091,9 +1144,12 @@ function LearnerEditor({ learner }: { learner: Learner }) {
     setIsUploadingSignature(true);
     let newStoragePath: string | null = null;
     try {
-      const { data: authData, error: authError } = await supabase.auth.getUser();
+      const { data: authData, error: authError } =
+        await supabase.auth.getUser();
       if (authError || !authData.user) {
-        throw authError || new Error("You must be signed in to upload a signature.");
+        throw (
+          authError || new Error("You must be signed in to upload a signature.")
+        );
       }
 
       const extension = signatureFile.type === "image/png" ? "png" : "jpg";
@@ -1122,11 +1178,14 @@ function LearnerEditor({ learner }: { learner: Learner }) {
       if (signatureInputRef.current) signatureInputRef.current.value = "";
       toast({
         title: "Signature uploaded",
-        description: "Future Form 15 downloads will include this learner signature.",
+        description:
+          "Future Form 15 downloads will include this learner signature.",
       });
     } catch (error: any) {
       if (newStoragePath) {
-        await supabase.storage.from("learner-signatures").remove([newStoragePath]);
+        await supabase.storage
+          .from("learner-signatures")
+          .remove([newStoragePath]);
       }
       toast({
         title: "Signature upload failed",
@@ -1302,7 +1361,9 @@ function LearnerEditor({ learner }: { learner: Learner }) {
             type="file"
             accept="image/png,image/jpeg"
             className="h-9 max-w-md text-xs"
-            onChange={(event) => setSignatureFile(event.target.files?.[0] || null)}
+            onChange={(event) =>
+              setSignatureFile(event.target.files?.[0] || null)
+            }
             disabled={isUploadingSignature}
           />
           <Button
@@ -1330,7 +1391,8 @@ function LearnerEditor({ learner }: { learner: Learner }) {
           )}
         </div>
         <p className="text-[10px] text-muted-foreground">
-          PNG or JPG, maximum 5 MB. Admin uploads do not record learner terms consent.
+          PNG or JPG, maximum 5 MB. Admin uploads do not record learner terms
+          consent.
         </p>
       </div>
 
@@ -1357,9 +1419,7 @@ function LearnerEditor({ learner }: { learner: Learner }) {
             {group.fields.map((field) => (
               <div
                 key={String(field.key)}
-                className={
-                  field.full ? "col-span-2 space-y-1" : "space-y-1"
-                }
+                className={field.full ? "col-span-2 space-y-1" : "space-y-1"}
               >
                 {renderField(field)}
               </div>
@@ -1955,7 +2015,9 @@ function PaymentEditor({
       if (error) throw error;
       if (data?.success && data.captured) {
         toast({
-          title: data.alreadyCompleted ? "Already completed" : "Payment recovered",
+          title: data.alreadyCompleted
+            ? "Already completed"
+            : "Payment recovered",
           description: data.alreadyCompleted
             ? "This payment was already marked completed."
             : `Marked completed via Razorpay payment ${data.razorpayPaymentId}.`,
@@ -2296,7 +2358,9 @@ function PaymentPlanEditor({
   const [courseId, setCourseId] = useState(initCourseId);
   const [plan, setPlan] = useState<PaymentPlan>(initialPlan);
   const [totalAmount, setTotalAmount] = useState<number>(initAmount);
-  const [customDueNow, setCustomDueNow] = useState<number>(initI1 || initAmount);
+  const [customDueNow, setCustomDueNow] = useState<number>(
+    initI1 || initAmount,
+  );
   const [reason, setReason] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [generatedLink, setGeneratedLink] = useState<string | null>(null);
@@ -2377,7 +2441,11 @@ function PaymentPlanEditor({
         description: "Payment link copied to clipboard.",
       });
     } catch {
-      toast({ title: "Copy failed", description: link, variant: "destructive" });
+      toast({
+        title: "Copy failed",
+        description: link,
+        variant: "destructive",
+      });
     }
   };
 
@@ -2392,7 +2460,10 @@ function PaymentPlanEditor({
       return;
     }
     if (!hasChanges) {
-      toast({ title: "No changes detected", description: "Nothing to update." });
+      toast({
+        title: "No changes detected",
+        description: "Nothing to update.",
+      });
       return;
     }
     setConfirmOpen(true);
@@ -2553,10 +2624,7 @@ function PaymentPlanEditor({
         </div>
         <div className="space-y-1">
           <Label className="text-xs font-medium">Payment Plan</Label>
-          <Select
-            value={plan}
-            onValueChange={(v) => setPlan(v as PaymentPlan)}
-          >
+          <Select value={plan} onValueChange={(v) => setPlan(v as PaymentPlan)}>
             <SelectTrigger className="h-8 text-sm">
               <SelectValue />
             </SelectTrigger>
@@ -2683,7 +2751,10 @@ function PaymentPlanEditor({
                   <span className="text-red-600 line-through">
                     {String(c.old)}
                   </span>{" "}
-                  → <span className="font-medium text-green-700">{String(c.new)}</span>
+                  →{" "}
+                  <span className="font-medium text-green-700">
+                    {String(c.new)}
+                  </span>
                 </span>
               </div>
             ))}

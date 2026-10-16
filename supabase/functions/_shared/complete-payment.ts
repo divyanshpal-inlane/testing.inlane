@@ -127,9 +127,7 @@ export async function completePayment(
         .eq("id", enrollment.course_id)
         .maybeSingle();
       totalCourseLessons =
-        courseRow?.total_lessons ||
-        courseRow?.duration ||
-        totalCourseLessons;
+        courseRow?.total_lessons || courseRow?.duration || totalCourseLessons;
     }
 
     // Demo hours already driven stand in for the course's first lessons, so
@@ -270,10 +268,7 @@ export async function completePayment(
     const topupHours =
       enrollment?.progress?.total_hours ||
       Math.max(1, Math.round((payment.amount || 1) / 1));
-    const unlockedLessons = Array.from(
-      { length: topupHours },
-      (_, i) => i + 1,
-    );
+    const unlockedLessons = Array.from({ length: topupHours }, (_, i) => i + 1);
     const topupProgress = {
       type: "topup",
       total_hours: topupHours,

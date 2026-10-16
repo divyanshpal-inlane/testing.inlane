@@ -65,7 +65,9 @@ export default function AdminLogin() {
       );
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Failed to send OTP. Please try again.",
+        err instanceof Error
+          ? err.message
+          : "Failed to send OTP. Please try again.",
       );
     } finally {
       setIsRequestingOtp(false);
@@ -125,11 +127,7 @@ export default function AdminLogin() {
           if (newPassword !== confirmPassword) {
             throw new Error("Passwords do not match");
           }
-          await verifyOtpAndResetPassword(
-            formData.phone,
-            otp,
-            newPassword,
-          );
+          await verifyOtpAndResetPassword(formData.phone, otp, newPassword);
           setSuccessMessage(
             "Password reset successfully! You can now login with your new password.",
           );
@@ -150,7 +148,9 @@ export default function AdminLogin() {
     } catch (err) {
       setSuccessMessage("");
       setError(
-        err instanceof Error ? err.message : "An error occurred. Please try again.",
+        err instanceof Error
+          ? err.message
+          : "An error occurred. Please try again.",
       );
     } finally {
       setIsLoading(false);
@@ -168,7 +168,11 @@ export default function AdminLogin() {
     setSuccessMessage("");
   };
 
-  if (user && (user.user_metadata.user_role === "admin" || user.user_metadata.user_role === "user")) {
+  if (
+    user &&
+    (user.user_metadata.user_role === "admin" ||
+      user.user_metadata.user_role === "user")
+  ) {
     return <Navigate to="/admin" />;
   }
 
@@ -181,7 +185,9 @@ export default function AdminLogin() {
           ) : (
             <>
               <h1 className="text-2xl font-bold">Admin Login</h1>
-              <p className="text-gray-500">Enter your credentials to continue</p>
+              <p className="text-gray-500">
+                Enter your credentials to continue
+              </p>
             </>
           )}
         </div>
@@ -218,15 +224,9 @@ export default function AdminLogin() {
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
-                  aria-label={
-                    showPassword ? "Hide password" : "Show password"
-                  }
+                  aria-label={showPassword ? "Hide password" : "Show password"}
                 >
-                  {showPassword ? (
-                    <EyeOff size={20} />
-                  ) : (
-                    <Eye size={20} />
-                  )}
+                  {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
                 </button>
               </div>
               <p className="text-sm text-muted-foreground">
@@ -269,11 +269,7 @@ export default function AdminLogin() {
                       showNewPassword ? "Hide password" : "Show password"
                     }
                   >
-                    {showNewPassword ? (
-                      <EyeOff size={20} />
-                    ) : (
-                      <Eye size={20} />
-                    )}
+                    {showNewPassword ? <EyeOff size={20} /> : <Eye size={20} />}
                   </button>
                 </div>
               </div>
@@ -289,7 +285,11 @@ export default function AdminLogin() {
           )}
 
           {/* Error and success messages */}
-          {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+          {error && (
+            <p className="text-sm text-destructive" role="alert">
+              {error}
+            </p>
+          )}
           {successMessage && (
             <p className="text-sm text-green-500" role="alert">
               {successMessage}
@@ -329,11 +329,7 @@ export default function AdminLogin() {
                   Send OTP
                 </Button>
               ) : !otpVerified ? (
-                <Button
-                  className="w-full"
-                  type="submit"
-                  disabled={isLoading}
-                >
+                <Button className="w-full" type="submit" disabled={isLoading}>
                   {isLoading ? (
                     <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
                   ) : (
@@ -341,11 +337,7 @@ export default function AdminLogin() {
                   )}
                 </Button>
               ) : (
-                <Button
-                  className="w-full"
-                  type="submit"
-                  disabled={isLoading}
-                >
+                <Button className="w-full" type="submit" disabled={isLoading}>
                   {isLoading ? (
                     <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
                   ) : (

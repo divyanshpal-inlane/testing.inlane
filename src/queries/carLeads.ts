@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
 
 import { supabase } from "@/lib/supabaseClient";
@@ -28,10 +28,16 @@ export interface CarLead {
   lastClassDate: string | null; // 10th / last class
 }
 
-const isLead = (r: CarLead) =>
-  r.drivingMotivation === CAR_MOTIVATION ||
-  r.carIntentPlanning === "Yes" ||
-  !!(r.carPurchaseTimeline && r.carPurchaseTimeline.trim() !== "");
+export const CAR_LEADS_PAGE_SIZE = 10;
+
+export type CarLeadPlanningFilter = "all" | "yes" | "onboarding";
+
+interface CarLeadsOptions {
+  page: number;
+  search: string;
+  area: string;
+  planning: CarLeadPlanningFilter;
+}
 
 // Schedule rows in these states are not counted as real classes.
 const DEAD_SCHEDULE_STATUSES = new Set([
@@ -85,47 +91,80 @@ async function attachClassDates(leads: CarLead[]): Promise<void> {
   }
 }
 
-// All learners who have shown car-buying intent — at onboarding
-// (driving_motivation / car_purchase_timeline) OR via instructor feedback
-// (car_intent_planning = 'Yes'). The server `.or()` narrows; a client-side
-// `isLead` guard keeps the result exact (onboarding stores "" for non-buyers).
-export function useCarLeads() {
-  return useQuery({
-    queryKey: ["car_leads"],
-    queryFn: async (): Promise<CarLead[]> => {
-      const { data, error } = await supabase
-        .from("Learner")
-        .select(
-          "id, name, phone, area, pick_up_location, driving_motivation, car_purchase_timeline, car_intent_planning, car_intent_type, car_intent_condition, car_intent_timeframe, car_intent_updated_at, car_onboarding_intent_at",
-        )
-        .or(
-          `driving_motivation.eq.${CAR_MOTIVATION},car_intent_planning.eq.Yes,car_purchase_timeline.neq.`,
-        );
-      if (error) throw error;
-      const leads = ((data ?? []) as Array<Record<string, unknown>>)
-        .map((r) => ({
-          id: String(r.id),
-          name: (r.name as string) ?? null,
-          phone: (r.phone as string) ?? null,
-          area: (r.area as string) ?? null,
-          pickupLocation: (r.pick_up_location as string) ?? null,
-          drivingMotivation: (r.driving_motivation as string) ?? null,
-          carPurchaseTimeline: (r.car_purchase_timeline as string) ?? null,
-          carIntentPlanning: (r.car_intent_planning as string) ?? null,
-          carIntentType: (r.car_intent_type as string) ?? null,
-          carIntentCondition: (r.car_intent_condition as string) ?? null,
-          carIntentTimeframe: (r.car_intent_timeframe as string) ?? null,
-          carIntentUpdatedAt: (r.car_intent_updated_at as string) ?? null,
-          carOnboardingIntentAt: (r.car_onboarding_intent_at as string) ?? null,
-          firstClassDate: null,
-          midClassDate: null,
-          lastClassDate: null,
-        }))
-        .filter(isLead);
+// The RPC filters leads in SQL; PostgREST counts the filtered set and returns
+// only the requested ten rows. Schedule enrichment is limited to that page.
+export async function fetchCarLeadsPage(
+  { page, search, area, planning }: CarLeadsOptions,
+  signal?: AbortSignal,
+): Promise<{ leads: CarLead[]; totalCount: number }> {
+  const buildQuery = (head = false) => {
+    const query = supabase
+      .rpc(
+        "get_car_leads",
+        {
+          search_term: search.trim(),
+          area_filter: area,
+          planning_filter: planning,
+        },
+        { count: "exact", head },
+      )
+      .select(
+        "id, name, phone, area, pick_up_location, driving_motivation, car_purchase_timeline, car_intent_planning, car_intent_type, car_intent_condition, car_intent_timeframe, car_intent_updated_at, car_onboarding_intent_at",
+      );
+    return signal ? query.abortSignal(signal) : query;
+  };
+  const from = (page - 1) * CAR_LEADS_PAGE_SIZE;
+  const { data, error, count } = await buildQuery()
+    .order("id", { ascending: false })
+    .range(from, from + CAR_LEADS_PAGE_SIZE - 1);
 
-      // Enrich the (already-narrowed) leads with their 1st / 50% / last class dates.
-      await attachClassDates(leads);
-      return leads;
+  // A refresh can shrink the result set below the current offset.
+  if (error?.code === "PGRST103" && from > 0) {
+    const { count: remainingCount, error: countError } = await buildQuery(true);
+    if (countError) throw countError;
+    return { leads: [], totalCount: remainingCount ?? 0 };
+  }
+  if (error) throw error;
+  const leads = ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    id: String(r.id),
+    name: (r.name as string) ?? null,
+    phone: (r.phone as string) ?? null,
+    area: (r.area as string) ?? null,
+    pickupLocation: (r.pick_up_location as string) ?? null,
+    drivingMotivation: (r.driving_motivation as string) ?? null,
+    carPurchaseTimeline: (r.car_purchase_timeline as string) ?? null,
+    carIntentPlanning: (r.car_intent_planning as string) ?? null,
+    carIntentType: (r.car_intent_type as string) ?? null,
+    carIntentCondition: (r.car_intent_condition as string) ?? null,
+    carIntentTimeframe: (r.car_intent_timeframe as string) ?? null,
+    carIntentUpdatedAt: (r.car_intent_updated_at as string) ?? null,
+    carOnboardingIntentAt: (r.car_onboarding_intent_at as string) ?? null,
+    firstClassDate: null,
+    midClassDate: null,
+    lastClassDate: null,
+  }));
+
+  await attachClassDates(leads);
+  return { leads, totalCount: count ?? 0 };
+}
+
+export function useCarLeads(options: CarLeadsOptions) {
+  return useQuery({
+    queryKey: ["car_leads", options],
+    queryFn: ({ signal }) => fetchCarLeadsPage(options, signal),
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useCarLeadAreas() {
+  return useQuery({
+    queryKey: ["car_lead_areas"],
+    queryFn: async ({ signal }): Promise<string[]> => {
+      const { data, error } = await supabase
+        .rpc("get_car_lead_areas")
+        .abortSignal(signal);
+      if (error) throw error;
+      return (data ?? []).map((r) => r.area).sort();
     },
   });
 }

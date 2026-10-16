@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { parseISO } from "date-fns";
 
 import { supabase } from "@/lib/supabaseClient";
@@ -90,7 +95,7 @@ const unavailableInWindow = (
   return false;
 };
 
-const first = <T,>(v: T | T[] | null | undefined): T | null =>
+const first = <T>(v: T | T[] | null | undefined): T | null =>
   Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
 
 // Translate an approved leave request into an Instructor.unavailability entry,
@@ -199,35 +204,102 @@ export function useCancelLeaveRequest() {
 // ---------------------------------------------------------------------------
 // Admin-facing hooks
 // ---------------------------------------------------------------------------
+const LEAVE_REQUEST_BATCH_SIZE = 20;
+
+interface LeaveRequestsPage {
+  rows: LeaveRequestWithInstructor[];
+  hasMore: boolean;
+  nextOffset: number;
+}
+
+const selectLeaveRequests = (data: { pages: LeaveRequestsPage[] }) => {
+  const rows = new Map<string, LeaveRequestWithInstructor>();
+  for (const page of data.pages) {
+    for (const row of page.rows) rows.set(row.id, row);
+  }
+  return Array.from(rows.values());
+};
+
 export function useAllLeaveRequests(filters?: { status?: LeaveStatus }) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: ["leave_requests", "all", filters?.status ?? "any"],
-    queryFn: async (): Promise<LeaveRequestWithInstructor[]> => {
-      let q = supabase
-        .from("instructor_leave_request")
-        .select("*")
-        .order("created_at", { ascending: false });
-      if (filters?.status) q = q.eq("status", filters.status);
-      const { data, error } = await q;
+    // Opening the page or changing the filter starts with one small batch.
+    gcTime: 0,
+    initialPageParam: 0,
+    queryFn: async ({ pageParam, signal }): Promise<LeaveRequestsPage> => {
+      const { data, error } = await supabase
+        .rpc("get_leave_requests_paginated", {
+          p_status: filters?.status ?? "all",
+          p_offset: pageParam,
+          // One look-ahead row detects the end without an extra empty page.
+          p_limit: LEAVE_REQUEST_BATCH_SIZE + 1,
+        })
+        .abortSignal(signal);
       if (error) throw error;
-      const rows = (data ?? []) as LeaveRequest[];
+      const fetched = (data ?? []) as LeaveRequest[];
+      const rows = fetched.slice(0, LEAVE_REQUEST_BATCH_SIZE);
 
       // Resolve instructor names/phones in one batch (no FK relationship typed).
       const ids = Array.from(new Set(rows.map((r) => r.instructor_id)));
-      const nameById = new Map<string, { name: string | null; phone: string | null }>();
+      const nameById = new Map<
+        string,
+        { name: string | null; phone: string | null }
+      >();
       if (ids.length) {
-        const { data: instrs } = await supabase
+        const { data: instrs, error: instructorError } = await supabase
           .from("Instructor")
           .select("id_instructor, name, phone")
-          .in("id_instructor", ids);
+          .in("id_instructor", ids)
+          .abortSignal(signal);
+        if (instructorError) throw instructorError;
         for (const i of instrs ?? [])
           nameById.set(i.id_instructor, { name: i.name, phone: i.phone });
       }
-      return rows.map((r) => ({
-        ...r,
-        instructorName: nameById.get(r.instructor_id)?.name ?? null,
-        instructorPhone: nameById.get(r.instructor_id)?.phone ?? null,
-      }));
+      return {
+        rows: rows.map((r) => ({
+          ...r,
+          instructorName: nameById.get(r.instructor_id)?.name ?? null,
+          instructorPhone: nameById.get(r.instructor_id)?.phone ?? null,
+        })),
+        hasMore: fetched.length > LEAVE_REQUEST_BATCH_SIZE,
+        nextOffset: pageParam + LEAVE_REQUEST_BATCH_SIZE,
+      };
+    },
+    getNextPageParam: (lastPage) =>
+      lastPage.hasMore ? lastPage.nextOffset : undefined,
+    select: selectLeaveRequests,
+  });
+}
+
+export function usePendingLeaveRequestCount() {
+  return useQuery({
+    queryKey: ["leave_requests", "pending_count"],
+    queryFn: async ({ signal }) => {
+      const { count, error } = await supabase
+        .from("instructor_leave_request")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "pending")
+        .abortSignal(signal);
+      if (error) throw error;
+      return count ?? 0;
+    },
+  });
+}
+
+// A reviewed row may leave the active status filter; keep its dialog current.
+export function useLeaveRequest(id: string | undefined) {
+  return useQuery({
+    queryKey: ["leave_requests", "detail", id],
+    enabled: !!id,
+    queryFn: async ({ signal }): Promise<LeaveRequest> => {
+      const { data, error } = await supabase
+        .from("instructor_leave_request")
+        .select("*")
+        .eq("id", id!)
+        .abortSignal(signal)
+        .single();
+      if (error) throw error;
+      return data as LeaveRequest;
     },
   });
 }
@@ -268,7 +340,11 @@ export function useReviewLeaveRequest() {
         if (e2) throw e2;
         const { error: e3 } = await supabase
           .from("instructor_leave_request")
-          .update({ ...reviewed, status: "approved", unavailability_applied: true })
+          .update({
+            ...reviewed,
+            status: "approved",
+            unavailability_applied: true,
+          })
           .eq("id", request.id);
         if (e3) throw e3;
       } else {
@@ -298,9 +374,7 @@ export function useRevokeLeave() {
         const current = Array.isArray(instr?.unavailability)
           ? (instr!.unavailability as Array<Record<string, unknown>>)
           : [];
-        const next = current.filter(
-          (u) => u?.leave_request_id !== request.id,
-        );
+        const next = current.filter((u) => u?.leave_request_id !== request.id);
         const { error: e2 } = await supabase
           .from("Instructor")
           .update({ unavailability: next as unknown as Json })
@@ -345,9 +419,11 @@ export function useLeaveAffectedLessons(request: LeaveRequest | null) {
       }
 
       return rows.map((s) => {
-        const learner = first<{ name: string | null; phone: string | null; area: string | null }>(
-          s.Learner as never,
-        );
+        const learner = first<{
+          name: string | null;
+          phone: string | null;
+          area: string | null;
+        }>(s.Learner as never);
         const lesson = first<{ number: number | null }>(s.Lesson as never);
         return {
           scheduleId: s.id,
@@ -399,7 +475,10 @@ export function useReplacementCandidates(
         .select("instructor_id, start_time, end_time")
         .eq("date", l.date)
         .in("status", ACTIVE_STATUSES);
-      const byInstr = new Map<string, { start_time: string | null; end_time: string | null }[]>();
+      const byInstr = new Map<
+        string,
+        { start_time: string | null; end_time: string | null }[]
+      >();
       for (const s of scheds ?? []) {
         if (!s.instructor_id) continue;
         if (!byInstr.has(s.instructor_id)) byInstr.set(s.instructor_id, []);
@@ -430,7 +509,12 @@ export function useReplacementCandidates(
             Number(b.sameArea) - Number(a.sameArea) ||
             (a.name ?? "").localeCompare(b.name ?? ""),
         )
-        .map(({ id, name, phone, sameArea }) => ({ id, name, phone, sameArea }));
+        .map(({ id, name, phone, sameArea }) => ({
+          id,
+          name,
+          phone,
+          sameArea,
+        }));
     },
   });
 }
@@ -438,7 +522,10 @@ export function useReplacementCandidates(
 export function useReassignLesson() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (input: { scheduleId: number; newInstructorId: string }) => {
+    mutationFn: async (input: {
+      scheduleId: number;
+      newInstructorId: string;
+    }) => {
       const { error } = await supabase
         .from("Schedule")
         // Schedule's generated Update type wrongly requires ended_at; cast past it.

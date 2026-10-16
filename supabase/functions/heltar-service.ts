@@ -99,7 +99,13 @@ export const TEMPLATES = {
     language: "en",
     content:
       "Hey {{1}},\n\nWe hope you are having the best day. Your have a lesson tomorrow 📔🚗. Do check the details below:\n\n*Date:* {{2}}\n*Time:* {{3}}\n*Driving Buddy:* {{4}}\n\nTo contact your Driving buddy, please use the Lane App\n\nIncase of any queries please feel free to reach out to us via mail at support@inlane.in or via call at 07316914676 (please ensure there is 0 before 731)\n\nCheck the *Lane App* for more details 🥳\n\nThank you,\nLane Team 🚗🚗",
-},
+  },
+  DAILY_NOTIFICATION_SCHEDULE: {
+    name: "daily_notification_schedule_",
+    language: "en",
+    content:
+      "Hey {{1}},\n\nWe hope you’re having a great day! 😊\n\nJust a gentle reminder that your driving lesson is scheduled for tomorrow. 🚗📔 Please find the details below:\n\nDate: {{2}}\n\nTime: {{3}}\n\nDriving Buddy: {{4}}\n\nFor complete lesson details and updates, kindly check the Lane App. 🥳\n\nImportant: We kindly request you to let us know if you need any changes to tomorrow’s schedule before 7:00 PM today. This will help us plan the schedules smoothly and accommodate your request wherever possible.\n\nWe sincerely request your cooperation in informing us within the mentioned time. Requests made after 7:00 PM may be difficult to accommodate, and nominal charges may apply for late schedule changes.\n\nThank you so much for your understanding and cooperation. 🙏\n\n– Team Lane 🚗🚗",
+  },
   INSTRUCTOR_DAILY_SCHEDULE: {
     name: "instructor_daily_schedule",
     language: "en",
@@ -612,9 +618,10 @@ class HeltarMessageService {
           );
         }
         case "PASSWORD_RESET_OTP": {
-          const { learner_id, otp, user_type, user_id, user_name, user_phone } = data;
-          
-          // Support both new format (user_type, user_id, user_name, user_phone) 
+          const { learner_id, otp, user_type, user_id, user_name, user_phone } =
+            data;
+
+          // Support both new format (user_type, user_id, user_name, user_phone)
           // and legacy format (learner_id only)
           if (user_type && user_id && user_name && user_phone) {
             // New format: directly use provided user details
@@ -634,7 +641,9 @@ class HeltarMessageService {
               `password-reset-otp-${learner_id}-${Date.now()}`,
             );
           } else {
-            throw new Error("PASSWORD_RESET_OTP requires either (user_type, user_id, user_name, user_phone) or learner_id");
+            throw new Error(
+              "PASSWORD_RESET_OTP requires either (user_type, user_id, user_name, user_phone) or learner_id",
+            );
           }
         }
 
@@ -1021,7 +1030,7 @@ class HeltarMessageService {
           } = data;
           return this.sendTemplate(
             learner_phone,
-            "REMINDER_CUSTOMER_FOR_CLASS",
+            "DAILY_NOTIFICATION_SCHEDULE",
             [
               learner_name,
               date || "tomorrow",

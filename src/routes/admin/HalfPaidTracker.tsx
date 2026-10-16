@@ -5,8 +5,11 @@ import React, { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/use-toast";
+import { useCanSeeCustomerPhone } from "@/hooks/useCanSeeCustomerPhone";
 import { supabase } from "@/lib/supabaseClient";
+import { maskPhoneNumber } from "@/utils/phoneMasking";
 
 interface HalfPaidEnrollment {
   id: string;
@@ -38,14 +41,34 @@ interface HalfPaidEnrollment {
 }
 
 export function HalfPaidTracker() {
+  const canSeeFullPhone = useCanSeeCustomerPhone();
   const [enrollments, setEnrollments] = useState<HalfPaidEnrollment[]>([]);
   const [loading, setLoading] = useState(true);
   const { toast } = useToast();
 
+  // Search and pagination state
+  const [searchQuery, setSearchQuery] = useState("");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const itemsPerPage = 20;
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / itemsPerPage));
+
+  // Reset to page 1 when search query changes
+  React.useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery]);
+
+  // Fetch data when page or search changes
+  React.useEffect(() => {
+    fetchHalfPaidEnrollments();
+  }, [currentPage, searchQuery]);
+
   const fetchHalfPaidEnrollments = async () => {
     setLoading(true);
     try {
-      const { data, error } = await supabase
+      // Build the base query
+      let query = supabase
         .from("enrollment")
         .select(
           `
@@ -56,7 +79,7 @@ export function HalfPaidTracker() {
           payment_status,
           created_at,
           learner_id,
-          Learner (
+          Learner!inner (
             id,
             name,
             phone,
@@ -76,12 +99,28 @@ export function HalfPaidTracker() {
             installment_type
           )
         `,
+          { count: "exact" },
         )
-        .eq("payment_status", "half_paid")
-        .order("created_at", { ascending: false });
+        .eq("payment_status", "half_paid");
+
+      // Apply search filter at database level if search query exists
+      if (searchQuery.trim()) {
+        // Search by Learner name only
+        const searchPattern = `%${searchQuery}%`;
+        query = query.ilike("Learner.name", searchPattern);
+      }
+
+      // Apply pagination at database level
+      const from = (currentPage - 1) * itemsPerPage;
+      const to = from + itemsPerPage - 1;
+
+      const { data, error, count } = await query
+        .order("created_at", { ascending: false })
+        .range(from, to);
 
       if (error) throw error;
       setEnrollments((data as unknown as HalfPaidEnrollment[]) || []);
+      setTotalCount(count || 0);
     } catch (err) {
       console.error("Error fetching half-paid enrollments:", err);
       toast({
@@ -93,10 +132,6 @@ export function HalfPaidTracker() {
       setLoading(false);
     }
   };
-
-  useEffect(() => {
-    fetchHalfPaidEnrollments();
-  }, []);
 
   const getFirstPaymentDate = (
     enrollment: HalfPaidEnrollment,
@@ -139,10 +174,19 @@ export function HalfPaidTracker() {
 
   return (
     <Card className="mt-6 transition-all hover:shadow-lg">
-      <CardHeader className="flex flex-row items-center justify-between">
-        <div>
-          <CardTitle className="text-xl">50% Payment Tracker</CardTitle>
-          <p className="mt-1 text-sm text-muted-foreground">
+      <CardHeader className="flex flex-row items-center justify-between gap-4">
+        <div className="flex flex-1 flex-col gap-2">
+          <div className="flex items-center gap-4">
+            <CardTitle className="text-xl">50% Payment Tracker</CardTitle>
+            <Input
+              type="text"
+              placeholder="Search"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="max-w-md"
+            />
+          </div>
+          <p className="text-sm text-muted-foreground">
             Learners who paid first installment — pending second half
           </p>
         </div>
@@ -162,13 +206,17 @@ export function HalfPaidTracker() {
           <p className="py-4 text-center text-muted-foreground">
             No learners with pending second installment
           </p>
+        ) : enrollments.length === 0 ? (
+          <p className="py-4 text-center text-muted-foreground">
+            No enrollments found matching your search.
+          </p>
         ) : (
           <>
             {/* Summary stats */}
             <div className="mb-4 flex flex-wrap gap-3">
               <Badge variant="secondary" className="text-sm">
-                {enrollments.length} learner
-                {enrollments.length !== 1 ? "s" : ""}
+                {totalCount} learner
+                {totalCount !== 1 ? "s" : ""}
               </Badge>
               <Badge variant="outline" className="text-sm">
                 Total outstanding: ₹{totalOutstanding.toLocaleString()}
@@ -220,7 +268,11 @@ export function HalfPaidTracker() {
                             {enrollment.Learner?.name || "Unknown"}
                           </div>
                           <div className="text-xs text-gray-500">
-                            {enrollment.Learner?.phone || ""}
+                            {enrollment.Learner?.phone
+                              ? canSeeFullPhone
+                                ? enrollment.Learner.phone
+                                : maskPhoneNumber(enrollment.Learner.phone)
+                              : ""}
                           </div>
                         </td>
                         <td className="px-2 py-2 text-sm">
@@ -266,6 +318,43 @@ export function HalfPaidTracker() {
                 </tbody>
               </table>
             </div>
+
+            {/* Pagination Controls */}
+            {enrollments.length > 0 && (
+              <div className="mt-4 flex items-center justify-between">
+                <div className="text-sm text-muted-foreground">
+                  Showing{" "}
+                  {Math.min((currentPage - 1) * itemsPerPage + 1, totalCount)}{" "}
+                  to {Math.min(currentPage * itemsPerPage, totalCount)} of{" "}
+                  {totalCount} results
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setCurrentPage((prev) => Math.max(1, prev - 1))
+                    }
+                    disabled={currentPage === 1}
+                  >
+                    Previous
+                  </Button>
+                  <span className="text-sm">
+                    Page {currentPage} of {totalPages}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setCurrentPage((prev) => Math.min(totalPages, prev + 1))
+                    }
+                    disabled={currentPage === totalPages}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            )}
           </>
         )}
       </CardContent>

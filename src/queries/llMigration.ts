@@ -56,7 +56,10 @@ async function createPipelineApplication(
     services,
     status,
   };
-  if (row.llApplicationId && (row.stage === "has_ll" || row.stage === "passed_waiting")) {
+  if (
+    row.llApplicationId &&
+    (row.stage === "has_ll" || row.stage === "passed_waiting")
+  ) {
     insert.ll_number = row.llApplicationId;
   }
   if (row.llReceivedDate && row.stage === "has_ll") {
@@ -86,7 +89,9 @@ async function createPipelineApplication(
 // Create one migrated learner (+ optional payment/enrollment when a course is
 // given) and an ll_applications row so they appear on the LL→DL board.
 // Returns null on success, or an error message on failure.
-export async function importLLCustomer(row: ParsedLLRow): Promise<string | null> {
+export async function importLLCustomer(
+  row: ParsedLLRow,
+): Promise<string | null> {
   const { data: learner, error: learnerError } = await supabase
     .from("Learner")
     .insert(buildLearnerInsert(row) as never)

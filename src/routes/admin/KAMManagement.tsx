@@ -495,7 +495,7 @@ function KamDetailDrawer({
                       No instructors assigned yet.
                     </div>
                   ) : (
-                    <ScrollArea className="max-h-64">
+                    <ScrollArea className="h-64" style={{ height: "256px" }}>
                       <div className="divide-y">
                         {(assigned ?? []).map((a) => (
                           <div
@@ -565,7 +565,10 @@ function KamDetailDrawer({
                       className="pl-8"
                     />
                   </div>
-                  <ScrollArea className="max-h-72 rounded border">
+                  <ScrollArea
+                    className="h-72 rounded border"
+                    style={{ height: "288px" }}
+                  >
                     {candidates.length === 0 ? (
                       <div className="p-3 text-sm text-muted-foreground">
                         {(allInstructors?.length ?? 0) === 0

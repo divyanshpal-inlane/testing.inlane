@@ -132,6 +132,7 @@ export function useCustomerLLStatusUpdate() {
         queryKey: ["my-ll-application", learnerId],
       });
       queryClient.invalidateQueries({ queryKey: ["ll-applications"] });
+      queryClient.invalidateQueries({ queryKey: ["ll-queue-counts"] });
     },
   });
 }
@@ -227,6 +228,7 @@ export function useSelectDLTestDate() {
         queryKey: ["my-ll-application", learnerId],
       });
       queryClient.invalidateQueries({ queryKey: ["ll-applications"] });
+      queryClient.invalidateQueries({ queryKey: ["ll-queue-counts"] });
     },
   });
 }
@@ -273,6 +275,7 @@ export function useRequestLLHelp() {
         queryKey: ["my-ll-application", learnerId],
       });
       queryClient.invalidateQueries({ queryKey: ["ll-applications"] });
+      queryClient.invalidateQueries({ queryKey: ["ll-queue-counts"] });
     },
   });
 }
@@ -377,7 +380,9 @@ export function useSubmitLLApplication() {
 
       // Drop leftover secondary address-proof files when the customer
       // switched to a single-document subtype (e.g. Aadhaar).
-      const addressUploads = uploads.filter((u) => u.docType === "address_proof");
+      const addressUploads = uploads.filter(
+        (u) => u.docType === "address_proof",
+      );
       if (
         addressUploads.length > 0 &&
         !addressUploads.some((u) => u.docSlot === "secondary")
@@ -433,6 +438,7 @@ export function useSubmitLLApplication() {
       });
       queryClient.invalidateQueries({ queryKey: ["learner", phone] });
       queryClient.invalidateQueries({ queryKey: ["ll-applications"] });
+      queryClient.invalidateQueries({ queryKey: ["ll-queue-counts"] });
     },
   });
 }

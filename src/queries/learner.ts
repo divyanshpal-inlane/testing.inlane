@@ -6,7 +6,9 @@ import {
 } from "@tanstack/react-query";
 
 import { useUser } from "@/context/auth-context";
+import { selectLatestLearnerServiceEnrollment } from "@/lib/learner-service";
 import { supabase } from "@/lib/supabaseClient";
+import { invalidateSchedulingRequestQueries } from "@/queries/preferences";
 import { Database } from "@/types/database.types";
 import { getAllPhoneFormats } from "@/utils/phoneNormalization";
 
@@ -20,7 +22,10 @@ export function useLearner() {
       // Try all phone formats since auth context may return phone without +
       // e.g., auth returns "917368948038" but DB has "+917368948038"
       const phoneFormats = getAllPhoneFormats(phone);
-      console.log("[LEARNER] Trying phone formats to fetch learner:", phoneFormats);
+      console.log(
+        "[LEARNER] Trying phone formats to fetch learner:",
+        phoneFormats,
+      );
 
       for (const format of phoneFormats) {
         const { data: Learner, error } = await supabase
@@ -32,17 +37,32 @@ export function useLearner() {
           .maybeSingle();
 
         if (error) {
-          console.warn("[LEARNER] Error with format", format, ":", error.message);
+          console.warn(
+            "[LEARNER] Error with format",
+            format,
+            ":",
+            error.message,
+          );
           continue;
         }
 
         if (Learner) {
-          console.log("[LEARNER] ✅ Found learner with format:", format, "onboarding_completed:", Learner.onboarding_completed, "dob:", Learner.dob);
+          console.log(
+            "[LEARNER] ✅ Found learner with format:",
+            format,
+            "onboarding_completed:",
+            Learner.onboarding_completed,
+            "dob:",
+            Learner.dob,
+          );
           return Learner;
         }
       }
 
-      console.log("[LEARNER] No learner found with any phone format for:", phone);
+      console.log(
+        "[LEARNER] No learner found with any phone format for:",
+        phone,
+      );
       return null;
     },
     staleTime: Infinity,
@@ -265,19 +285,30 @@ export function useLearnerUpdate() {
           .select();
 
         if (result.error) {
-          console.warn("[LEARNER_UPDATE] Error with format", format, ":", result.error.message);
+          console.warn(
+            "[LEARNER_UPDATE] Error with format",
+            format,
+            ":",
+            result.error.message,
+          );
           continue;
         }
 
         if (result.data && result.data.length > 0) {
-          console.log("[LEARNER_UPDATE] ✅ Learner updated successfully with format:", format, result.data[0]);
+          console.log(
+            "[LEARNER_UPDATE] ✅ Learner updated successfully with format:",
+            format,
+            result.data[0],
+          );
           return result.data[0];
         }
       }
 
       // If no existing record found with any format, create one as fallback
       // This handles users who signed up before the trigger was in place
-      console.warn("[LEARNER_UPDATE] No existing record found. Creating new Learner record.");
+      console.warn(
+        "[LEARNER_UPDATE] No existing record found. Creating new Learner record.",
+      );
       const e164Phone = `+91${phone.replace(/\D/g, "").slice(-10)}`;
       const insertResult = await (supabase as any)
         .from("Learner")
@@ -286,11 +317,17 @@ export function useLearnerUpdate() {
 
       if (insertResult.error) {
         // If insert fails due to unique constraint (already exists), try once more with correct format
-        console.error("[LEARNER_UPDATE] Insert failed:", insertResult.error.message);
+        console.error(
+          "[LEARNER_UPDATE] Insert failed:",
+          insertResult.error.message,
+        );
         throw new Error("Failed to update your profile. Please try again.");
       }
 
-      console.log("[LEARNER_UPDATE] ✅ Learner created as fallback:", insertResult.data?.[0]);
+      console.log(
+        "[LEARNER_UPDATE] ✅ Learner created as fallback:",
+        insertResult.data?.[0],
+      );
       return insertResult.data?.[0] ?? null;
     },
     onSuccess: () => {
@@ -312,6 +349,14 @@ export function useUploadLLMutation() {
       file: File;
       fileName?: string;
     }) => {
+      if (!phone)
+        throw new Error("Please sign in again to upload your licence.");
+      if (!["image/jpeg", "image/png", "application/pdf"].includes(file.type)) {
+        throw new Error("Please upload a JPEG, PNG or PDF file.");
+      }
+      if (file.size > 4 * 1024 * 1024) {
+        throw new Error("Your licence file must be 4 MB or smaller.");
+      }
       const { data, error } = await supabase.storage
         .from("LL")
         .upload(`${phone}/${fileName}.${file.type.split("/")[1]}`, file, {
@@ -610,6 +655,7 @@ export function useLearnerEnrollmentCourse({
 }
 
 export function useMutationRescheduleRequest() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({
       learnerId,
@@ -632,7 +678,7 @@ export function useMutationRescheduleRequest() {
       // inserting a second one would show the same learner twice in admin's
       // New Schedules tab, so refresh the existing request instead.
       if (type === "new" && status === "pending") {
-        const { data: existingRequest } = await supabase
+        const { data: existingRequest, error: existingError } = await supabase
           .from("reschedule_requests")
           .select("id")
           .eq("learner_id", learnerId)
@@ -642,13 +688,15 @@ export function useMutationRescheduleRequest() {
           .limit(1)
           .maybeSingle();
 
+        if (existingError) throw existingError;
         if (existingRequest) {
           const { data: updatedRequest, error: updateError } = await supabase
             .from("reschedule_requests")
             .update({
               amount: totalFee,
               lesson_ids: lessonIds,
-              payment_id: paymentId,
+              // Preserve the payment link on pre-created demo/custom requests.
+              ...(paymentId ? { payment_id: paymentId } : {}),
             })
             .eq("id", existingRequest.id)
             .select()
@@ -673,6 +721,8 @@ export function useMutationRescheduleRequest() {
       if (rescheduleError) throw rescheduleError;
       return rescheduleRequest;
     },
+    onSuccess: (_, variables) =>
+      invalidateSchedulingRequestQueries(queryClient, variables.learnerId),
   });
 }
 
@@ -688,11 +738,7 @@ export function useMutationCompleteRescheduleRequest() {
       if (error) throw error;
       return data;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["scheduling-requests"],
-      });
-    },
+    onSuccess: () => invalidateSchedulingRequestQueries(queryClient),
   });
 }
 
@@ -711,7 +757,7 @@ export function useLearnerEnrollment({ learnerId }: { learnerId?: string }) {
       if (error) throw error;
       if (!data || data.length === 0) return null;
 
-      // Pick the enrollment that should drive the learner's experience.
+      // Pick the enrollment that should drive course progress and scheduling.
       // A stray demo/topup enrollment must never shadow a real course
       // enrollment, so rank by intent (course > topup > demo) rather than
       // just recency. `data` is newest-first and Array.sort is stable, so
@@ -730,51 +776,174 @@ export function useLearnerEnrollment({ learnerId }: { learnerId?: string }) {
   });
 }
 
+/**
+ * Reads the service selected in Learner Management's Create New Learner flow.
+ * That flow persists its selection as enrollment.case_type. The newest
+ * explicit selection wins even when it is pending, which is normal for RTO.
+ */
+export function useLearnerServiceEnrollment({
+  learnerId,
+}: {
+  learnerId?: string;
+}) {
+  return useQuery({
+    queryKey: ["learner-service-enrollment", learnerId],
+    queryFn: async () => {
+      if (!learnerId) return null;
+
+      const { data, error } = await supabase
+        .from("enrollment")
+        .select("id, learner_id, case_type, status, created_at")
+        .eq("learner_id", learnerId)
+        .in("status", ["active", "pending"])
+        .not("case_type", "is", null)
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+      return selectLatestLearnerServiceEnrollment(data ?? []);
+    },
+    staleTime: 0,
+    enabled: !!learnerId,
+  });
+}
+
 // ==================== ADMIN ISSUE FIXER QUERIES ====================
 
-// Fetch all learners with their enrollment and payment data for issue diagnosis
-// Handles pagination internally to get all records beyond 1000 limit
-export function useLearnersWithIssues() {
+export const LEARNER_ISSUE_PAGE_SIZE = 15;
+
+export type LearnerIssueFilter =
+  | "all"
+  | "has-issues"
+  | "no-issues"
+  | "enrollment"
+  | "payment"
+  | "schedule"
+  | "learner";
+
+type LearnerWithIssueData = Database["public"]["Tables"]["Learner"]["Row"] & {
+  enrollment: (Database["public"]["Tables"]["enrollment"]["Row"] & {
+    Courses: Database["public"]["Tables"]["Courses"]["Row"] | null;
+  })[];
+  payment: Database["public"]["Tables"]["payment"]["Row"][];
+};
+
+const LEARNER_ISSUE_SELECT = "*, enrollment (*, Courses(*)), payment (*)";
+
+// Quote PostgREST values and escape regex syntax to preserve literal substring
+// search, including commas, parentheses, quotes and wildcard characters.
+function learnerIssueSearchFilter(searchQuery: string) {
+  const pattern = JSON.stringify(
+    searchQuery.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&"),
+  );
+  return `name.imatch.${pattern},phone.match.${pattern},area.imatch.${pattern}`;
+}
+
+// Filter in the database before requesting exactly one page of learners.
+export function useLearnersWithIssues({
+  page = 1,
+  searchQuery = "",
+  issueFilter = "all",
+}: {
+  page?: number;
+  searchQuery?: string;
+  issueFilter?: LearnerIssueFilter;
+} = {}) {
+  const buildQuery = (head = false) => {
+    if (issueFilter !== "all") {
+      return supabase
+        .rpc(
+          "get_learners_with_issues",
+          { search_term: searchQuery, issue_filter: issueFilter },
+          { count: "exact", head },
+        )
+        .select(LEARNER_ISSUE_SELECT);
+    }
+
+    // Ordinary listing/search uses the existing table immediately, without
+    // depending on deployment of the issue-filter RPC.
+    let query = supabase
+      .from("Learner")
+      .select(LEARNER_ISSUE_SELECT, { count: "exact", head });
+    if (searchQuery) query = query.or(learnerIssueSearchFilter(searchQuery));
+    return query;
+  };
+
   return useQuery({
-    queryKey: ["learners-with-issues"],
-    queryFn: async () => {
-      let allLearners: any[] = [];
-      let page = 0;
-      const pageSize = 1000;
-      let hasMore = true;
+    queryKey: ["learners-with-issues", "page", page, searchQuery, issueFilter],
+    queryFn: async ({ signal }) => {
+      const from = (page - 1) * LEARNER_ISSUE_PAGE_SIZE;
+      const { data, count, error } = await buildQuery()
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .order("created_at", {
+          referencedTable: "enrollment",
+          ascending: false,
+        })
+        .order("id", { referencedTable: "enrollment", ascending: false })
+        .order("created_at", { referencedTable: "payment", ascending: false })
+        .order("id", { referencedTable: "payment", ascending: false })
+        .range(from, from + LEARNER_ISSUE_PAGE_SIZE - 1)
+        .abortSignal(signal)
+        .returns<LearnerWithIssueData[]>();
 
-      while (hasMore) {
-        const from = page * pageSize;
-        const to = from + pageSize - 1;
-
-        const { data, error } = await supabase
-          .from("Learner")
-          .select(
-            `
-            *,
-            enrollment (*, Courses(*)),
-            payment (*)
-          `,
-          )
-          .order("created_at", { ascending: false })
-          .range(from, to);
-
-        if (error) throw error;
-
-        if (!data || data.length === 0) {
-          hasMore = false;
-        } else {
-          allLearners = allLearners.concat(data);
-          if (data.length < pageSize) {
-            hasMore = false;
-          } else {
-            page++;
-          }
-        }
+      // PostgREST reports an out-of-range offset after a fix/deletion shrinks
+      // the results. Fetch only the count so the page can move back in bounds.
+      if (error?.code === "PGRST103" && from > 0) {
+        const { count: remainingCount, error: countError } =
+          await buildQuery(true).abortSignal(signal);
+        if (countError) throw countError;
+        return { learners: [], totalCount: remainingCount ?? 0 };
       }
-
-      return allLearners;
+      if (error?.code === "PGRST202") {
+        throw new Error(
+          "Issue filters require the learner issue fixer database migration " +
+            "(20260917000000_learner_issue_fixer_pagination.sql). " +
+            "Apply it in Supabase, or select All Learners to view learners.",
+        );
+      }
+      if (error) throw error;
+      return { learners: data || [], totalCount: count ?? 0 };
     },
+    // Missing schema/permissions will not be fixed by retrying the same request.
+    retry: (failureCount, error) => {
+      const code = (error as { code?: string }).code;
+      return !(error instanceof Error) && code !== "42501" && failureCount < 2;
+    },
+    // Keep background refresh with the query and stop polling after errors so
+    // failed requests remain visible until the user retries or changes filters.
+    refetchInterval: (query) =>
+      query.state.status === "success" ? 5000 : false,
+  });
+}
+
+// Keep the editor available even when its learner is outside the current page.
+// The shared query-key prefix preserves all existing issue-fixer invalidations.
+export function useLearnerWithIssuesAdmin(learnerId: string | null) {
+  return useQuery({
+    queryKey: ["learners-with-issues", "learner", learnerId],
+    queryFn: async ({ signal }) => {
+      if (!learnerId) return null;
+      const { data, error } = await supabase
+        .from("Learner")
+        .select(LEARNER_ISSUE_SELECT)
+        .eq("id", learnerId)
+        .order("created_at", {
+          referencedTable: "enrollment",
+          ascending: false,
+        })
+        .order("id", { referencedTable: "enrollment", ascending: false })
+        .order("created_at", { referencedTable: "payment", ascending: false })
+        .order("id", { referencedTable: "payment", ascending: false })
+        .abortSignal(signal)
+        .returns<LearnerWithIssueData[]>()
+        .maybeSingle();
+
+      if (error) throw error;
+      return data;
+    },
+    enabled: !!learnerId,
+    refetchInterval: (query) =>
+      query.state.status === "success" ? 5000 : false,
   });
 }
 

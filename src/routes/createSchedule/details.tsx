@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
-import { useLearnerUpdate } from "@/queries/learner";
+import { hasLearnerPickupLocation } from "@/lib/learner-schedule-onboarding";
+import { useLearner, useLearnerUpdate } from "@/queries/learner";
 
 const mapContainerStyle = {
   width: "100%",
@@ -26,7 +27,9 @@ const markerStyle = {
 } as const;
 
 export default function ScheduleDetails() {
-  const { mutate: updateLearner } = useLearnerUpdate();
+  const { data: learner } = useLearner();
+  const { mutate: updateLearner, isPending } = useLearnerUpdate();
+  const seededRef = useRef(false);
   const [address, setAddress] = useState<string>("");
   const [addressLat, setAddressLat] = useState<number>();
   const [addressLng, setAddressLng] = useState<number>();
@@ -38,6 +41,16 @@ export default function ScheduleDetails() {
   const inputRef = useRef<HTMLInputElement>(null);
   const autocompleteRef = useRef<google.maps.places.Autocomplete | null>(null);
   const places = useMapsLibrary("places");
+
+  useEffect(() => {
+    if (!learner || seededRef.current) return;
+    seededRef.current = true;
+    if (hasLearnerPickupLocation(learner)) {
+      setAddress(learner.pick_up_location ?? "");
+      setAddressLat(learner.address_lat!);
+      setAddressLng(learner.address_lng!);
+    }
+  }, [learner]);
 
   // Initialize Autocomplete when the component mounts
   useEffect(() => {
@@ -85,7 +98,14 @@ export default function ScheduleDetails() {
 
   const onContinue = useCallback(async () => {
     // The user might type a random string instead of selecting an address.
-    if (!address || !addressLat || !addressLng) {
+    if (isPending) return;
+    if (
+      !address ||
+      !hasLearnerPickupLocation({
+        address_lat: addressLat,
+        address_lng: addressLng,
+      })
+    ) {
       toast({
         title: "Pickup location required",
         description:
@@ -103,10 +123,11 @@ export default function ScheduleDetails() {
       },
       {
         onSuccess: () => {
-          // Demo learners only need pickup coords — skip the rest of the
-          // regular onboarding chain and return them to /home.
+          // Demos skip licence/start-date questions, but still select timings.
           navigate(
-            isDemoFlow ? "/home" : "/createSchedule/onboardingQuestions",
+            isDemoFlow
+              ? "/createSchedule/preferences?type=new"
+              : "/createSchedule/onboardingQuestions",
           );
         },
         onError: (error) => {
@@ -127,6 +148,7 @@ export default function ScheduleDetails() {
     addressLng,
     toast,
     isDemoFlow,
+    isPending,
   ]);
 
   return (
@@ -134,10 +156,18 @@ export default function ScheduleDetails() {
       <div className="flex flex-col rounded-b-[40px] bg-primary">
         <div className="flex items-center justify-between p-4">
           <Button
+            type="button"
+            aria-label="Back to learner home"
+            disabled={!learner?.id}
             variant="ghost"
             size="icon"
             className="text-primary-foreground"
-            onClick={() => navigate("/home")}
+            onClick={() =>
+              navigate("/home", {
+                replace: true,
+                state: { scheduleSetupReturnFor: learner?.id },
+              })
+            }
           >
             <ArrowLeft className="h-6 w-6" />
           </Button>
@@ -160,11 +190,15 @@ export default function ScheduleDetails() {
               type="text"
               placeholder="Start typing your address..."
               value={address}
-              onChange={(e) => setAddress(e.target.value)}
+              onChange={(e) => {
+                setAddress(e.target.value);
+                setAddressLat(undefined);
+                setAddressLng(undefined);
+              }}
               ref={inputRef}
             />
           </div>
-          {addressLat && addressLng && (
+          {addressLat !== undefined && addressLng !== undefined && (
             <div className="relative w-full overflow-hidden rounded-lg border border-gray-200">
               <Map
                 defaultZoom={17}
@@ -195,9 +229,16 @@ export default function ScheduleDetails() {
         <Button
           className="w-full"
           onClick={() => onContinue()}
-          disabled={!address || !addressLat || !addressLng}
+          disabled={
+            isPending ||
+            !address ||
+            !hasLearnerPickupLocation({
+              address_lat: addressLat,
+              address_lng: addressLng,
+            })
+          }
         >
-          Continue
+          {isPending ? "Saving..." : "Continue"}
         </Button>
       </div>
     </div>
