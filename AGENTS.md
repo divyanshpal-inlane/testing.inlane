@@ -481,3 +481,48 @@ Verification: `pnpm run lint` → `pnpm run type-check` → `pnpm run build`, pl
 - **Supabase Edge Functions**: Manual deploy only — no CI/CD. Run `supabase functions deploy` from up-to-date `main` checkout.
 - **pnpm build-script gate**: New deps with build scripts need entry in `pnpm-workspace.yaml:allowBuilds` or Vercel fails with `ERR_PNPM_IGNORED_BUILDS`.
 - **Git push (Windows)**: Use `git -c credential.useHttpPath=true push origin main` (Windows Credential Manager quirk).
+
+---
+
+## Session handoff — Sales Dashboard redesign + learner tools (2026-10-16)
+
+Read this first in a new chat. It records what changed in a long working session, what is verified, and what is still open. **CLAUDE.md's Sales Dashboard sections still describe the OLD UI (summary grid, date tabs, hover popover, dark mode, double-click) — trust the code and this section over them.**
+
+### Repo / git state
+- Branch `sales-dashboard-ui-redesign`. Remotes: `origin` = `inlane/inlane-web-app` (company), `testing` = `divyanshpal-inlane/testing.inlane` (GitHub Pages test deploy). Never push to `origin/main` from here.
+- A force-push of this branch over `testing/main` was **blocked by the permission check** (cross-account push); a normal push of the branch to `testing` worked. Ask the user before any push.
+- Last uncommitted work when this was written: `SlotLearnerActions.tsx` (phone-only lookup + manual phone check), `sales-dashboard.css`, small `SalesDashboard.tsx` edits. Run `git status`.
+- Windows + CRLF files. Python is not installed; use `node` scripts for multi-line edits. Bash `/tmp` = `C:\Users\<user>\AppData\Local\Temp`. Quote regexes carefully (backslashes get mangled through the shell; write the script with the Write tool when in doubt).
+- Verification used all session: `npx eslint --fix <files>`, `npx tsc --noEmit -p . | grep <file>` (the repo has many PRE-EXISTING tsc errors elsewhere, e.g. `IncompletePaymentsCard.tsx` has 11), and `npx vite build`. **Nothing was clicked through in a browser**; the user tested on localhost and reported issues back.
+
+### Dashboard UI (all in `src/routes/admin/SalesDashboard.tsx` + `sales-dashboard.css`)
+- Removed the horizontal summary grid, date tabs, `SlotCell`, hover popover, dark mode, topbar month nav. Every instructor now has a **weekly timetable (days across, hours down), expanded by default**; state is a `collapsed` Set (Schedule button toggles one row).
+- **One shared date nav** in the top bar (`panelPrevWeek/PrevDay/Today/NextDay/NextWeek`, `weekDates` = 7-day window over `windowDates`). Top bar is one sticky row: nav left, **legend centred**, controls right; opaque background (a fade-out gradient had let content bleed through).
+- **Sticky nameplate** per instructor (`.instr-plate`, height 52px) with a sticky day-header row under it (`.week-day-head`, offset = `--sd-topbar-h` + 52px). The 52px appears in TWO places in the CSS — change both. `--sd-topbar-h` is measured with a ResizeObserver. `.grid-wrap` is `overflow: clip` and `.detail` is `overflow: clip` (NOT hidden/auto) or sticky stops working. Day header z-index 30 sits above booking cards (z-20).
+- Colours: **white = free, nothing else**; grey = buffer / instructor unavailability / "Not enough time for a full class" (class window would hit a buffer, booking or unavailability); cells outside the bookable window are kind `"idle"` (white, "Not bookable").
+- Perf: `displayGrid` removed from `useSalesData`; `WeekTimetable` caches slot info **per day column** (ref keyed by `resolveInfo`/`dayFree`/`instrId`) and the grid receives `useDeferredValue(weekDates)`; `LocationSearch` is `memo` with stable props (`useStableJson`, `locPoint`, shared empty constants).
+- ~600 lines of dead code/CSS were pruned (old booking engine in `availability.ts`, unused helpers). `kml.ts` KML functions are kept only because `scripts/backfill-*` / `compare-kml-*` import them.
+- Nameplate × stays visible on small screens (`min-width: 0` on the plate cell, name ellipsis, chip drops into the flow < 900px).
+
+### Location search, map, nearby instructors
+- Polygons come only from `instructor_service_zones` (`fetchDbZones`, rough polygons and company instructors excluded). New `src/lib/sales-dashboard/nearby.ts`: `distanceToPolygonKm` (nearest-edge distance, flat-earth projection). `locMatch` returns inside matches first, then **nearby** (within `booking_flow.nearby_radius_km`, default 3; capped by `nearby_max_results`, default 5; both optional keys parsed in `config.ts`, never required). Nameplate shows an **Area instructor / Nearby instructor · N km** chip (centred). Default sort option **"distance"** (area first, then nearby by distance). Nearby instructors load only after the area batch settles.
+- Map (`LocationSearch.tsx`): "Show all polygons" toggle (grey polygons), click any polygon → highlight + popup with name and **Add to dashboard** (`mapAddedIds` / `addFromMap`; shown alongside matches), round expand button top-right (full screen, `gestureHandling: "greedy"` when expanded), no name labels, no manual-coordinates box, default camera control off.
+
+### Booking form / bulk add
+- Bulk Add skips generated slots that land on grey cells (reported in a notice) but still appends real booking conflicts; the dialog now **closes after one click** when anything was added.
+- CRM autofill email is saved to `tentative_details.email`. The slot panel's tentative card now reads `course_name` (it showed "Course N/A" before).
+- Banners/help text say "white (free)" not green.
+
+### Learner tools in the slot panel (new)
+- `SlotLearnerActions.tsx` (rendered for every tentative slot): looks the learner up in `Learner` **by phone only** (formats `9876543210`, `91…`, `+91…`). A booking with no phone (holds made in Instructor Management have only name/lead/description/pickup_location, no phone, `learner_id` null) shows a small "enter phone → Check" box. Not found → **Create New Learner**; found → status + **Send Payment Link / Edit / Add paid info / Delete** (all four always shown, buttons copy Learner Management's `Button variant="outline" size="sm"` look, 2-column equal width). Delete = same irreversible cascade as Learner Management, with a Confirm/Cancel step.
+- Shared code extracted from Learner Management into `src/components/admin/learner/`: `CreateLearnerDialog.tsx` (form + `create-learner-and-enrollment` call, `onCreated` callback, prefill), `sendPaymentLink.ts` (create-flow link: `send-payment-link-email` + `send-message`), `enrollmentActions.ts` (`ENROLLMENT_SELECT`, `sendEnrollmentPaymentLink`, `saveManualPaidInfo`, `deleteLearnerCascade`, `getPayableAmount`, `getCourseName`), `EditPlanDialog.tsx`, `PaidInfoDialog.tsx`. `LearnerManagement.tsx` and `IncompletePaymentsCard.tsx` (1343→~655 lines) now use them.
+- **Behaviour change in Learner Management:** the Incomplete Payments list filter is now `payment_id.is.null,payment_status.eq.pending` (was `payment_id IS NULL` only). Reason: newly created learners already have a *pending* `payment` row, so they never appeared in search. This makes the list longer (~700 rows incl. abandoned payments). **Not yet runtime-tested on that page — test create learner (auto-send + dialog), failed create (form must keep entries), and Edit / Add paid info / Delete before deploying.**
+- The repo's `create-learner-and-enrollment` creates the enrollment with `payment_status: "pending"` and no payment row, but the live DB shows a pending payment linked at creation → the *deployed* function (manual deploys) or a trigger differs from the repo.
+
+### Known stale / open
+- `tests/playwright/*sales-dashboard*`, `bulk-add-schedules`, `change-slot` reference removed UI (`.tab`, `thead th.col-time-h`, `td.cell.cell-free`) and need updating. `learner-management.spec.ts` (create-form case types) not re-run; E2E hits **production** Supabase.
+- `CLAUDE.md` Sales Dashboard sections need rewriting for the new UI (user's file — ask).
+- Idea not done: save a typed phone back onto the tentative slot so Sales never retypes it; collapse far-down timetables if many instructors lag; `.slot-panel` sticky `top: 96px` still assumes the old tall top bar.
+
+### User preferences seen this session
+- Writes in English/Hinglish; wants **minimal, targeted changes**, said "creative liberty" for design decisions, and verifies on localhost before prod. Prefers being asked before pushes/deploys; destructive actions need confirmation. Likes short explanations of *why* something happened.
