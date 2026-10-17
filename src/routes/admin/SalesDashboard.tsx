@@ -2234,6 +2234,9 @@ export default function SalesDashboard() {
       // to book, so it just displays its details -- no validation, no notice,
       // and it must not disturb an in-progress booking.
       setSelectedSlot({ instrId, date, minute, free, info });
+      // The "Booking saved" card outranks slot details in the panel, so any
+      // new selection has to retire it or the click would appear to do nothing.
+      setJustBooked(null);
       if (!free) {
         // The booking form owns the side panel while it is open, so a taken
         // slot's details would never show until the form was closed. Hide the

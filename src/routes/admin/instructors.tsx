@@ -73,6 +73,7 @@ import {
 } from "react-router-dom";
 
 import { SearchInstructorScheduleInfo } from "@/components/admin/InstructorScheduleInfo";
+import { SendSlotsWhatsApp } from "@/components/admin/sales-dashboard/SendSlotsWhatsApp";
 import { CalendarImport } from "@/components/instructor/CalendarImport";
 import type { ZoneCoordinate } from "@/components/instructor-zones/types";
 import ZoneDrawingEditor from "@/components/instructor-zones/ZoneDrawingEditor";
@@ -114,6 +115,7 @@ import {
 import { usePhoneVisibility } from "@/context/phone-visibility-context";
 import { useAdminImportedCalendar } from "@/hooks/useAdminImportedCalendar";
 import { fetchInstructorModuleSchedules } from "@/lib/admin-schedules";
+import { istTodayISO, normalizePhone } from "@/lib/sales-dashboard/validation";
 import {
   deleteZoneById,
   insertZone,
@@ -6968,6 +6970,71 @@ export const InstructorSchedulePage = () => {
                               {display(paidInfoValue)}
                             </span>
                           </div>
+
+                          {/* 8. WHATSAPP -- send this customer's upcoming
+                              tentative slots (on this instructor) through the
+                              integrated WhatsApp system. The phone arrives
+                              masked for viewers without the customer-phone
+                              permission, and holds made here often have none,
+                              so a missing/masked number is typed in. */}
+                          {isTentative &&
+                            (() => {
+                              const phoneKey = normalizePhone(details.phone);
+                              const nameKey = String(details.name ?? "")
+                                .trim()
+                                .toLowerCase();
+                              const todayIso = istTodayISO();
+                              const hhmm = (t: string) =>
+                                String(t ?? "").slice(0, 5);
+                              type TentativeRow = {
+                                isTentative?: boolean | null;
+                                date: string;
+                                start_time: string;
+                                end_time: string;
+                                tentative_details?: Record<
+                                  string,
+                                  unknown
+                                > | null;
+                              };
+                              const toSlot = (s: {
+                                date: string;
+                                start_time: string;
+                                end_time: string;
+                              }) => ({
+                                date: s.date,
+                                startTime: hhmm(s.start_time),
+                                endTime: hhmm(s.end_time),
+                              });
+                              // Same customer = same phone when we have a
+                              // real one, otherwise the same name. The card
+                              // shows the exact slot list before sending.
+                              const same = (
+                                (instructor?.schedules ??
+                                  []) as unknown as TentativeRow[]
+                              ).filter((s) => {
+                                if (!s.isTentative || s.date < todayIso)
+                                  return false;
+                                const d = s.tentative_details ?? {};
+                                return phoneKey
+                                  ? normalizePhone(d.phone) === phoneKey
+                                  : nameKey !== "" &&
+                                      !normalizePhone(d.phone) &&
+                                      String(d.name ?? "")
+                                        .trim()
+                                        .toLowerCase() === nameKey;
+                              });
+                              return (
+                                <SendSlotsWhatsApp
+                                  variant="card"
+                                  customerName={String(details.name ?? "")}
+                                  phone={phoneKey ?? ""}
+                                  slots={(same.length > 0
+                                    ? same
+                                    : [schedule]
+                                  ).map(toSlot)}
+                                />
+                              );
+                            })()}
                         </div>
                       );
                     })}

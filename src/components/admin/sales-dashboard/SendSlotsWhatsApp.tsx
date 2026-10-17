@@ -23,7 +23,13 @@ export function SendSlotsWhatsApp({
   customerName,
   phone,
   slots,
+  variant = "panel",
 }: {
+  /**
+   * "panel" uses the Sales Dashboard slot-panel styles. "card" is self-contained
+   * Tailwind, for pages (Instructor Management) that do not load that CSS.
+   */
+  variant?: "panel" | "card";
   customerName: string;
   /** Real number saved on the booking; may be empty. */
   phone: string;
@@ -61,10 +67,31 @@ export function SendSlotsWhatsApp({
     }
   };
 
+  const card = variant === "card";
   return (
-    <div className="slot-panel-learner" data-testid="send-slots-whatsapp">
-      <h3 className="slot-panel-learner-title">WhatsApp</h3>
-      <ul className="slot-panel-learner-note" style={{ margin: 0 }}>
+    <div
+      className={
+        card
+          ? "mt-1 flex flex-col items-start gap-2 border-t border-slate-100 pt-3"
+          : "slot-panel-learner"
+      }
+      data-testid="send-slots-whatsapp"
+    >
+      <h3
+        className={
+          card
+            ? "text-[10px] font-bold uppercase tracking-widest text-slate-400"
+            : "slot-panel-learner-title"
+        }
+      >
+        WhatsApp
+      </h3>
+      <ul
+        className={
+          card ? "text-[11px] text-slate-600" : "slot-panel-learner-note"
+        }
+        style={{ margin: 0, padding: 0 }}
+      >
         {lines.map((line) => (
           <li key={line} style={{ listStyle: "none" }}>
             {line}
@@ -78,6 +105,7 @@ export function SendSlotsWhatsApp({
           placeholder="Customer's 10-digit phone"
           inputMode="tel"
           aria-label="Customer phone for WhatsApp"
+          className={card ? "h-8 text-xs" : undefined}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
@@ -106,7 +134,11 @@ export function SendSlotsWhatsApp({
             : "Send Tentative Slots on WhatsApp"}
       </Button>
       {target && (
-        <span className="slot-panel-learner-note">
+        <span
+          className={
+            card ? "text-[11px] text-slate-500" : "slot-panel-learner-note"
+          }
+        >
           To {customerName || "customer"} · {label(target)}
         </span>
       )}
