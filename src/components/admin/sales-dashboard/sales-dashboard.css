@@ -1981,6 +1981,19 @@
   color: var(--gc-blue-contrast);
 }
 
+/* "From map" tag on a results chip for an instructor added from the map. */
+.loc-chip-origin {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--gc-blue-bg);
+  color: var(--gc-blue);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
 .loc-pill-swatch {
   display: inline-block;
   width: 12px;

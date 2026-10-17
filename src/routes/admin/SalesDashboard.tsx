@@ -59,6 +59,7 @@ import {
   classifySlotConflict,
 } from "@/lib/sales-dashboard/conflict";
 import { pointInPolygon } from "@/lib/sales-dashboard/kml";
+import { deriveMapAdded, locationRank } from "@/lib/sales-dashboard/mapAdded";
 import {
   DEFAULT_NEARBY_MAX_RESULTS,
   DEFAULT_NEARBY_RADIUS_KM,
@@ -1787,6 +1788,13 @@ export default function SalesDashboard() {
     (id: string) => {
       updateStoredRoster(id, false);
       removeInstructor(id);
+      // Also stop pinning its polygon on the map (see mapAdded below).
+      setMapAddedIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     },
     [removeInstructor, updateStoredRoster],
   );
@@ -1987,10 +1995,34 @@ export default function SalesDashboard() {
     };
   }, [locMatch, dbZones, instructorsById]);
 
-  const rowColors = useMemo(
-    () => new Map(Object.entries(locResult?.instrColors ?? {})),
-    [locResult],
+  // Instructors added from a polygon popup on the map. They are pinned: their
+  // polygon stays drawn on the map even when "Show all polygons" is off (with or
+  // without a location search), and during a search they are listed with the
+  // matches. Instructors that are already matches are left to the match logic.
+  //
+  // The polygons come straight from the zones, not from loaded instructor data,
+  // so a freshly added one is drawn at once rather than after its schedule has
+  // finished loading; only the list/count need the loaded row.
+  const mapAdded = useMemo(
+    () =>
+      deriveMapAdded<InstructorRow>({
+        zones: dbZones,
+        mapAddedIds,
+        matchedIds: new Set((locResult?.instrs ?? []).map((i) => i.id)),
+        matchedCount: locResult?.instrs.length ?? 0,
+        instructorsById,
+        palette: LOCATION_COLORS,
+      }),
+    [dbZones, mapAddedIds, locResult, instructorsById],
   );
+  const mapPinnedZones = useStableJson(mapAdded.zones);
+
+  const rowColors = useMemo(() => {
+    const m = new Map(Object.entries(locResult?.instrColors ?? {}));
+    // Colours for map-added rows only matter next to a search's matches.
+    if (locSearch) for (const [id, c] of mapAdded.colorById) m.set(id, c);
+    return m;
+  }, [locResult, locSearch, mapAdded]);
 
   // Nameplate tag for a location search: inside the instructor's polygon
   // ("Area instructor") or just outside it within the radius ("Nearby
@@ -2006,8 +2038,13 @@ export default function SalesDashboard() {
           : { label: `Nearby instructor · ${km.toFixed(1)} km`, nearby: true },
       );
     }
+    if (locSearch) {
+      for (const i of mapAdded.instrs) {
+        map.set(i.id, { label: "Added from map", nearby: false });
+      }
+    }
     return map;
-  }, [locResult]);
+  }, [locResult, locSearch, mapAdded]);
 
   // Stable identity: a fresh object per render made the map rebuild every
   // overlay (and re-fit the view) on every dashboard re-render.
@@ -2193,8 +2230,18 @@ export default function SalesDashboard() {
       switch (sort) {
         case "distance": {
           // Area instructors (no entry in nearbyKm) first, then Nearby by
-          // distance; ties fall back to the usual status/free/name order.
-          const km = (i: InstructorRow) => locResult?.nearbyKm.get(i.id) ?? -1;
+          // distance, then instructors added from the map (not near the
+          // address, so always last); ties fall back to the usual
+          // status/free/name order.
+          const matchedIds = new Set(
+            (locResult?.instrs ?? []).map((i) => i.id),
+          );
+          const km = (i: InstructorRow) =>
+            locationRank({
+              searching: Boolean(locSearch),
+              isMatch: matchedIds.has(i.id),
+              nearbyKm: locResult?.nearbyKm.get(i.id),
+            });
           return [...list].sort(
             (a, b) =>
               km(a) - km(b) ||
@@ -2223,7 +2270,7 @@ export default function SalesDashboard() {
           );
       }
     },
-    [sort, sortBookableCounts, locResult],
+    [sort, sortBookableCounts, locResult, locSearch],
   );
 
   const rows = useMemo(() => {
@@ -3872,6 +3919,7 @@ export default function SalesDashboard() {
                 matchedNames={mapMatchedNames}
                 via={locResult?.via ?? "none"}
                 zoneInfo={mapZoneInfo}
+                pinnedZones={mapPinnedZones}
                 onLocate={handleLocation}
                 onClear={clearLocation}
                 collapsed={locCollapsed}
@@ -3895,46 +3943,65 @@ export default function SalesDashboard() {
                     ) : (
                       <>No instructor covers “{locSearch.label}” yet.</>
                     )}
+                    {mapAdded.instrs.length > 0 && (
+                      <>
+                        {" "}
+                        + <strong>{mapAdded.instrs.length}</strong> added from
+                        the map
+                      </>
+                    )}
                   </span>
-                  {locResult && locResult.instrs.length > 0 && (
+                  {((locResult?.instrs.length ?? 0) > 0 ||
+                    mapAdded.instrs.length > 0) && (
                     <div className="loc-results-chips">
-                      {locResult.instrs.map((instr) => {
-                        const added = compareIds.includes(instr.id);
-                        const rawZones = Object.values(locResult.zoneInfo)
-                          .filter((z) => z.instructorName === instr.name)
-                          .map((z) => z.rawName);
-                        return (
-                          <button
-                            key={instr.id}
-                            type="button"
-                            className={added ? "loc-chip added" : "loc-chip"}
-                            title={
-                              rawZones.length
-                                ? `Zone on map: ${rawZones.join(", ")}`
-                                : undefined
-                            }
-                            onClick={() =>
-                              added
-                                ? removeFromCompare(instr.id)
-                                : addToCompare(instr.id)
-                            }
-                          >
-                            <span
-                              className="loc-swatch"
-                              style={{
-                                background: locResult.instrColors[instr.id],
-                              }}
-                              title={`${instr.name}’s zone colour on the map`}
-                            />
-                            {`${instr.name} · ${bookableCounts.get(instr.id) ?? 0} free`}
-                            {statusNote(instr) && (
-                              <span className="break-badge">
-                                {statusNote(instr)}
-                              </span>
-                            )}
-                          </button>
-                        );
-                      })}
+                      {[...(locResult?.instrs ?? []), ...mapAdded.instrs].map(
+                        (instr) => {
+                          const added = compareIds.includes(instr.id);
+                          const fromMap = mapAdded.colorById.has(instr.id);
+                          const chipColor =
+                            locResult?.instrColors[instr.id] ??
+                            mapAdded.colorById.get(instr.id);
+                          const rawZones = Object.values(
+                            locResult?.zoneInfo ?? {},
+                          )
+                            .filter((z) => z.instructorName === instr.name)
+                            .map((z) => z.rawName);
+                          return (
+                            <button
+                              key={instr.id}
+                              type="button"
+                              className={added ? "loc-chip added" : "loc-chip"}
+                              title={
+                                rawZones.length
+                                  ? `Zone on map: ${rawZones.join(", ")}`
+                                  : undefined
+                              }
+                              onClick={() =>
+                                added
+                                  ? removeFromCompare(instr.id)
+                                  : addToCompare(instr.id)
+                              }
+                            >
+                              <span
+                                className="loc-swatch"
+                                style={{ background: chipColor }}
+                                title={`${instr.name}’s zone colour on the map`}
+                              />
+                              {`${instr.name} · ${bookableCounts.get(instr.id) ?? 0} free`}
+                              {fromMap && (
+                                <span className="loc-chip-origin">
+                                  From map
+                                </span>
+                              )}
+                              {statusNote(instr) && (
+                                <span className="break-badge">
+                                  {statusNote(instr)}
+                                </span>
+                              )}
+                            </button>
+                          );
+                        },
+                      )}
                     </div>
                   )}
                   <button

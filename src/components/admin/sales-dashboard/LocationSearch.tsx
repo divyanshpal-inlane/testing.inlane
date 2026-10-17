@@ -28,6 +28,11 @@ interface LocationSearchProps {
   onRetryZones?: () => void;
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
+  /**
+   * Zones that must stay drawn whatever the "Show all polygons" switch says:
+   * instructors added from a polygon popup. Independent of the location search.
+   */
+  pinnedZones?: { name: string; color: string }[];
   /** Adds this instructor's timetable to the dashboard (polygon popup). */
   onAddInstructor?: (instructorId: string) => void;
   /** Instructors already on the dashboard, so the popup can say so. */
@@ -82,6 +87,7 @@ function LocationSearch({
   matchedNames,
   via,
   zoneInfo,
+  pinnedZones,
   onLocate,
   onClear,
   onRetryZones,
@@ -396,12 +402,70 @@ function LocationSearch({
       });
     };
 
-    // Every other instructor polygon, grey and underneath the matched ones.
-    // Not added to `bounds`, so the map still frames the matches.
+    // Brighten an area on hover and show whose it is next to the pointer.
+    const attachHover = (
+      polygon: google.maps.Polygon,
+      name: string,
+      style: google.maps.PolygonOptions,
+    ): void => {
+      const showTip = (e: google.maps.PolyMouseEvent): void => {
+        const tip = tipRef.current;
+        const wrap = mapWrapRef.current;
+        const dom = e.domEvent as MouseEvent | undefined;
+        if (!tip || !wrap || !dom) return;
+        const r = wrap.getBoundingClientRect();
+        tip.textContent = name;
+        tip.style.left = `${dom.clientX - r.left + 14}px`;
+        tip.style.top = `${dom.clientY - r.top + 14}px`;
+        tip.hidden = false;
+      };
+      polygon.addListener("mouseover", (e: google.maps.PolyMouseEvent) => {
+        if (selectedRef.current?.polygon !== polygon) {
+          polygon.setOptions({ fillOpacity: 0.38, strokeWeight: 3 });
+        }
+        showTip(e);
+      });
+      polygon.addListener("mousemove", showTip);
+      polygon.addListener("mouseout", () => {
+        if (selectedRef.current?.polygon !== polygon) polygon.setOptions(style);
+        if (tipRef.current) tipRef.current.hidden = true;
+      });
+    };
+
+    // Pinned areas: instructors added from the map. Always drawn, with or
+    // without a location search and whether or not "Show all polygons" is on.
+    // An instructor who is also a match is skipped here and drawn as a match
+    // below, so nothing is drawn twice.
+    const pinned = new Map((pinnedZones ?? []).map((p) => [p.name, p.color]));
+    for (const z of zones ?? []) {
+      const color = pinned.get(z.name);
+      if (!color || z.kind !== "polygon") continue;
+      if (point && via === "polygon" && matchedSet.has(z.name)) continue;
+      const pinnedStyle: google.maps.PolygonOptions = {
+        strokeColor: color,
+        strokeOpacity: 1,
+        strokeWeight: 2.5,
+        fillColor: color,
+        fillOpacity: 0.22,
+        zIndex: 4,
+      };
+      const polygon = new maps.Polygon({
+        map,
+        paths: z.coords.map((c) => ({ lat: c.lat, lng: c.lng })),
+        ...pinnedStyle,
+      });
+      makeClickable(polygon, z, pinnedStyle);
+      attachHover(polygon, z.name, pinnedStyle);
+      overlaysRef.current.polygons.push(polygon);
+    }
+
+    // Every other instructor polygon, each in its own colour and underneath the
+    // matched ones. Not added to `bounds`, so the map still frames the matches.
     if (showAllZones) {
       for (const z of zones ?? []) {
         if (z.kind !== "polygon") continue;
         if (point && via === "polygon" && matchedSet.has(z.name)) continue;
+        if (pinned.has(z.name)) continue; // already drawn above
         const color = areaColor(z.instructorId ?? z.name);
         const areaStyle: google.maps.PolygonOptions = {
           strokeColor: color,
@@ -418,31 +482,7 @@ function LocationSearch({
           ...areaStyle,
         });
         makeClickable(polygon, z, areaStyle);
-        // Hover: brighten the area and show whose it is next to the pointer.
-        const showTip = (e: google.maps.PolyMouseEvent): void => {
-          const tip = tipRef.current;
-          const wrap = mapWrapRef.current;
-          const dom = e.domEvent as MouseEvent | undefined;
-          if (!tip || !wrap || !dom) return;
-          const r = wrap.getBoundingClientRect();
-          tip.textContent = z.name;
-          tip.style.left = `${dom.clientX - r.left + 14}px`;
-          tip.style.top = `${dom.clientY - r.top + 14}px`;
-          tip.hidden = false;
-        };
-        polygon.addListener("mouseover", (e: google.maps.PolyMouseEvent) => {
-          if (selectedRef.current?.polygon !== polygon) {
-            polygon.setOptions({ fillOpacity: 0.38, strokeWeight: 3 });
-          }
-          showTip(e);
-        });
-        polygon.addListener("mousemove", showTip);
-        polygon.addListener("mouseout", () => {
-          if (selectedRef.current?.polygon !== polygon) {
-            polygon.setOptions(areaStyle);
-          }
-          if (tipRef.current) tipRef.current.hidden = true;
-        });
+        attachHover(polygon, z.name, areaStyle);
         overlaysRef.current.polygons.push(polygon);
       }
     }
@@ -523,6 +563,7 @@ function LocationSearch({
     zoneInfo,
     collapsed,
     showAllZones,
+    pinnedZones,
     expanded,
   ]);
 
