@@ -1178,6 +1178,9 @@ export default function SalesDashboard() {
   const [justBooked, setJustBooked] = useState<{
     name: string;
     phone: string;
+    email?: string;
+    courseId?: string;
+    paymentStatus: "unpaid" | "half_paid" | "full_paid";
     slots: { date: string; startTime: string; endTime: string }[];
   } | null>(null);
   const [customerFormData, setCustomerFormData] = useState<CustomerFormValues>(
@@ -1349,6 +1352,12 @@ export default function SalesDashboard() {
     setJustBooked({
       name: customerFormData.customerName,
       phone: customerFormData.customerPhone,
+      email: customerFormData.customerEmail,
+      courseId:
+        customerFormData.course && customerFormData.course !== NO_COURSE
+          ? customerFormData.course
+          : undefined,
+      paymentStatus: customerFormData.paymentStatus,
       slots: pendingSlots.map((p) => ({
         date: p.date,
         startTime: p.startTime,
@@ -3633,6 +3642,17 @@ export default function SalesDashboard() {
                   customerName={justBooked.name}
                   phone={justBooked.phone}
                   slots={justBooked.slots}
+                />
+                <SlotLearnerActions
+                  key={`booked-${justBooked.phone}`}
+                  customer={{
+                    name: justBooked.name,
+                    phone: justBooked.phone,
+                    email: justBooked.email,
+                    courseId: justBooked.courseId,
+                    course: "",
+                    paymentStatus: justBooked.paymentStatus,
+                  }}
                 />
               </div>
             ) : selectedSlot ? (
