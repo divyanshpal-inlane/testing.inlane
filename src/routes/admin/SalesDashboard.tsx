@@ -183,6 +183,9 @@ interface SlotInfo {
   // Who a tentative hold is for, so the panel can offer "Create New Learner" /
   // "Send Payment Link". Only set when the booking has a phone number.
   customer?: SlotCustomer;
+  // Schedule row id of a tentative hold, so "Send Tentative Slots on WhatsApp"
+  // can tell the server which booking to message (the phone stays server-side).
+  scheduleId?: number;
 }
 
 type SortKey = "distance" | "freeDesc" | "freeAsc" | "alpha";
@@ -1181,6 +1184,8 @@ export default function SalesDashboard() {
     email?: string;
     courseId?: string;
     paymentStatus: "unpaid" | "half_paid" | "full_paid";
+    /** batch_id the booking's rows were saved with (identifies them server-side). */
+    batchId?: string;
     slots: { date: string; startTime: string; endTime: string }[];
   } | null>(null);
   const [customerFormData, setCustomerFormData] = useState<CustomerFormValues>(
@@ -1355,49 +1360,53 @@ export default function SalesDashboard() {
     discardAndCloseTentativeModal,
   ]);
 
-  const handleTentativeSuccess = useCallback(() => {
-    const message = editContext
-      ? "✅ Tentative booking updated successfully."
-      : pendingSlots.length > 1
-        ? `✅ ${pendingSlots.length} tentative classes booked successfully.`
-        : "✅ Tentative slot booked successfully.";
-    showSuccessNotice(message);
-    // Only the instructor(s) just booked actually changed -- a full
-    // reload() would reset phase to "loading" and re-fetch every OTHER
-    // instructor in the roster too, showing a disruptive full-page loading
-    // screen (which would also hide the success toast above) for no
-    // reason. Targeted refresh keeps this to a brief per-row skeleton on
-    // just the affected instructor(s).
-    const affectedIds = [...new Set(pendingSlots.map((s) => s.instructorId))];
-    setJustBooked({
-      name: customerFormData.customerName,
-      phone: customerFormData.customerPhone,
-      email: customerFormData.customerEmail,
-      courseId:
-        customerFormData.course && customerFormData.course !== NO_COURSE
-          ? customerFormData.course
-          : undefined,
-      paymentStatus: customerFormData.paymentStatus,
-      slots: pendingSlots.map((p) => ({
-        date: p.date,
-        startTime: p.startTime,
-        endTime: p.endTime,
-      })),
-    });
-    setTentativeModalOpen(false);
-    setPendingSlots([]);
-    setCustomerFormData(DEFAULT_CUSTOMER_FORM(currentUserName));
-    setEditContext(null);
-    setAddingSlotMode(false);
-    refreshInstructors(affectedIds);
-  }, [
-    refreshInstructors,
-    editContext,
-    pendingSlots,
-    customerFormData,
-    currentUserName,
-    showSuccessNotice,
-  ]);
+  const handleTentativeSuccess = useCallback(
+    (batchId?: string) => {
+      const message = editContext
+        ? "✅ Tentative booking updated successfully."
+        : pendingSlots.length > 1
+          ? `✅ ${pendingSlots.length} tentative classes booked successfully.`
+          : "✅ Tentative slot booked successfully.";
+      showSuccessNotice(message);
+      // Only the instructor(s) just booked actually changed -- a full
+      // reload() would reset phase to "loading" and re-fetch every OTHER
+      // instructor in the roster too, showing a disruptive full-page loading
+      // screen (which would also hide the success toast above) for no
+      // reason. Targeted refresh keeps this to a brief per-row skeleton on
+      // just the affected instructor(s).
+      const affectedIds = [...new Set(pendingSlots.map((s) => s.instructorId))];
+      setJustBooked({
+        name: customerFormData.customerName,
+        phone: customerFormData.customerPhone,
+        email: customerFormData.customerEmail,
+        courseId:
+          customerFormData.course && customerFormData.course !== NO_COURSE
+            ? customerFormData.course
+            : undefined,
+        paymentStatus: customerFormData.paymentStatus,
+        batchId,
+        slots: pendingSlots.map((p) => ({
+          date: p.date,
+          startTime: p.startTime,
+          endTime: p.endTime,
+        })),
+      });
+      setTentativeModalOpen(false);
+      setPendingSlots([]);
+      setCustomerFormData(DEFAULT_CUSTOMER_FORM(currentUserName));
+      setEditContext(null);
+      setAddingSlotMode(false);
+      refreshInstructors(affectedIds);
+    },
+    [
+      refreshInstructors,
+      editContext,
+      pendingSlots,
+      customerFormData,
+      currentUserName,
+      showSuccessNotice,
+    ],
+  );
 
   useEffect(() => {
     if (!addingSlotMode) return;
@@ -3163,6 +3172,7 @@ export default function SalesDashboard() {
                 }
               : null,
             scheduleBlock: scheduleBlock("Tentative"),
+            scheduleId: cover.id,
             // Every tentative hold gets the Learner section. Holds made in
             // Instructor Management carry no phone, so the section then looks
             // the learner up by name instead.
@@ -3670,8 +3680,13 @@ export default function SalesDashboard() {
                 </div>
                 <SendSlotsWhatsApp
                   customerName={justBooked.name}
-                  phone={justBooked.phone}
                   slots={justBooked.slots}
+                  target={
+                    justBooked.batchId
+                      ? { batchId: justBooked.batchId }
+                      : { scheduleIds: [] }
+                  }
+                  hasPhone={Boolean(normalizePhone(justBooked.phone))}
                 />
                 <SlotLearnerActions
                   key={`booked-${justBooked.phone}`}
@@ -3783,7 +3798,7 @@ export default function SalesDashboard() {
                     };
                     // Same phone => same customer: send every upcoming hold,
                     // not just the one clicked. No phone => just this slot.
-                    const siblings: (typeof picked)[] = [];
+                    const siblings: (typeof picked & { id: number })[] = [];
                     if (key) {
                       for (const perDate of blocksIndex.values())
                         for (const list of perDate.values())
@@ -3795,6 +3810,7 @@ export default function SalesDashboard() {
                             );
                             if (b.isTentative && bp === key && b.date >= today)
                               siblings.push({
+                                id: b.id,
                                 date: b.date,
                                 startTime: minutesToTime(b.startMinute),
                                 endTime: minutesToTime(b.endMinute),
@@ -3805,8 +3821,16 @@ export default function SalesDashboard() {
                       <SendSlotsWhatsApp
                         key={`wa-${selectedSlot.instrId}-${selectedSlot.date}-${selectedSlot.minute}`}
                         customerName={c.name}
-                        phone={c.phone}
                         slots={siblings.length > 0 ? siblings : [picked]}
+                        target={{
+                          scheduleIds:
+                            siblings.length > 0
+                              ? siblings.map((x) => x.id)
+                              : selectedSlot.info.scheduleId != null
+                                ? [selectedSlot.info.scheduleId]
+                                : [],
+                        }}
+                        hasPhone={Boolean(key)}
                       />
                     );
                   })()}

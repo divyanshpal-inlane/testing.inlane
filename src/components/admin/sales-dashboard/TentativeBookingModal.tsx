@@ -68,7 +68,8 @@ interface TentativeBookingModalProps {
   // the grid is never covered while Sales fills the form in.
   variant?: "modal" | "panel";
   onClose: () => void;
-  onSuccess: () => void;
+  /** Receives the batch_id every row of this booking was saved with. */
+  onSuccess: (batchId?: string) => void;
   // 1..N slots. The modal renders nothing if this is empty while open —
   // the parent owns exactly when that can happen.
   slots: SlotPick[];
@@ -524,7 +525,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
           const { error } = await sb.from("Schedule").insert(addedRows);
           if (error) throw error;
         }
-        return;
+        return batchId;
       }
 
       // Re-validate every slot fresh — the grid could have changed since
@@ -564,8 +565,9 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
       // existing single-row insert path, just called with N rows.
       const { error } = await sb.from("Schedule").insert(rows);
       if (error) throw error;
+      return tentativeDetails.batch_id;
     },
-    onSuccess: () => {
+    onSuccess: (savedBatchId) => {
       setSuccessMessage(
         editContext
           ? "Tentative booking updated successfully!"
@@ -576,7 +578,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
       setTimeout(() => {
         setErrors({});
         setSuccessMessage("");
-        onSuccess();
+        onSuccess(savedBatchId);
       }, 1500);
     },
     onError: (error: Error) => {

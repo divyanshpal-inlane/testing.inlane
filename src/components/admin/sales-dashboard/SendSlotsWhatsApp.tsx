@@ -2,27 +2,28 @@ import { Check, MessageCircle } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/use-toast";
-import { useCanSeeCustomerPhone } from "@/hooks/useCanSeeCustomerPhone";
-import { normalizePhone } from "@/lib/sales-dashboard/validation";
 import {
   buildSlotLines,
   sendTentativeSlotsWhatsApp,
   type WhatsAppSlot,
+  type WhatsAppTarget,
 } from "@/lib/sales-dashboard/whatsappSlots";
-import { maskPhoneNumber } from "@/utils/phoneMasking";
 
 /**
- * "Send Tentative Slots on WhatsApp". Sends the given slots to the customer
- * through the integrated WhatsApp system (no personal/business account). The
- * saved number is used as-is (masked on screen for viewers without the
- * customer-phone permission); a booking with no phone asks for one.
+ * "Send Tentative Slots on WhatsApp". Sends the customer their saved tentative
+ * slots through the integrated WhatsApp system (no personal/business account).
+ *
+ * The phone is never asked for and never shown: the server reads the real
+ * number from the booking (agents only see masked numbers). `slots` is just the
+ * preview of what the customer will receive; `target` says which saved rows to
+ * send.
  */
 export function SendSlotsWhatsApp({
   customerName,
-  phone,
   slots,
+  target,
+  hasPhone = true,
   variant = "panel",
 }: {
   /**
@@ -31,30 +32,30 @@ export function SendSlotsWhatsApp({
    */
   variant?: "panel" | "card";
   customerName: string;
-  /** Real number saved on the booking; may be empty. */
-  phone: string;
   slots: WhatsAppSlot[];
+  target: WhatsAppTarget;
+  /** False when the booking has no phone saved (nothing to send to). */
+  hasPhone?: boolean;
 }) {
-  const canSeePhone = useCanSeeCustomerPhone();
   const { toast } = useToast();
-  const savedPhone = normalizePhone(phone);
-  const [typedPhone, setTypedPhone] = useState("");
   const [sending, setSending] = useState(false);
-  const [sentTo, setSentTo] = useState<string | null>(null);
+  const [sent, setSent] = useState(false);
 
-  const target = savedPhone ?? normalizePhone(typedPhone);
   const lines = buildSlotLines(slots);
-  const label = (n: string) => (canSeePhone ? n : maskPhoneNumber(n));
+  const canSend = hasPhone && lines.length > 0 && !sending;
 
   const send = async () => {
-    if (!target || sending) return;
+    if (!canSend) return;
     setSending(true);
     try {
-      await sendTentativeSlotsWhatsApp({ customerName, phone: target, slots });
-      setSentTo(target);
+      const result = await sendTentativeSlotsWhatsApp(target);
+      const count = result.classes || slots.length;
+      setSent(true);
       toast({
         title: "Sent on WhatsApp",
-        description: `${lines.length} slot${lines.length === 1 ? "" : "s"} sent to ${label(target)}.`,
+        description: `${customerName || "The customer"} will receive ${count} class${
+          count === 1 ? "" : "es"
+        }${result.sentTo ? ` on ${result.sentTo}` : ""}.`,
       });
     } catch (err) {
       toast({
@@ -98,48 +99,32 @@ export function SendSlotsWhatsApp({
           </li>
         ))}
       </ul>
-      {!savedPhone && (
-        <Input
-          value={typedPhone}
-          onChange={(e) => setTypedPhone(e.target.value)}
-          placeholder="Customer's 10-digit phone"
-          inputMode="tel"
-          aria-label="Customer phone for WhatsApp"
-          className={card ? "h-8 text-xs" : undefined}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              void send();
-            }
-          }}
-        />
-      )}
       <Button
         type="button"
         variant="outline"
         size="sm"
         onClick={() => void send()}
-        disabled={!target || sending || lines.length === 0}
+        disabled={!canSend}
         className="whitespace-nowrap"
       >
-        {sentTo ? (
+        {sent ? (
           <Check size={14} className="mr-1" />
         ) : (
           <MessageCircle size={14} className="mr-1" />
         )}
         {sending
           ? "Sending…"
-          : sentTo
+          : sent
             ? "Sent — send again"
             : "Send Tentative Slots on WhatsApp"}
       </Button>
-      {target && (
+      {!hasPhone && (
         <span
           className={
             card ? "text-[11px] text-slate-500" : "slot-panel-learner-note"
           }
         >
-          To {customerName || "customer"} · {label(target)}
+          No phone number is saved on this booking, so it can&apos;t be sent.
         </span>
       )}
     </div>

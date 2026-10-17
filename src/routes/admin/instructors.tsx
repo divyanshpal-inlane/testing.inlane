@@ -6987,6 +6987,7 @@ export const InstructorSchedulePage = () => {
                               const hhmm = (t: string) =>
                                 String(t ?? "").slice(0, 5);
                               type TentativeRow = {
+                                id: number;
                                 isTentative?: boolean | null;
                                 date: string;
                                 start_time: string;
@@ -6996,6 +6997,7 @@ export const InstructorSchedulePage = () => {
                                   unknown
                                 > | null;
                               };
+                              const maskedKey = String(details.phone ?? "");
                               const toSlot = (s: {
                                 date: string;
                                 start_time: string;
@@ -7005,9 +7007,10 @@ export const InstructorSchedulePage = () => {
                                 startTime: hhmm(s.start_time),
                                 endTime: hhmm(s.end_time),
                               });
-                              // Same customer = same phone when we have a
-                              // real one, otherwise the same name. The card
-                              // shows the exact slot list before sending.
+                              // Same customer = same phone (real, or the
+                              // identical masked value this viewer sees) and
+                              // the same name. The card shows the exact slot
+                              // list; the real number stays on the server.
                               const same = (
                                 (instructor?.schedules ??
                                   []) as unknown as TentativeRow[]
@@ -7018,7 +7021,7 @@ export const InstructorSchedulePage = () => {
                                 return phoneKey
                                   ? normalizePhone(d.phone) === phoneKey
                                   : nameKey !== "" &&
-                                      !normalizePhone(d.phone) &&
+                                      String(d.phone ?? "") === maskedKey &&
                                       String(d.name ?? "")
                                         .trim()
                                         .toLowerCase() === nameKey;
@@ -7027,11 +7030,17 @@ export const InstructorSchedulePage = () => {
                                 <SendSlotsWhatsApp
                                   variant="card"
                                   customerName={String(details.name ?? "")}
-                                  phone={phoneKey ?? ""}
                                   slots={(same.length > 0
                                     ? same
                                     : [schedule]
                                   ).map(toSlot)}
+                                  target={{
+                                    scheduleIds: (same.length > 0
+                                      ? same
+                                      : [schedule]
+                                    ).map((s: { id: number }) => s.id),
+                                  }}
+                                  hasPhone={Boolean(maskedKey.trim())}
                                 />
                               );
                             })()}
