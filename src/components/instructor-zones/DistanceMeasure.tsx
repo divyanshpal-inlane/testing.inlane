@@ -134,7 +134,7 @@ export function DistanceMeasure({
 
   const infoRef = useRef<google.maps.InfoWindow | null>(null);
   const overlaysRef = useRef<{
-    ring: google.maps.Circle | null;
+    ring: google.maps.Marker | null;
     line: google.maps.Polyline | null;
   }>({ ring: null, line: null });
 
@@ -145,19 +145,26 @@ export function DistanceMeasure({
     o.line?.setMap(null);
     o.ring = null;
     o.line = null;
-    if (!map || !mapsLib?.Circle || !mapsLib.Polyline) return;
+    if (!map || !mapsLib?.Marker || !mapsLib.Polyline) return;
 
     if (from) {
-      o.ring = new mapsLib.Circle({
+      // A fixed-SIZE marker, not a metre-radius circle: a circle shrinks to
+      // nothing once the map is zoomed out to frame a long distance, which made
+      // the start of the line invisible.
+      o.ring = new mapsLib.Marker({
         map,
-        center: from.at,
-        radius: 260,
-        strokeColor: ACCENT,
-        strokeWeight: 3,
-        fillColor: ACCENT,
-        fillOpacity: 0.12,
+        position: from.at,
+        title: `${from.name} — home`,
         clickable: false,
-        zIndex: 6,
+        zIndex: 7,
+        icon: {
+          path: mapsLib.SymbolPath.CIRCLE,
+          scale: 9,
+          fillColor: "#ffffff",
+          fillOpacity: 1,
+          strokeColor: ACCENT,
+          strokeWeight: 4,
+        },
       });
     }
     if (from && to) {
@@ -185,7 +192,9 @@ export function DistanceMeasure({
       const b = new mapsLib.LatLngBounds();
       b.extend(from.at);
       b.extend(to.at);
-      map.fitBounds(b, { top: 170, right: 80, bottom: 90, left: 80 });
+      // Margins keep both ends clear of the two cards over the map: this one
+      // (top, centre) and the instructor info card (bottom-left).
+      map.fitBounds(b, { top: 230, right: 100, bottom: 250, left: 340 });
     }
     return () => {
       o.ring?.setMap(null);
@@ -196,6 +205,18 @@ export function DistanceMeasure({
     // `from` / `to` identity is covered by their coordinates
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [map, mapsLib, fromKey, toKey]);
+
+  // A location set before any instructor is picked (pasted coordinates, a
+  // search result) has no line to frame, so bring the map to it: otherwise the
+  // pin can land off-screen and nothing visibly happens. With an instructor
+  // picked, the fitBounds above already frames both ends.
+  useEffect(() => {
+    if (!map || from || !to) return;
+    map.panTo(to.at);
+    if ((map.getZoom() ?? 0) < 12) map.setZoom(13);
+    // only when the destination itself moves
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map, toKey, from === null]);
 
   // Label: its text changes when the road figure arrives, without redrawing the
   // line (which would also re-fit the map and fight the user's panning).

@@ -33,6 +33,7 @@ import {
 import { ServiceAreaEditor } from "@/components/instructor-zones/ServiceAreaEditor";
 import { drawServiceAreaMask } from "@/components/instructor-zones/serviceAreaMask";
 import type { ZoneCoordinate } from "@/components/instructor-zones/types";
+import { usePlacesAutocomplete } from "@/components/instructor-zones/usePlacesAutocomplete";
 import {
   arraysEqual,
   closeRing,
@@ -103,84 +104,6 @@ interface ZoneView {
   /** Provisional boundary awaiting Ops review; never a serviceability zone. */
   isRough: boolean;
 }
-
-/**
- * The Places dropdown is appended to `<body>`, so it needs an explicit z-index to
- * clear the header (`z-30`) and sidebar (`z-20`), plus pointer events restored
- * for its items.
- *
- * Reference-counted because two widgets can be live at once (the header search
- * and the sidebar location filter). A naive per-effect append/remove would let
- * whichever effect cleaned up first strip the override out from under the other,
- * leaving the open dropdown unclickable.
- */
-let pacStyleEl: HTMLStyleElement | null = null;
-let pacStyleUsers = 0;
-const acquirePacStyles = (): (() => void) => {
-  pacStyleUsers += 1;
-  if (!pacStyleEl) {
-    const el = document.createElement("style");
-    el.dataset.mapPac = "1";
-    el.textContent =
-      ".pac-container{z-index:10000 !important;pointer-events:auto !important}" +
-      ".pac-item{cursor:pointer !important}";
-    document.head.appendChild(el);
-    pacStyleEl = el;
-  }
-  return () => {
-    pacStyleUsers -= 1;
-    if (pacStyleUsers > 0 || !pacStyleEl) return;
-    pacStyleEl.remove();
-    pacStyleEl = null;
-  };
-};
-
-/**
- * Attach a Google Places suggestion dropdown to one text input.
- *
- * `onPlace` fires only when the user picks a suggestion, which is the commit
- * point: half-typed text is not a location, so nothing is filtered on keystroke.
- * Free text is still handled separately by the Geocoder path, so both the header
- * search and the sidebar location filter get suggestions *and* accept an address
- * that has no matching suggestion.
- *
- * Country-restricted to IN: every service area is in Bengaluru, and without this
- * "Koramangala" resolves to a same-named street on another continent.
- */
-const usePlacesAutocomplete = (
-  inputRef: React.RefObject<HTMLInputElement | null>,
-  enabled: boolean,
-  onPlace: (place: { at: ZoneCoordinate; label: string }) => void,
-) => {
-  // Held in a ref so re-rendering with a new callback does not tear the widget
-  // down and re-attach it mid-typing, which drops the open dropdown.
-  const onPlaceRef = useRef(onPlace);
-  onPlaceRef.current = onPlace;
-  useEffect(() => {
-    const input = inputRef.current;
-    if (!enabled || !input) return;
-    if (!window.google?.maps?.places) return;
-
-    const releaseStyles = acquirePacStyles();
-    const ac = new window.google.maps.places.Autocomplete(input, {
-      componentRestrictions: { country: "IN" },
-      fields: ["formatted_address", "geometry"],
-    });
-    const listener = ac.addListener("place_changed", () => {
-      const place = ac.getPlace();
-      const loc = place?.geometry?.location;
-      if (!loc) return;
-      onPlaceRef.current({
-        at: { lat: loc.lat(), lng: loc.lng() },
-        label: place?.formatted_address ?? "Pinned location",
-      });
-    });
-    return () => {
-      if (listener) google.maps.event.removeListener(listener);
-      releaseStyles();
-    };
-  }, [enabled, inputRef]);
-};
 
 /**
  * My Maps-style categorical palette. Distinct enough to tell 66 polygons apart
@@ -914,8 +837,14 @@ export default function InstructorZoneMap() {
 
   const mapDivRef = useRef<HTMLDivElement | null>(null);
   const mapWrapRef = useRef<HTMLDivElement | null>(null);
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const locationInputRef = useRef<HTMLInputElement | null>(null);
+  // The two address inputs, as elements in state (a state setter is a stable
+  // callback ref). The Places widget is keyed on the element, so it follows the
+  // sidebar filter's input, which is re-created every time the filter opens.
+  const [searchInputEl, setSearchInputEl] = useState<HTMLInputElement | null>(
+    null,
+  );
+  const [locationInputEl, setLocationInputEl] =
+    useState<HTMLInputElement | null>(null);
   const overlaysRef = useRef<
     Map<
       string,
@@ -1055,14 +984,16 @@ export default function InstructorZoneMap() {
     };
   }, [searchEngaged, locationFilterEngaged]);
 
-  usePlacesAutocomplete(
-    locationInputRef,
-    placesReady,
-    useCallback(({ at, label }) => {
-      setLocationFilter((f) => ({ ...f, query: label, active: true }));
-      setPin({ at, label });
-    }, []),
-  );
+  // Load `places` shortly after the map is ready instead of waiting for the
+  // first focus. Waiting for focus meant the library was still downloading while
+  // the first characters were typed, and a widget attached after typing only
+  // shows suggestions on the NEXT keystroke — the dropdown simply never appeared
+  // for a quick first search.
+  useEffect(() => {
+    if (!mapsLib) return;
+    const t = window.setTimeout(() => setSearchEngaged(true), 700);
+    return () => window.clearTimeout(t);
+  }, [mapsLib]);
 
   useEffect(() => {
     const el = mapDivRef.current;
@@ -1952,16 +1883,49 @@ export default function InstructorZoneMap() {
    * looking empty. Falls back to the pin when nothing covers it, so an uncovered
    * address still shows where it is.
    */
+  const commitLocation = useCallback(
+    (hit: { at: ZoneCoordinate; label: string }) => {
+      const covering = zones.filter(
+        (z) => !isCompanyInstructor(z.name) && pointInPolygon(hit.at, z.ring),
+      );
+      setPin(hit);
+      setLocationFilter((f) => ({ ...f, active: true }));
+      fitTo(covering.length ? covering.flatMap((z) => z.ring) : [hit.at]);
+    },
+    [fitTo, zones],
+  );
+
   const applyLocationFilter = useCallback(async () => {
     const hit = await geocodeToPin(locationFilter.query);
     if (!hit) return;
-    const covering = zones.filter(
-      (z) => !isCompanyInstructor(z.name) && pointInPolygon(hit.at, z.ring),
-    );
-    setPin(hit);
-    setLocationFilter((f) => ({ ...f, active: true }));
-    fitTo(covering.length ? covering.flatMap((z) => z.ring) : [hit.at]);
-  }, [geocodeToPin, locationFilter.query, fitTo, zones]);
+    commitLocation(hit);
+  }, [geocodeToPin, locationFilter.query, commitLocation]);
+
+  // Google suggestions for BOTH address boxes. Picking one is the same commit as
+  // typing the address and pressing Search/Go, so the two paths cannot drift.
+  usePlacesAutocomplete(
+    searchInputEl,
+    placesReady,
+    useCallback(
+      ({ at, label }) => {
+        setPlaceQuery(label);
+        setPin({ at, label });
+        fitTo([at]);
+      },
+      [fitTo],
+    ),
+  );
+  usePlacesAutocomplete(
+    locationInputEl,
+    placesReady,
+    useCallback(
+      (hit) => {
+        setLocationFilter((f) => ({ ...f, query: hit.label }));
+        commitLocation(hit);
+      },
+      [commitLocation],
+    ),
+  );
 
   /**
    * Stop filtering by location, and take the pin with it.
@@ -2295,7 +2259,7 @@ export default function InstructorZoneMap() {
         <div className="relative ml-1 flex min-w-0 max-w-xl flex-1 items-center">
           <Search className="pointer-events-none absolute left-2 h-4 w-4 shrink-0 text-muted-foreground" />
           <Input
-            ref={searchInputRef}
+            ref={setSearchInputEl}
             value={placeQuery}
             onFocus={() => setSearchEngaged(true)}
             onChange={(e) => {
@@ -2449,7 +2413,7 @@ export default function InstructorZoneMap() {
                         className="space-y-1.5 rounded-md border p-2"
                       >
                         <Input
-                          ref={locationInputRef}
+                          ref={setLocationInputEl}
                           value={locationFilter.query}
                           onFocus={() => setLocationFilterEngaged(true)}
                           onChange={(e) => {

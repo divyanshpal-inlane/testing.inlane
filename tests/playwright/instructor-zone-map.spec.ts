@@ -357,6 +357,55 @@ test.describe("Instructor Zone Map — location filter", () => {
     });
   });
 
+  // The three suggestion bugs, each asserted on REAL suggestion rows (a bare
+  // `.pac-container` can exist from an earlier widget and proves nothing):
+  //   1. the header "Search an address" box was never wired to Places;
+  //   2. the filter's input is a brand-new element every time the filter opens,
+  //      and the widget was never re-attached to it;
+  //   3. Places only started loading on first focus, so quick typing beat it.
+  const googleLoaded = (page: import("@playwright/test").Page) =>
+    page.evaluate(() => Boolean((window as { google?: unknown }).google));
+  const suggestionRows = (page: import("@playwright/test").Page) =>
+    page.locator(".pac-container .pac-item:visible");
+
+  test("the header 'Search an address' box shows Google suggestions", async ({
+    page,
+  }) => {
+    test.skip(!(await googleLoaded(page)), "Google Maps script unavailable");
+    const input = page.getByLabel("Search an address");
+    await input.click();
+    await input.pressSequentially("Indiranagar Bengaluru", { delay: 120 });
+    await expect(suggestionRows(page).first()).toBeVisible({ timeout: 20_000 });
+
+    // Picking one fills the box with the full address and drops the pin.
+    await input.press("ArrowDown");
+    await input.press("Enter");
+    await expect(input).toHaveValue(/Indiranagar/i);
+  });
+
+  test("the location filter shows suggestions every time it is opened", async ({
+    page,
+  }) => {
+    test.skip(!(await googleLoaded(page)), "Google Maps script unavailable");
+    const toggle = page.getByTestId("location-filter-toggle");
+
+    for (const query of ["Koramangala Bengaluru", "Whitefield Bengaluru"]) {
+      // Second pass: close and reopen, which creates a NEW <input>.
+      await toggle.click();
+      const input = page.getByLabel("Search a location");
+      await input.click();
+      await input.fill("");
+      await input.pressSequentially(query, { delay: 120 });
+      await expect(suggestionRows(page).first()).toBeVisible({
+        timeout: 20_000,
+      });
+      await input.press("ArrowDown");
+      await input.press("Enter");
+      await expect(input).toHaveValue(new RegExp(query.split(" ")[0], "i"));
+      await toggle.click(); // close again
+    }
+  });
+
   test("clicking the button opens a search panel without filtering yet", async ({
     page,
   }) => {
