@@ -92,52 +92,10 @@
     0 10px 15px rgba(0, 0, 0, 0.1), 0 4px 6px rgba(0, 0, 0, 0.05);
 }
 
-.sales-dashboard-root[data-theme="dark"] {
-  color-scheme: dark;
-  --gc-bg: #1c1917;
-  --gc-surface: #262626;
-  --gc-hover: #3f3f46;
-  --gc-detail: #221f1d;
-  --gc-border: #27272a;
-  /* Same two-step hierarchy as light mode, lightened rather than darkened
-     since dark mode needs to go the other direction to stay visible
-     against --gc-bg -- deliberately NOT reusing --gc-hover's #3f3f46 here,
-     since that's also the free-slot fill; a grid line the same color as a
-     free cell would vanish at every free/free cell boundary. */
-  --gc-grid-line: #52525b;
-  --gc-grid-line-strong: #71717a;
-  --gc-band-bg: var(--gc-detail);
-  --gc-text: #f2f2f2;
-  --gc-text-2: #a1a1aa;
-  --gc-blue: #60a5fa;
-  --gc-blue-bg: #1e3a5f;
-  --gc-blue-contrast: #0a0a0b;
-  --gc-green-fill: #3f3f46;
-  --gc-green-hover: #52525b;
-  --gc-green-text: #d4d4d8;
-  --gc-slot-free-text: #86efac;
-  --gc-red-text: #fca5a5;
-  --gc-red-bg: #450a0a;
-  --gc-red-hover: #7f1d1d;
-  /* Same exact Tentative/Booked colors as light mode -- View Schedule has
-     no dark-mode variant of its own to copy, and these are saturated
-     enough to still read clearly on a dark background. */
-  --gc-yellow-fill: #fbbf24;
-  --gc-yellow-hover: #f59e0b;
-  --gc-yellow-text: #451a03;
-  --gc-purple-fill: #6366f1;
-  --gc-purple-hover: #4f46e5;
-  --gc-purple-text: #ffffff;
-  --gc-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
-  --gc-pop-shadow: 0 4px 6px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.3);
-  --gc-suggest-shadow:
-    0 10px 15px rgba(0, 0, 0, 0.4), 0 4px 6px rgba(0, 0, 0, 0.3);
-}
-
 .shell {
   max-width: 1820px;
   margin: 0 auto;
-  padding: 20px 24px 64px;
+  padding: 8px 12px 64px;
 }
 
 /* --- Two-column body: calendar + slot panel -------------------------------
@@ -149,6 +107,8 @@
   display: flex;
   align-items: flex-start;
   gap: 20px;
+  /* Breathing room between the sticky top bar and the content below it. */
+  margin-top: 10px;
 }
 
 .shell-main {
@@ -369,38 +329,6 @@
   white-space: nowrap;
 }
 
-/* Badge + heading colours are hard-coded above for the light palette, so
-   restate them for dark mode where the light tints would glare. */
-.sales-dashboard-root[data-theme="dark"] .slot-panel-badge-booked {
-  background: #4c1d95;
-  color: #ddd6fe;
-}
-
-.sales-dashboard-root[data-theme="dark"] .slot-panel-badge-tentative {
-  background: #78350f;
-  color: #fde68a;
-}
-
-.sales-dashboard-root[data-theme="dark"] .slot-panel-badge-paused {
-  background: #334155;
-  color: #e2e8f0;
-}
-
-.sales-dashboard-root[data-theme="dark"] .slot-panel-badge-unavailable {
-  background: #7f1d1d;
-  color: #fecaca;
-}
-
-.sales-dashboard-root[data-theme="dark"] .slot-panel-badge-pending {
-  background: #1e40af;
-  color: #bfdbfe;
-}
-
-.sales-dashboard-root[data-theme="dark"] .slot-panel-badge-free {
-  background: #14532d;
-  color: #bbf7d0;
-}
-
 /* Panel-hosted booking form. Strips the centred-dialog shell so the exact
    same form renders inline: no fixed positioning, no dimmed backdrop, no
    card border or shadow (the panel is already the card).
@@ -459,10 +387,20 @@
   top: 0;
   z-index: 30;
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  background: linear-gradient(var(--gc-bg) 78%, rgba(255, 255, 255, 0));
-  padding: 8px 0 18px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  /* Opaque (was a fade-out gradient): the transparent bottom fifth let the
+     timetable scrolling underneath show through as a strip right above the
+     sticky instructor nameplate. */
+  background: var(--gc-bg);
+  padding: 4px 0 6px;
+  /* Soft shadow along the bottom edge so the bar reads as floating above the
+     timetables scrolling beneath it. */
+  box-shadow: 0 3px 6px -2px rgba(0, 0, 0, 0.12);
+  --gc-control-h: 28px;
 }
 
 /* Holds the Back button, month nav, and all the filter/search/theme
@@ -471,7 +409,8 @@
 .topbar-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
+  flex: none;
   gap: 20px;
   flex-wrap: wrap;
 }
@@ -482,25 +421,12 @@
   gap: 6px;
 }
 
-/* On its own row (see .topbar's flex-direction: column) so it can be
-   genuinely centered across the full header width without overlapping the
-   Back button or the controls row below it -- the header is dense enough
-   that centering it in the same row as those left no free space in the
-   middle. */
-.topbar-title {
-  margin: 0;
-  font-family: "Glancyr", sans-serif;
-  font-size: 25px;
-  font-weight: 700;
-  letter-spacing: -0.3px;
-  color: var(--gc-text);
-  text-align: center;
-}
-
-.cal-nav {
+/* Date navigation: left side of the single-row top bar; the legend and
+   filter controls (.topbar-row) take the remaining width on the right. */
+.topbar-title-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  flex: none;
 }
 
 /* --gc-control-h: the one shared height for every control in the topbar
@@ -538,13 +464,6 @@
   cursor: default;
 }
 
-.cal-btn.chev {
-  width: var(--gc-control-h, 32px);
-  padding: 0;
-  font-size: 19px;
-  line-height: 1;
-}
-
 .icon-btn {
   width: var(--gc-control-h, 32px);
   padding: 0;
@@ -552,22 +471,11 @@
   line-height: 1;
 }
 
-.cal-month {
-  min-width: 210px;
-  text-align: center;
-  font-family: "Glancyr", sans-serif;
-  font-size: 21px;
-  font-weight: 400;
-  letter-spacing: -0.2px;
-  color: var(--gc-text);
-  padding: 0 6px;
-}
-
 .controls {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 8px;
+  gap: 4px;
 }
 
 .controls-row {
@@ -581,10 +489,12 @@
    above the filter/theme/reset/help controls. */
 .topbar-legend {
   display: flex;
+  flex: 1;
+  min-width: 0;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: center;
   align-items: center;
-  gap: 4px 12px;
+  gap: 2px 10px;
 }
 
 .search {
@@ -759,15 +669,6 @@
   color: var(--gc-text);
 }
 
-.tabs {
-  display: flex;
-  gap: 2px;
-  overflow-x: auto;
-  padding: 2px 0 14px;
-  margin-bottom: 14px;
-  scrollbar-width: thin;
-}
-
 .tab {
   flex: none;
   display: flex;
@@ -829,7 +730,9 @@
      scroll container, so the Main Grid never grows an internal vertical
      scrollbar. `overflow: auto` is kept for horizontal timeline scrolling and
      the sticky Instructor column. Do not reintroduce a max-height here. */
-  overflow: auto;
+  /* `clip`, not `auto`: an auto/hidden overflow would make this the sticky
+     scroll container, so the nameplates below would never stick to the page. */
+  overflow: clip;
   min-height: 55vh;
   border: 1px solid var(--gc-border);
   border-radius: 12px;
@@ -887,7 +790,6 @@
    each hour starts, without every 30-minute line competing for attention.
    :not(...) excludes the sticky instructor column, which is also an
    (odd) nth-child but isn't a time boundary. */
-.grid thead th:nth-child(odd):not(.col-instructor),
 .grid tr.row td:nth-child(odd):not(.instructor-cell) {
   border-right: 1px solid var(--gc-grid-line-strong);
 }
@@ -917,37 +819,6 @@
   position: relative;
   min-width: 48px;
   font-variant-numeric: tabular-nums;
-}
-
-/* Time label straddles the column's left grid line (matches the reference's
-   Google-Calendar-style time axis), not centered within the cell. */
-.time-label {
-  position: absolute;
-  top: 50%;
-  left: 0;
-  transform: translate(-50%, -50%);
-  white-space: nowrap;
-  pointer-events: none;
-  background: inherit;
-  padding: 0 2px;
-}
-
-/* Instructor column header - sticky during scroll.
-   min-width reads a CSS variable (set from JS in SalesDashboard.tsx via a
-   useLayoutEffect that measures the widest rendered .instructor-cell's
-   scrollWidth) so the column is always exactly as wide as the longest
-   instructor name actually needs — 280px is only the pre-measurement
-   fallback. box-sizing: border-box so this value (which already includes
-   the cell's own padding, since it comes from scrollWidth) isn't
-   double-counted with padding added on top. */
-.col-instructor {
-  position: sticky;
-  left: 0;
-  z-index: 2;
-  box-sizing: border-box;
-  min-width: var(--instr-col-width, 280px);
-  text-align: left !important;
-  background: var(--gc-surface) !important;
 }
 
 /* Instructor cell - sticky left column.
@@ -1021,6 +892,57 @@
 .row-select:hover {
   border-color: var(--gc-blue);
   background: var(--gc-blue-bg);
+}
+
+/* One <td> per instructor holds the nameplate and its timetable, so the
+   sticky nameplate is bounded by its own group: it stays pinned while this
+   instructor's timetable scrolls and is pushed out by the next nameplate. */
+.grid tr.instr-group > td {
+  padding: 0 !important;
+  text-align: left;
+}
+
+.instr-plate {
+  --sd-plate-h: 52px;
+  box-sizing: border-box;
+  height: var(--sd-plate-h);
+  display: flex;
+  align-items: center;
+  position: sticky;
+  top: var(--sd-topbar-h, 0px);
+  z-index: 5;
+  background: var(--gc-bg);
+  border-top: 1px solid var(--gc-grid-line-strong);
+  border-bottom: 1px solid var(--gc-grid-line-strong);
+}
+
+.instr-plate .instructor-cell {
+  position: static;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+}
+
+.instr-plate .instructor-cell-inner {
+  flex: 1;
+}
+
+/* The timetable's day-header row (and the blank corner above the time axis)
+   stay pinned directly beneath the sticky nameplate. */
+.instr-group .week-day-head,
+.instr-group .week-axis-corner {
+  position: sticky;
+  top: calc(var(--sd-topbar-h, 0px) + 52px);
+  /* Above the booking-card layer (z-20) inside the cells, which otherwise
+     painted over the date labels while scrolling underneath. */
+  z-index: 30;
+  box-shadow: 0 2px 3px -2px rgba(0, 0, 0, 0.15);
+}
+
+.instr-plate.row-selected {
+  box-shadow: inset 0 0 0 2px var(--gc-blue);
 }
 
 .row-selected td {
@@ -1133,119 +1055,6 @@
   cursor: pointer;
 }
 
-.cell-hovered {
-  z-index: 50;
-}
-
-.slot-pop {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 50%;
-  /* SlotCellInner measures the free space around the hovered cell and sets
-     --pop-shift-x / --pop-arrow-x / --pop-max-h (see PopPlacement), because
-     both grids sit inside an `overflow: auto` box that would otherwise clip a
-     popover hanging off the bottom, first column or last column. */
-  transform: translateX(calc(-50% + var(--pop-shift-x, 0px)));
-  z-index: 60;
-  min-width: 220px;
-  max-width: 300px;
-  /* A very tall popover (long detail list plus buttons) scrolls instead of
-     being cut off by the scroll container. */
-  max-height: var(--pop-max-h, none);
-  overflow-y: auto;
-  background: var(--gc-bg);
-  border: 1px solid var(--gc-border);
-  border-radius: 8px;
-  box-shadow: var(--gc-pop-shadow);
-  padding: 10px 13px;
-  text-align: left;
-  white-space: normal;
-  opacity: 0;
-  visibility: hidden;
-  transition:
-    opacity 0.15s ease,
-    visibility 0.15s ease;
-  pointer-events: none;
-}
-
-.cell-hovered .slot-pop {
-  opacity: 1;
-  visibility: visible;
-  pointer-events: auto;
-}
-
-.slot-pop::after {
-  content: "";
-  position: absolute;
-  bottom: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  border: 6px solid transparent;
-  border-bottom-color: var(--gc-border);
-}
-
-.slot-pop::before {
-  content: "";
-  position: absolute;
-  bottom: calc(100% - 1px);
-  left: 50%;
-  transform: translateX(-50%);
-  border: 5px solid transparent;
-  border-bottom-color: var(--gc-bg);
-  z-index: 1;
-}
-
-/* Arrow keeps pointing at the cell after the popover has been shifted sideways
-   to stay inside the scroll container. */
-.slot-pop::after,
-.slot-pop::before {
-  left: var(--pop-arrow-x, 50%);
-}
-
-/* Flipped above the cell (see PopPlacement): the arrow moves to the bottom
-   edge and its coloured border swaps from bottom to top. */
-.slot-pop.above {
-  top: auto;
-  bottom: calc(100% + 8px);
-}
-
-.slot-pop.above::after {
-  bottom: auto;
-  top: 100%;
-  border-bottom-color: transparent;
-  border-top-color: var(--gc-border);
-}
-
-.slot-pop.above::before {
-  bottom: auto;
-  top: calc(100% - 1px);
-  border-bottom-color: transparent;
-  border-top-color: var(--gc-bg);
-}
-
-.pop-title {
-  font-size: 11.5px;
-  font-weight: 600;
-  margin-bottom: 6px;
-  letter-spacing: 0.3px;
-  text-transform: uppercase;
-}
-
-.pop-title.free {
-  color: var(--gc-green-text);
-}
-
-.pop-title.busy {
-  color: var(--gc-red-text);
-}
-
-.pop-line {
-  font-size: 12.5px;
-  color: var(--gc-text);
-  line-height: 1.5;
-  word-break: break-word;
-}
-
 /* Edit an existing tentative booking. Placed above Delete, styled in the
    neutral blue "informational" family rather than the destructive red. */
 .slot-pop-edit-btn {
@@ -1284,14 +1093,6 @@
   background: var(--gc-red-hover);
 }
 
-.cell-free {
-  background: var(--gc-slot-free-fill);
-}
-
-.cell-free:hover {
-  background: var(--gc-slot-free-hover);
-}
-
 /* Free but not bookable as a full hour: hatch with the slate free-hover
    token so it stays visible now that open cells are white. */
 .cell-half {
@@ -1316,103 +1117,11 @@
   background-size: 8px 8px;
 }
 
-/* Subtle alternating tint per hour (2 columns) for cells with no other
-   state (busy/plain) -- makes it easier to scan which hour a column
-   belongs to without competing with the free/tentative/booked/pending
-   colors, which all take priority over this class (see SlotCellInner). */
-.cell-band {
-  background: var(--gc-band-bg);
-}
-
-/* 🟡 Tentative — any payment status (unpaid/half/full paid all render the
-   same yellow; only the hover popover's title/override-eligibility
-   differs by payment status). */
-.cell-tentative {
-  background: var(--gc-slot-tentative-fill);
-}
-
-.cell-tentative:hover {
-  background: var(--gc-slot-tentative-hover);
-}
-
-/* 🟣 Booked — a real class (booked/completed), or a real learner booking
-   mid-payment (pending_payment). Never overridable from Sales. */
-.cell-booked {
-  background: var(--gc-slot-booked-fill);
-}
-
-.cell-booked:hover {
-  background: var(--gc-slot-booked-hover);
-}
-
-/* These two states are applied only to the expanded instructor timetable.
-   The primary booking grid deliberately keeps its existing appearance. */
-.cell-paused {
-  background: var(--gc-paused-fill);
-  box-shadow: inset 0 0 0 1px var(--gc-paused-border);
-}
-
-.cell-paused:hover {
-  background: var(--gc-paused-fill);
-}
-
-.cell-unavailable {
-  background: var(--gc-unavailable-fill);
-}
-
-.cell-unavailable:hover {
-  background: var(--gc-unavailable-fill);
-}
-
-/* 🔵 Pending — a slot already added to the in-progress multi-class batch
-   (Task 19), not yet submitted. Reuses the existing blue "selected/active"
-   palette rather than introducing a new color. */
-.cell-pending {
-  background: var(--gc-blue-bg);
-  box-shadow: inset 0 0 0 2px var(--gc-blue);
-}
-
-.cell-pending:hover {
-  background: var(--gc-blue-bg);
-}
-
-/* Grey/hatched — a free slot that overlaps a class already in the
-   in-progress batch, so it can't be added on top of it. Same diagonal
-   pattern technique as .cell-half, just neutral-colored to read as
-   "disabled" rather than "partially available". */
-.cell-pending-blocked {
-  background: linear-gradient(
-    45deg,
-    var(--gc-hover) 25%,
-    transparent 25%,
-    transparent 75%,
-    var(--gc-hover) 75%
-  );
-  background-size: 8px 8px;
-  cursor: not-allowed;
-}
-
-.cell-pending-blocked:hover {
-  background: linear-gradient(
-    45deg,
-    var(--gc-border) 25%,
-    transparent 25%,
-    transparent 75%,
-    var(--gc-border) 75%
-  );
-  background-size: 8px 8px;
-}
-
 /* WeekTimetable: highlight pending (already-selected in batch) cells with
    the same prominent blue as the main grid's .cell-pending. */
 .week-timetable-half-pending {
   background: var(--gc-blue-bg);
   box-shadow: inset 0 0 0 2px var(--gc-blue);
-}
-
-.detail-row td {
-  padding: 0 !important;
-  border-bottom: 1px solid var(--gc-border);
 }
 
 .detail {
@@ -1428,46 +1137,10 @@
   left: 0;
   width: var(--gc-viewport-w, 100%);
   max-width: var(--gc-viewport-w, 100%);
-  overflow: hidden;
+  overflow: clip; /* not hidden: keeps the day header sticky to the page */
   overflow-anchor: none;
   background: var(--gc-detail);
   border-top: 1px solid var(--gc-border);
-}
-
-.detail-header {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--gc-border);
-  background: var(--gc-surface);
-}
-
-.detail-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  font-family: "Glancyr", sans-serif;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--gc-text);
-}
-
-.detail-chev {
-  font-size: 9px;
-  color: var(--gc-blue);
-}
-
-.detail-badge {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  color: var(--gc-blue);
-  background: var(--gc-blue-bg);
-  border-radius: 10px;
-  padding: 2px 8px;
 }
 
 .break-badge {
@@ -1484,11 +1157,6 @@
   padding: 2px 8px;
   vertical-align: middle;
   white-space: nowrap;
-}
-
-.detail-sub {
-  font-size: 12px;
-  color: var(--gc-text-2);
 }
 
 .detail-month-nav {
@@ -1561,32 +1229,6 @@
   margin-left: 8px;
 }
 
-.detail-close {
-  margin-left: auto;
-  padding: 4px 12px;
-  border: 1px solid var(--gc-border);
-  background: var(--gc-bg);
-  color: var(--gc-text-2);
-  border-radius: 14px;
-  font-family: "Glancyr", sans-serif;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.detail-close:hover {
-  background: var(--gc-hover);
-  color: var(--gc-blue);
-}
-
-.detail-areas {
-  padding: 2px 10px;
-  font-size: 11px;
-  color: var(--gc-text-2);
-  background: var(--gc-bg);
-  border: 1px solid var(--gc-border);
-  border-radius: 12px;
-}
-
 .detail-loading {
   display: flex;
   align-items: center;
@@ -1635,171 +1277,6 @@
   }
 }
 
-/* Expanded monthly schedule: transposed so DATES run along the x axis (one
-   column per day) and TIMES down the y axis (one row per slot).
-
-   The two grid-line tokens are redefined here to make the calendar's grid
-   DARKER than the main availability grid, which keeps its lighter lines.
-   Redefining the tokens on .mini scopes the change to this table and
-   everything inside it (cells, hour dividers, popovers). Two steps darker in
-   light mode; two steps back from the free-slot fill in dark mode --
-   deliberately NOT --gc-hover's #3f3f46, which is also a free-slot
-   background and would make every free/free cell boundary disappear. */
-.mini {
-  --mini-date-column-width: 46px;
-  --mini-gutter-width: 58px;
-  --mini-slot-height: 58px;
-  --gc-grid-line: #a1a1aa;
-  --gc-grid-line-strong: #71717a;
-  border-collapse: collapse;
-  min-width: 100%;
-}
-
-.sales-dashboard-root[data-theme="dark"] .mini {
-  --gc-grid-line: #3f3f46;
-  --gc-grid-line-strong: #a1a1aa;
-}
-
-.mini th,
-.mini td {
-  border-right: 1px solid var(--gc-grid-line);
-  border-bottom: 1px solid var(--gc-grid-line);
-  padding: 4px 2px;
-  font-size: 12px;
-}
-
-.mini th {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  height: 34px;
-  background: var(--gc-surface);
-  color: var(--gc-text-2);
-  font-weight: 600;
-}
-
-/* Sticky left time axis. Sits above the date cells (z-index 3) and, in the
-   corner cell, above the sticky header row as well (z-index 5) — same corner
-   treatment the main grid's instructor/time header uses. */
-.mini-gutter {
-  position: sticky;
-  left: 0;
-  z-index: 3;
-  width: var(--mini-gutter-width);
-  min-width: var(--mini-gutter-width);
-  max-width: var(--mini-gutter-width);
-  background: var(--gc-surface);
-  text-align: center;
-  white-space: nowrap;
-  font-weight: 600;
-  color: var(--gc-text);
-}
-
-.mini thead .mini-gutter {
-  z-index: 5;
-}
-
-.mini .time-label {
-  position: static;
-  display: block;
-  padding: 0;
-  transform: none;
-  background: transparent;
-  color: var(--gc-text);
-  font-size: 11px;
-  font-weight: 600;
-  text-align: center;
-}
-
-/* Date column header: weekday over day number over free count, so it stays
-   legible in a narrow column. */
-.mini-date {
-  width: var(--mini-date-column-width);
-  min-width: var(--mini-date-column-width);
-  max-width: var(--mini-date-column-width);
-  padding: 4px 1px;
-  text-align: center;
-  white-space: nowrap;
-  font-weight: 500;
-  color: var(--gc-text);
-}
-
-.mini thead .mini-date {
-  z-index: 4;
-  height: 52px;
-}
-
-.mini-date-label,
-.mini-date-num {
-  display: block;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.25;
-}
-
-.mini-date-label {
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  color: var(--gc-text-2);
-}
-
-.mini-date-num {
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.mini-date .mini-count {
-  display: block;
-  color: var(--gc-slot-free-text);
-  font-size: 9px;
-  font-weight: 700;
-}
-
-.mini-row:hover .mini-gutter {
-  background: var(--gc-blue-bg);
-  color: var(--gc-blue);
-}
-
-.mini thead .mini-date.current {
-  background: var(--gc-blue-bg);
-  color: var(--gc-blue);
-}
-
-.mini .cell {
-  width: var(--mini-date-column-width);
-  min-width: var(--mini-date-column-width);
-  max-width: var(--mini-date-column-width);
-  height: var(--mini-slot-height);
-}
-
-/* Schedule cards mirror the concise name/number/time treatment used by the
-   Instructor Schedule grid, while remaining inside the Sales Dashboard's
-   existing transposed date-column/time-row structure. The card ignores
-   pointer events so every existing cell hover, popover and double-click
-   action remains active. */
-.mini .cell-schedule-anchor {
-  z-index: 1;
-}
-
-.mini-schedule-card {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  left: 2px;
-  z-index: 1;
-  box-sizing: border-box;
-  min-height: 0;
-  padding: 5px 6px;
-  overflow: hidden;
-  border: 1px solid var(--gc-slot-booked-border);
-  border-left-width: 3px;
-  border-radius: 5px;
-  background: var(--gc-slot-booked-fill);
-  box-shadow: var(--gc-shadow);
-  color: var(--gc-slot-booked-text);
-  pointer-events: none;
-}
-
 .mini-schedule-card-tentative {
   border-color: var(--gc-slot-tentative-border);
   background: var(--gc-slot-tentative-fill);
@@ -1810,65 +1287,6 @@
   border-color: var(--gc-paused-border);
   background: var(--gc-paused-fill);
   color: var(--gc-text);
-}
-
-.mini-schedule-name,
-.mini-schedule-meta {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  gap: 4px;
-}
-
-.mini-schedule-name {
-  align-items: flex-start;
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1.2;
-  white-space: normal;
-}
-
-.mini-schedule-name > span:first-child {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.mini-schedule-number {
-  flex: none;
-  font-size: 9px;
-}
-
-.mini-schedule-meta {
-  justify-content: space-between;
-  margin-top: 5px;
-  font-size: 8px;
-  font-weight: 600;
-  line-height: 1;
-  opacity: 0.85;
-  white-space: nowrap;
-}
-
-/* A hovered continuation cell sits above adjacent cells for its existing
-   popover. Keeping its fill transparent prevents it from visually slicing the
-   schedule card underneath while the pointer crosses the block. */
-.mini .cell-hovered.cell-booked,
-.mini .cell-hovered.cell-tentative,
-.mini .cell-hovered.cell-paused {
-  background: transparent;
-}
-
-/* The stronger divider now falls after each full hour ROW, the transpose of
-   the previous ":30 column" rule, and still marks every 30-minute boundary. */
-.mini tbody tr:nth-child(even) td {
-  border-bottom-color: var(--gc-grid-line-strong);
-}
-
-.mini .cell-free {
-  background: var(--gc-slot-free-fill);
-}
-
-.mini .cell-free:hover {
-  background: var(--gc-slot-free-hover);
 }
 
 .empty {
@@ -1904,7 +1322,7 @@
 }
 
 .swatch.busy {
-  background: var(--gc-bg);
+  background: var(--gc-band-bg);
   border: 1px solid var(--gc-border);
 }
 
@@ -2141,11 +1559,12 @@
 
 .loc-input {
   flex: 1;
-  min-width: 240px;
-  padding: 8px 14px;
+  min-width: 200px;
+  height: 30px;
+  padding: 4px 10px;
   border: 1px solid var(--gc-border);
-  border-radius: 10px;
-  font-size: 13.5px;
+  border-radius: 8px;
+  font-size: 12px;
   font-family: "Glancyr", sans-serif;
   background: var(--gc-bg);
   color: var(--gc-text);
@@ -2159,12 +1578,13 @@
 }
 
 .loc-btn {
-  padding: 8px 16px;
+  height: 30px;
+  padding: 0 12px;
   border: 1px solid var(--gc-blue);
   background: var(--gc-blue);
   color: var(--gc-blue-contrast);
-  border-radius: 10px;
-  font-size: 13px;
+  border-radius:  8px;
+  font-size:  12px;
   font-family: "Glancyr", sans-serif;
   font-weight: 500;
   white-space: nowrap;
@@ -2179,27 +1599,14 @@
   cursor: default;
 }
 
-.loc-manual-btn {
-  padding: 8px 12px;
-  border: 1px solid var(--gc-border);
-  background: var(--gc-bg);
-  color: var(--gc-text-2);
-  border-radius: 10px;
-  font-size: 13px;
-  font-family: "Glancyr", sans-serif;
-}
-
-.loc-manual-btn:hover {
-  background: var(--gc-hover);
-}
-
 .loc-clear {
-  padding: 8px 12px;
+  height: 30px;
+  padding: 0 10px;
   border: 1px solid var(--gc-border);
   background: var(--gc-red-bg);
   color: var(--gc-red-text);
-  border-radius: 10px;
-  font-size: 13px;
+  border-radius:  8px;
+  font-size:  12px;
   font-family: "Glancyr", sans-serif;
   font-weight: 500;
 }
@@ -2230,30 +1637,6 @@
   padding: 1px 5px;
 }
 
-.loc-manual {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-}
-
-.loc-manual-input {
-  width: 160px;
-  padding: 7px 12px;
-  border: 1px solid var(--gc-border);
-  border-radius: 10px;
-  font-size: 12.5px;
-  font-family: "Glancyr", sans-serif;
-  background: var(--gc-bg);
-  color: var(--gc-text);
-  outline: none;
-}
-
-.loc-manual-input:focus {
-  border-color: var(--gc-blue);
-}
-
 .loc-map {
   margin-top: 12px;
   width: 100%;
@@ -2262,12 +1645,6 @@
   border-radius: 12px;
   overflow: hidden;
   background: var(--gc-surface);
-}
-
-.loc-legend {
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--gc-text-2);
 }
 
 .loc-swatch {
@@ -2423,4 +1800,301 @@
 
 .slot-toast-success .slot-toast-close:hover {
   background: var(--gc-green-hover);
+}
+
+/* Location-search tag on the instructor nameplate. */
+.loc-tag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  text-align: center;
+  line-height: 1;
+  min-height: 20px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: 10px;
+  color: var(--gc-green-text, #166534);
+  background: var(--gc-green-fill, #d3ebd9);
+}
+
+.loc-tag-nearby {
+  color: var(--gc-blue, #1d4ed8);
+  background: var(--gc-blue-bg, #dbeafe);
+}
+
+/* Centre the Area/Nearby chip on the whole nameplate (the plate spans the full
+   timetable width), independent of the name and the × on either side. */
+.instr-plate .loc-tag {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+/* Left slot panel: one step smaller text than the rest of the dashboard.
+   Covers the booking form (Tailwind text sizes) and the slot-detail view. */
+.slot-panel .text-xs {
+  font-size: 10.5px;
+  line-height: 14px;
+}
+
+.slot-panel .text-sm {
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.slot-panel .text-lg {
+  font-size: 15px;
+  line-height: 22px;
+}
+
+.slot-panel .text-xl {
+  font-size: 17px;
+  line-height: 24px;
+}
+
+.slot-panel-empty-title,
+.slot-panel-detail-title {
+  font-size: 15px;
+}
+
+.slot-panel-empty-hint,
+.slot-panel-detail-when,
+.slot-panel-detail-row {
+  font-size: 11.5px;
+}
+
+/* "Show all polygons" switch above the location map. */
+.loc-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--gc-text-2);
+  cursor: pointer;
+  user-select: none;
+}
+
+.loc-toggle input {
+  cursor: pointer;
+}
+
+/* Map toolbar (polygon toggle + expand) and the full-screen state. */
+.loc-map-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.loc-map-tools .loc-toggle {
+  margin: 0;
+}
+
+.loc-map-tools + .loc-map {
+  margin-top: 6px;
+}
+
+.loc-expand-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--gc-border);
+  border-radius: 8px;
+  background: var(--gc-bg);
+  color: var(--gc-text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.loc-expand-btn:hover {
+  background: var(--gc-hover);
+}
+
+.loc-map-wrap.expanded {
+  position: fixed;
+  inset: 12px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--gc-border);
+  border-radius: 12px;
+  background: var(--gc-bg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.loc-map-wrap.expanded .loc-map-tools {
+  margin-top: 0;
+}
+
+.loc-map-wrap.expanded .loc-map {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+}
+
+/* Popup shown when a polygon on the location map is clicked. */
+.loc-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 140px;
+  padding: 2px 2px 0;
+}
+
+.loc-info-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e1e1e;
+}
+
+.loc-add-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid #2563eb;
+  border-radius: 8px;
+  background: #2563eb;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.loc-add-btn:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.loc-add-btn:disabled {
+  border-color: #d1d5db;
+  background: #f3f4f6;
+  color: #4b5563;
+  cursor: default;
+}
+
+/* Round expand/close button over the map's bottom-right corner, like Google's
+   own map controls, in the map's top-right corner. `top` is measured from the
+   wrap, so it includes the toolbar row above the map. */
+.loc-map-wrap {
+  position: relative;
+}
+
+.loc-expand-btn.loc-expand-float {
+  position: absolute;
+  right: 10px;
+  top: 54px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #ffffff;
+  color: #4b5563;
+  font-size: 20px;
+  line-height: 1;
+  box-shadow: 0 1px 4px -1px rgba(0, 0, 0, 0.3);
+}
+
+.loc-expand-btn.loc-expand-float:hover {
+  background: #ebebeb;
+  color: #111827;
+}
+
+.loc-map-wrap.expanded .loc-expand-btn.loc-expand-float {
+  right: 22px;
+  top: 52px;
+}
+
+/* Learner section of a tentative slot's details (create learner / payment link). */
+.slot-panel-learner {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 12px;
+  border-top: 1px solid var(--gc-border);
+}
+
+.slot-panel-learner-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--gc-text-2);
+}
+
+.slot-panel-learner-status {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gc-text);
+}
+
+.slot-panel-learner-status.ok {
+  color: #15803d;
+}
+
+.slot-panel-learner-note {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--gc-text-2);
+}
+
+.slot-panel-learner-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  width: 100%;
+}
+
+/* Equal-width buttons, content centred. */
+.slot-panel-learner-actions > * {
+  width: 100%;
+  justify-content: center;
+}
+
+/* Small screens: keep the × (and the other nameplate controls) on screen. The
+   nameplate is no longer forced to the measured width of the longest name (that
+   made the plate wider than the grid, so the × was clipped off the right edge);
+   the name shrinks with an ellipsis instead, and the chip drops into the flow
+   rather than sitting centred over the name. */
+.instr-plate .instructor-cell {
+  min-width: 0;
+}
+
+.instr-plate .instructor-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.instr-plate .remove-instr {
+  flex: none;
+}
+
+@media (max-width: 900px) {
+  .instr-plate .loc-tag {
+    position: static;
+    transform: none;
+  }
+}
+
+.slot-panel-learner-phone {
+  display: flex;
+  gap: 6px;
+  width: 100%;
 }

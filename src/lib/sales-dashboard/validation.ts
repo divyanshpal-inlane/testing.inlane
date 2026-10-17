@@ -22,22 +22,6 @@ export function isValidEmail(raw: unknown): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(trimmed);
 }
 
-export function isValidPincode(raw: unknown): boolean {
-  return typeof raw === "string" && /^[0-9]{6}$/.test(raw.trim());
-}
-
-export function isValidTime(raw: unknown): boolean {
-  if (typeof raw !== "string") return false;
-  return /^([01]\d|2[0-3]):[0-5]\d$/.test(raw);
-}
-
-export function isValidDateISO(raw: unknown): boolean {
-  if (typeof raw !== "string") return false;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return false;
-  const d = new Date(`${raw}T00:00:00Z`);
-  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === raw;
-}
-
 export function normalizeName(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();

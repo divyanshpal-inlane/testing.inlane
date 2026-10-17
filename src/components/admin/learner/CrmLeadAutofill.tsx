@@ -158,7 +158,7 @@ export function CrmLeadAutofill({
       className={isSales ? "space-y-1" : "grid grid-cols-4 items-start gap-4"}
     >
       <Label
-        className={isSales ? "block text-sm font-medium" : "pt-2 text-right"}
+        className={isSales ? "block text-xs font-medium" : "pt-2 text-right"}
       >
         {isSales ? "Autofill from CRM" : "Autofill"}
       </Label>
@@ -185,6 +185,7 @@ export function CrmLeadAutofill({
         </div>
         <div className="flex gap-2">
           <Input
+            className={isSales ? "h-8 text-xs" : undefined}
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder={
@@ -201,7 +202,7 @@ export function CrmLeadAutofill({
           <Button
             type="button"
             variant="outline"
-            className="shrink-0"
+            className={isSales ? "h-8 shrink-0 px-3 text-xs" : "shrink-0"}
             onClick={handleLookup}
             disabled={isLooking}
           >

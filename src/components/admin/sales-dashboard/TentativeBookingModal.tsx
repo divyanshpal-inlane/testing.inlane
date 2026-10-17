@@ -14,19 +14,6 @@ import { maskPhoneNumber } from "@/utils/phoneMasking";
 
 import { AddressAutocomplete } from "./AddressAutocomplete";
 
-export interface TentativeBookingData {
-  instructorId: string;
-  date: string;
-  startMinute: number;
-  endMinute: number;
-  customerName: string;
-  customerPhone: string;
-  salesAgent: string;
-  paymentStatus: "unpaid" | "half_paid" | "full_paid";
-  customerAddress: string;
-  course: string;
-}
-
 // One selected class in the batch. Task 19 (multiple-class booking): a
 // single customer form can carry N of these — one Schedule row gets
 // created per slot, all sharing the same tentative_details.
@@ -53,6 +40,9 @@ export interface CustomerFormValues {
   paymentStatus: "unpaid" | "half_paid" | "full_paid";
   customerAddress: string;
   course: string;
+  // From the CRM autofill, when it had one. Not shown in the form; saved with
+  // the booking so creating the learner later can start with it filled in.
+  customerEmail?: string;
 }
 
 // "None" in the course dropdown (a booking that is not tied to a course yet).
@@ -257,6 +247,11 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
     skipped: string[];
   } | null>(null);
 
+  // Slots a bulk add skipped, shown in the form after the dialog has closed.
+  const [bulkSkippedNotice, setBulkSkippedNotice] = useState<string[] | null>(
+    null,
+  );
+
   // Conflict detection (matches Instructor Management)
   const [availabilityMap, setAvailabilityMap] = useState<
     Record<string, { available: boolean; reason?: string }>
@@ -367,6 +362,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
     setBulkType("single");
     setRepeatCount(1);
     setBulkResult(null);
+    setBulkSkippedNotice(null);
     setIsBulkDialogOpen(true);
   };
 
@@ -397,10 +393,15 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
     setIsApplyingBulk(true);
     try {
       const result = await onAddBulkSlots(generated);
-      if (result.skipped.length === 0) {
+      if (result.added > 0 || result.skipped.length === 0) {
+        // One click is enough: the dialog always closes once anything was
+        // added (a second click would re-add the same slots). Skipped slots
+        // are reported in the form instead of keeping the dialog open.
+        setBulkSkippedNotice(result.skipped.length > 0 ? result.skipped : null);
         setIsBulkDialogOpen(false);
       } else {
-        setBulkResult({ added: result.added, skipped: result.skipped });
+        // Nothing was added, so staying open is safe: show why.
+        setBulkResult({ added: 0, skipped: result.skipped });
       }
     } catch (err) {
       setBulkResult({
@@ -435,6 +436,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
         course: formData.course,
         course_name:
           courseOptions.find((c) => c.id === formData.course)?.label ?? null,
+        ...(formData.customerEmail ? { email: formData.customerEmail } : {}),
         // Groups every row written by one booking (a multi-class batch or a
         // single slot) so a later Edit can find all the rows booked together
         // without guessing from phone/name. Legacy rows created before this
@@ -457,9 +459,25 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
           course: formData.course,
           course_name:
             courseOptions.find((c) => c.id === formData.course)?.label ?? null,
+          ...(formData.customerEmail ? { email: formData.customerEmail } : {}),
           batch_id: batchId,
           updated_at: new Date().toISOString(),
         };
+
+        // Check every NEW class (added, or moved -- a moved class loses its
+        // scheduleId) against the live grid BEFORE any write. The deletes and
+        // updates below are separate statements, so a conflict found only at
+        // the final insert would leave the booking half-edited.
+        for (let i = 0; i < slots.length; i++) {
+          const s = slots[i];
+          if (s.scheduleId != null) continue;
+          const result = validateSlot(s);
+          if (!result.ok) {
+            throw new Error(
+              `Class ${i + 1} (${s.date} • ${formatSlotTime(s.startTime, s.endTime)} • ${s.instructorName}) is ${result.reason ?? "no longer available"}. Remove or change it and try again.`,
+            );
+          }
+        }
 
         // Rows that belonged to the booking but are no longer in `slots`
         // were removed. Deleted FIRST so a class moved onto a time freed by
@@ -673,13 +691,13 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
         </div>
 
         {successMessage && (
-          <div className="mb-4 rounded-lg bg-green-100 p-3 text-sm text-green-700 dark:bg-green-900 dark:text-green-200">
+          <div className="mb-4 rounded-lg bg-green-100 p-3 text-sm text-green-700">
             {successMessage}
           </div>
         )}
 
         {errors.submit && (
-          <div className="mb-4 rounded-lg bg-red-100 p-3 text-sm text-red-700 dark:bg-red-900 dark:text-red-200">
+          <div className="mb-4 rounded-lg bg-red-100 p-3 text-sm text-red-700">
             {errors.submit}
           </div>
         )}
@@ -716,7 +734,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                     return (
                       <>
                         {freeCount > 0 && (
-                          <span className="inline-flex items-center whitespace-nowrap rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200">
+                          <span className="inline-flex items-center whitespace-nowrap rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
                             {freeCount} Free
                           </span>
                         )}
@@ -732,24 +750,57 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                 </div>
               }
             </div>
-            {!editContext && (
-              <div className="mb-2 grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  className="whitespace-nowrap rounded-full bg-blue-100 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-200 dark:bg-blue-900 dark:text-blue-200 dark:hover:bg-blue-800"
-                  onClick={() => {
-                    onAddAnotherSlot();
-                  }}
-                >
-                  + Add another class
-                </button>
-                <button
-                  type="button"
-                  className="whitespace-nowrap rounded-full bg-purple-100 px-3 py-1.5 text-xs font-semibold text-purple-700 hover:bg-purple-200 dark:bg-purple-900 dark:text-purple-200 dark:hover:bg-purple-800"
-                  onClick={openBulkDialog}
-                >
-                  ⚡ Bulk Add
-                </button>
+            {/* Also offered while editing: classes can be added to (or
+                removed from, with the × on a row) an existing booking. New
+                rows are inserted into the same booking on Save. */}
+            <div className="mb-2 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                className="whitespace-nowrap rounded-full bg-blue-100 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-200"
+                onClick={() => {
+                  onAddAnotherSlot();
+                }}
+              >
+                + Add another class
+              </button>
+              <button
+                type="button"
+                className="whitespace-nowrap rounded-full bg-purple-100 px-3 py-1.5 text-xs font-semibold text-purple-700 hover:bg-purple-200"
+                onClick={openBulkDialog}
+              >
+                ⚡ Bulk Add
+              </button>
+            </div>
+            {editContext && (
+              <p className="mb-2 text-xs text-muted-foreground">
+                Add or remove classes here — changes are saved when you click
+                Save.
+              </p>
+            )}
+            {bulkSkippedNotice && (
+              <div
+                role="status"
+                className="mb-2 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900"
+              >
+                <div className="mb-1 flex items-start justify-between gap-2">
+                  <p className="font-semibold">
+                    {bulkSkippedNotice.length} slot
+                    {bulkSkippedNotice.length === 1 ? "" : "s"} skipped:
+                  </p>
+                  <button
+                    type="button"
+                    aria-label="Dismiss"
+                    className="text-amber-900/70 hover:text-amber-900"
+                    onClick={() => setBulkSkippedNotice(null)}
+                  >
+                    ×
+                  </button>
+                </div>
+                <ul className="list-inside list-disc space-y-0.5">
+                  {bulkSkippedNotice.map((reason) => (
+                    <li key={reason}>{reason}</li>
+                  ))}
+                </ul>
               </div>
             )}
             <div className="space-y-1.5">
@@ -782,7 +833,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                           {onChangeSlot && (
                             <button
                               type="button"
-                              className="whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 hover:bg-amber-200 dark:bg-amber-900 dark:text-amber-200 dark:hover:bg-amber-800"
+                              className="whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 hover:bg-amber-200"
                               aria-label={`Change slot for class ${i + 1}`}
                               onClick={() => onChangeSlot(i)}
                             >
@@ -793,7 +844,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                       ) : (
                         status.checked && (
                           <>
-                            <span className="inline-flex items-center whitespace-nowrap rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200">
+                            <span className="inline-flex items-center whitespace-nowrap rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
                               {s.scheduleId != null ? "Saved" : "Free"}
                             </span>
                             {/* Edit mode: every class's date/time is editable,
@@ -803,7 +854,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                             {editContext && onChangeSlot && (
                               <button
                                 type="button"
-                                className="whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 hover:bg-amber-200 dark:bg-amber-900 dark:text-amber-200 dark:hover:bg-amber-800"
+                                className="whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 hover:bg-amber-200"
                                 aria-label={`Change time for class ${i + 1}`}
                                 onClick={() => onChangeSlot(i)}
                               >
@@ -816,7 +867,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                       {slots.length > 1 && (
                         <button
                           type="button"
-                          className="flex-none rounded-full px-1.5 text-red-600 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900"
+                          className="flex-none rounded-full px-1.5 text-red-600 hover:bg-red-100"
                           aria-label={`Remove class ${i + 1}`}
                           onClick={() => {
                             onRemoveSlot(i);
@@ -853,6 +904,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                   customerAddress: fill.address ?? formData.customerAddress,
                   paymentStatus: payment ?? formData.paymentStatus,
                   phoneFromCrm: fill.phone ? true : formData.phoneFromCrm,
+                  customerEmail: fill.email ?? formData.customerEmail,
                 });
               }}
             />
@@ -1240,7 +1292,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
               {bulkResult && (
                 <div
                   role="status"
-                  className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+                  className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900"
                 >
                   <p className="mb-1 font-semibold">
                     {bulkResult.added > 0

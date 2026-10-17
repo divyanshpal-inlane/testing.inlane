@@ -7,13 +7,14 @@ import {
   ChevronsRight,
   Clock,
 } from "lucide-react";
-import type { CSSProperties, KeyboardEvent, RefObject } from "react";
+import type { KeyboardEvent, RefObject } from "react";
 import {
   Fragment,
   lazy,
   memo,
   Suspense,
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -23,6 +24,11 @@ import {
 } from "react";
 
 import type { LocateStatus } from "@/components/admin/sales-dashboard/LocationSearch";
+import { SendSlotsWhatsApp } from "@/components/admin/sales-dashboard/SendSlotsWhatsApp";
+import {
+  SlotCustomer,
+  SlotLearnerActions,
+} from "@/components/admin/sales-dashboard/SlotLearnerActions";
 import type {
   CustomerFormValues,
   SlotPick,
@@ -54,11 +60,17 @@ import {
 } from "@/lib/sales-dashboard/conflict";
 import { pointInPolygon } from "@/lib/sales-dashboard/kml";
 import {
+  DEFAULT_NEARBY_MAX_RESULTS,
+  DEFAULT_NEARBY_RADIUS_KM,
+  distanceToPolygonKm,
+} from "@/lib/sales-dashboard/nearby";
+import {
   addDaysISO,
   dateToWeekdayLower,
   istTodayISO,
   minutesTo12Hour,
   minutesToTime,
+  normalizePhone,
   timeToMinutes,
 } from "@/lib/sales-dashboard/validation";
 import type { InstructorWorkingHours } from "@/lib/sales-dashboard/workingHours";
@@ -89,6 +101,7 @@ const SLOT_KIND_LABELS: Record<SlotInfo["kind"], string> = {
   unavailable: "Unavailable",
   pending: "In this booking",
   "pending-blocked": "Blocked",
+  idle: "Not bookable",
   default: "Slot",
 };
 
@@ -126,6 +139,8 @@ interface SlotInfo {
     | "unavailable"
     | "pending"
     | "pending-blocked"
+    // Not free, but with no reason to shade it (e.g. outside booking hours).
+    | "idle"
     | "default";
   // Set for any non-buffer tentative slot regardless of payment status --
   // a wrong entry can be deleted no matter who's already paid something
@@ -165,9 +180,12 @@ interface SlotInfo {
   // lost when `card` takes over (e.g. a tentative hold's delete
   // notes). The popover never reads this.
   panelDetail?: string[];
+  // Who a tentative hold is for, so the panel can offer "Create New Learner" /
+  // "Send Payment Link". Only set when the booking has a phone number.
+  customer?: SlotCustomer;
 }
 
-type SortKey = "freeDesc" | "freeAsc" | "alpha";
+type SortKey = "distance" | "freeDesc" | "freeAsc" | "alpha";
 
 const LOCATION_COLORS = [
   "#1a73e8",
@@ -268,14 +286,6 @@ function cap(s: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 
-function monthLabel(m: string): string {
-  const [y, mm] = m.split("-").map(Number);
-  return new Date(Date.UTC(y, mm - 1, 1)).toLocaleDateString("en-GB", {
-    month: "short",
-    year: "numeric",
-  });
-}
-
 function formatPanelRange(days: string[]): string {
   if (days.length === 0) return "";
   const base: Intl.DateTimeFormatOptions = {
@@ -306,10 +316,24 @@ function shortDate(iso: string): {
   };
 }
 
-function initialTheme(): "light" | "dark" {
-  const stored = localStorage.getItem("lane-sales-dashboard-theme");
-  return stored === "light" || stored === "dark" ? stored : "light";
+// Returns the previous value while the new one is structurally identical, so a
+// prop that is rebuilt on every data commit (but unchanged in content) does
+// not make a memoized child -- the map -- redraw.
+function useStableJson<T>(value: T): T {
+  const ref = useRef<{ key: string; value: T } | null>(null);
+  const key = JSON.stringify(value);
+  if (ref.current === null || ref.current.key !== key) {
+    ref.current = { key, value };
+  }
+  return ref.current.value;
 }
+
+// Shared empties so the map's props keep the same identity between renders.
+const EMPTY_MATCHED_NAMES: string[] = [];
+const EMPTY_ZONE_INFO: Record<
+  string,
+  { color: string; instructorName: string; rawName: string }
+> = {};
 
 function showDetailTitle(
   instructor: InstructorRow,
@@ -349,28 +373,22 @@ export interface SalesErrorRow {
 interface GridProps {
   instructors: InstructorRow[];
   freeGrid: Map<string, Map<string, number[]>>;
-  freeSets: Map<string, Set<number>>;
   windowTotals: Map<string, number>;
-  timeCols: string[];
-  timeStarts: number[];
   dates: string[];
   selectedDate: string;
-  // The rolling 7-day window the expanded Schedule timetable shows, plus its
-  // Instructor-Management-style navigation (<< < Today > >>) and the visible
-  // date-range label.
+  // The rolling 7-day window every instructor's timetable shows. Navigated by
+  // the single shared control above the grid.
   weekDates: string[];
-  panelRangeLabel: string;
-  canPanelPrev: boolean;
-  canPanelNext: boolean;
-  gridMinutes: number;
   slotStart: string;
   slotEnd: string;
-  expanded: Set<string>;
+  // Rows the user has collapsed; every other row is expanded by default.
+  collapsed: Set<string>;
   // The one row (if any) whose expand/collapse toggle is still being
   // applied via startTransition -- see toggleExpand/isExpandPending.
   pendingExpandId: string | null;
   selectedRows: Set<string>;
   rowColors: ReadonlyMap<string, string>;
+  rowTags: ReadonlyMap<string, { label: string; nearby: boolean }>;
   loadingRows: LightInstructor[];
   // Instructors whose schedule fetch failed, shown as in-grid rows with a
   // Retry so a load failure is visible instead of being swallowed into the
@@ -378,11 +396,6 @@ interface GridProps {
   errorRows: SalesErrorRow[];
   onRetryLoad: (id: string) => void;
   onToggleExpand: (id: string) => void;
-  onPanelPrevWeek: () => void;
-  onPanelNextWeek: () => void;
-  onPanelPrevDay: () => void;
-  onPanelNextDay: () => void;
-  onPanelToday: () => void;
   onToggleSelectRow: (id: string) => void;
   onRemove?: (id: string) => void;
   onSelect?: (
@@ -401,259 +414,6 @@ interface GridProps {
     free: boolean,
   ) => SlotInfo;
 }
-
-interface SlotCellProps {
-  instrId: string;
-  date: string;
-  minute: number;
-  free: boolean;
-  band: boolean;
-  timeLabel: string;
-  canBook1Hour?: boolean;
-  expandedCalendar?: boolean;
-  onSelect?: (
-    instrId: string,
-    date: string,
-    minute: number,
-    free: boolean,
-    info: SlotInfo,
-  ) => void;
-  onDeleteTentative?: (action: NonNullable<SlotInfo["deleteAction"]>) => void;
-  onEditBooking?: (action: NonNullable<SlotInfo["editAction"]>) => void;
-  resolveInfo: (
-    instrId: string,
-    date: string,
-    minute: number,
-    free: boolean,
-  ) => SlotInfo;
-}
-
-// Where a slot popover has to sit so its scroll container does not clip it.
-// Both grids live inside an `overflow: auto` box (.grid-wrap for the main
-// grid, .detail for the expanded calendar), so a popover anchored below a cell
-// near the bottom edge, or a wide one beside the first/last column, used to be
-// cut off. Measured once per hover in SlotCellInner; CSS applies the result.
-interface PopPlacement {
-  // Render above the cell instead of below it (flipped for lack of room).
-  above: boolean;
-  // Horizontal nudge, in px, applied on top of the normal centring.
-  shiftX: number;
-  // Where the little arrow sits, measured from the popover's left edge, so it
-  // keeps pointing at the cell even when the popover has been shifted.
-  arrowX: number;
-  // Cap on the popover's height; anything taller scrolls instead of clipping.
-  maxH: number;
-}
-
-function SlotCellInner({
-  instrId,
-  date,
-  minute,
-  free,
-  band,
-  timeLabel,
-  canBook1Hour,
-  expandedCalendar = false,
-  onSelect,
-  onDeleteTentative,
-  onEditBooking,
-  resolveInfo,
-}: SlotCellProps) {
-  const [isHovered, setIsHovered] = useState(false);
-  const popRef = useRef<HTMLDivElement>(null);
-  const [pop, setPop] = useState<PopPlacement | null>(null);
-  // Computed on every render, not just while hovered — kind drives the
-  // cell's background color (yellow tentative / purple booked), which
-  // must be visible at a glance, not only on hover.
-  const info = resolveInfo(instrId, date, minute, free);
-  // Stable string key for the popover's contents, so the measurement effect
-  // below re-runs when the text changes but not on every unrelated render.
-  const popKey = `${info.title}\u0000${info.detail.join("\u0000")}`;
-
-  // Runs after the popover mounts (it is only rendered while hovered), so its
-  // real size is known. Cheap: one hovered cell at a time, and the state
-  // update is skipped entirely when nothing would move.
-  useLayoutEffect(() => {
-    const popEl = popRef.current;
-    if (!isHovered || !popEl) {
-      setPop(null);
-      return;
-    }
-    const cellEl = popEl.parentElement;
-    if (!cellEl) return;
-    const cellRect = cellEl.getBoundingClientRect();
-    // Fall back to the viewport if this cell is somehow outside both boxes.
-    const clipEl = popEl.closest<HTMLElement>(".detail, .grid-wrap");
-    const view = clipEl
-      ? clipEl.getBoundingClientRect()
-      : {
-          top: 0,
-          left: 0,
-          right: window.innerWidth,
-          bottom: window.innerHeight,
-        };
-    const gap = 8;
-    const pad = 6;
-    const roomBelow = view.bottom - cellRect.bottom - gap;
-    const roomAbove = cellRect.top - view.top - gap;
-    const above = popEl.offsetHeight > roomBelow && roomAbove > roomBelow;
-    const centred = cellRect.left + cellRect.width / 2 - popEl.offsetWidth / 2;
-    const minLeft = view.left + pad;
-    // maxLeft can be < minLeft on a very narrow container; the Math.max keeps
-    // the clamp from pushing the popover back outside the left edge.
-    const maxLeft = Math.max(minLeft, view.right - pad - popEl.offsetWidth);
-    const left = Math.min(Math.max(centred, minLeft), maxLeft);
-    const next: PopPlacement = {
-      above,
-      shiftX: Math.round(left - centred),
-      arrowX: Math.round(cellRect.left + cellRect.width / 2 - left),
-      maxH: Math.max(140, Math.round(above ? roomAbove : roomBelow)),
-    };
-    setPop((prev) =>
-      prev &&
-      prev.above === next.above &&
-      prev.shiftX === next.shiftX &&
-      prev.arrowX === next.arrowX &&
-      prev.maxH === next.maxH
-        ? prev
-        : next,
-    );
-  }, [isHovered, popKey]);
-  const cls = ["cell"];
-  // info.kind's pending states take priority over the plain free/busy
-  // look — they reflect the in-progress multi-class batch (Task 19),
-  // which the DB-derived `free` flag has no way to know about.
-  if (info.kind === "pending") {
-    cls.push("cell-pending");
-  } else if (info.kind === "pending-blocked") {
-    cls.push("cell-pending-blocked");
-  } else if (free) {
-    cls.push("cell-free");
-    if (canBook1Hour === false) cls.push("cell-half");
-  } else if (info.kind === "tentative") {
-    cls.push("cell-tentative");
-  } else if (info.kind === "booked") {
-    cls.push("cell-booked");
-  } else if (expandedCalendar && info.kind === "paused") {
-    cls.push("cell-paused");
-  } else if (expandedCalendar && info.kind === "unavailable") {
-    cls.push("cell-unavailable");
-  } else if (band) {
-    cls.push("cell-band");
-  }
-  if (expandedCalendar && info.scheduleBlock) {
-    cls.push("cell-schedule-anchor");
-  }
-  if (isHovered) cls.push("cell-hovered");
-  return (
-    <td
-      className={cls.join(" ")}
-      title={
-        info.kind === "pending"
-          ? info.title
-          : info.kind === "pending-blocked"
-            ? "Overlaps a class already in this booking — can't be selected"
-            : free
-              ? canBook1Hour === false
-                ? `Free ${timeLabel} — adjacent slot booked, can't book 1hr`
-                : `Free ${timeLabel} — click to book 1hr`
-              : "Hover for details"
-      }
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
-      onClick={() => {
-        // Single click selects the slot: a free one opens the booking form in
-        // the side panel, a taken one (booked / tentative / paused /
-        // unavailable) shows its details there. Replaces the old double-click.
-        if (onSelect) onSelect(instrId, date, minute, free, info);
-      }}
-    >
-      {expandedCalendar && info.scheduleBlock && (
-        <div
-          className={`mini-schedule-card mini-schedule-card-${info.kind}`}
-          style={{
-            // Transposed grid: a class spans vertically (its slots are now
-            // consecutive ROWS), so the block grows by height, not width.
-            height: `calc(${info.scheduleBlock.span} * var(--mini-slot-height) - 4px)`,
-          }}
-          aria-label={`${info.scheduleBlock.customerName}, ${info.scheduleBlock.statusLabel}, ${minutesToTime(info.scheduleBlock.startMinute)} to ${minutesToTime(info.scheduleBlock.endMinute)}`}
-        >
-          <div className="mini-schedule-name">
-            <span>{info.scheduleBlock.customerName}</span>
-            {info.scheduleBlock.lessonNumber != null && (
-              <span className="mini-schedule-number">
-                ({info.scheduleBlock.lessonNumber})
-              </span>
-            )}
-          </div>
-          <div className="mini-schedule-meta">
-            <span>
-              {minutesToTime(info.scheduleBlock.startMinute)} -{` `}
-              {minutesToTime(info.scheduleBlock.endMinute)}
-            </span>
-            <span>{info.scheduleBlock.statusLabel}</span>
-          </div>
-        </div>
-      )}
-      {isHovered && (
-        <div
-          ref={popRef}
-          className={pop?.above ? "slot-pop above" : "slot-pop"}
-          style={
-            pop
-              ? ({
-                  "--pop-shift-x": `${pop.shiftX}px`,
-                  "--pop-arrow-x": `${pop.arrowX}px`,
-                  "--pop-max-h": `${pop.maxH}px`,
-                } as CSSProperties)
-              : undefined
-          }
-        >
-          <div className={free ? "pop-title free" : "pop-title busy"}>
-            {info.title}
-          </div>
-          {info.detail
-            .filter((line) => !line.startsWith(ADDRESS_DETAIL_PREFIX))
-            .map((line, i) => (
-              <div key={i} className="pop-line">
-                {line}
-              </div>
-            ))}
-          {info.deleteAction && (
-            <button
-              type="button"
-              className="slot-pop-delete-btn"
-              onClick={(e) => {
-                e.stopPropagation();
-                onDeleteTentative?.(info.deleteAction!);
-              }}
-            >
-              Delete Slot
-            </button>
-          )}
-          {info.editAction && (
-            <button
-              type="button"
-              className="slot-pop-edit-btn"
-              onClick={(e) => {
-                e.stopPropagation();
-                onEditBooking?.(info.editAction!);
-              }}
-            >
-              Edit Slot
-            </button>
-          )}
-        </div>
-      )}
-    </td>
-  );
-}
-
-// Memoized with stable props (see SlotCellProps) so that opening/closing one
-// popover only re-renders the (at most two) cells whose isOpen actually
-// changed, instead of every cell in the table — critical once several
-// instructors with expanded monthly schedules are open at once.
-const SlotCell = memo(SlotCellInner);
 
 // ---------------------------------------------------------------------------
 // Expanded instructor timetable.
@@ -705,7 +465,7 @@ function ttBlockClass(kind: SlotInfo["kind"], statusLabel: string): string {
 // neutral so a taken slot is never mistaken for an open one even when it has
 // no drawn class block (buffer zones, engine unavailability).
 function ttHalfFill(kind: SlotInfo["kind"], free: boolean): string {
-  if (free) return "transparent";
+  if (free || kind === "idle") return "transparent";
   if (kind === "tentative") return "#fef3c7";
   if (kind === "booked") return "#e0e7ff";
   if (kind === "pending" || kind === "pending-blocked") return "#dbeafe";
@@ -778,6 +538,19 @@ interface WeekTimetableProps {
   ) => SlotInfo;
 }
 
+interface TimetableCell {
+  h0: number;
+  h1: number;
+  free0: boolean;
+  free1: boolean;
+  info0: SlotInfo;
+  info1: SlotInfo;
+  blocks: {
+    block: NonNullable<SlotInfo["scheduleBlock"]>;
+    kind: SlotInfo["kind"];
+  }[];
+}
+
 function WeekTimetable({
   instrId,
   weekDates,
@@ -789,13 +562,61 @@ function WeekTimetable({
   const [hoveredRow, setHoveredRow] = useState<number | null>(null);
   const [hoveredCol, setHoveredCol] = useState<number | null>(null);
   const todayIso = new Date().toISOString().slice(0, 10);
-  const freeAt = (date: string, minute: number) =>
-    dayFree?.get(date)?.includes(minute) ?? false;
+  // Every cell's slot info is derived once per data change. Hovering only
+  // changes hoveredRow/hoveredCol, so without this each mouse move re-ran
+  // resolveInfo for all ~250 cells of every open timetable.
+  //
+  // Computed per DAY COLUMN and kept while the data is unchanged, so moving the
+  // week by one day only builds the one new column instead of all seven.
+  const columnCacheRef = useRef<{
+    resolveInfo: unknown;
+    dayFree: unknown;
+    instrId: string;
+    columns: Map<string, TimetableCell[]>;
+  } | null>(null);
+  const cells = useMemo(() => {
+    let cache = columnCacheRef.current;
+    if (
+      !cache ||
+      cache.resolveInfo !== resolveInfo ||
+      cache.dayFree !== dayFree ||
+      cache.instrId !== instrId
+    ) {
+      cache = { resolveInfo, dayFree, instrId, columns: new Map() };
+      columnCacheRef.current = cache;
+    }
+    const buildColumn = (d: string): TimetableCell[] =>
+      TT_HOURS.map((h) => {
+        const h0 = h * 60;
+        const h1 = h0 + 30;
+        const free0 = dayFree?.get(d)?.includes(h0) ?? false;
+        const free1 = dayFree?.get(d)?.includes(h1) ?? false;
+        const info0 = resolveInfo(instrId, d, h0, free0);
+        const info1 = resolveInfo(instrId, d, h1, free1);
+        const blocks: TimetableCell["blocks"] = [];
+        if (info0.scheduleBlock) {
+          blocks.push({ block: info0.scheduleBlock, kind: info0.kind });
+        }
+        if (info1.scheduleBlock) {
+          blocks.push({ block: info1.scheduleBlock, kind: info1.kind });
+        }
+        return { h0, h1, free0, free1, info0, info1, blocks };
+      });
+    const columns = weekDates.map((d) => {
+      let column = cache.columns.get(d);
+      if (!column) {
+        column = buildColumn(d);
+        cache.columns.set(d, column);
+      }
+      return column;
+    });
+    return TT_HOURS.map((_, rowIdx) => columns.map((col) => col[rowIdx]));
+  }, [instrId, weekDates, dayFree, resolveInfo]);
   return (
     <div className="week-timetable flex flex-row font-sans">
       {/* TIME AXIS */}
       <div className="z-20 flex w-14 shrink-0 flex-col border-r bg-slate-50">
-        <div className="h-10 border-b bg-white" />
+        <div className="week-axis-corner h-10 border-b bg-white" />
         <div
           className="grid"
           style={{
@@ -828,7 +649,7 @@ function WeekTimetable({
       {/* GRID */}
       <div className="flex min-w-0 flex-1 flex-col">
         {/* DAY HEADERS */}
-        <div className="grid shrink-0 grid-cols-7 border-b bg-white">
+        <div className="week-day-head grid shrink-0 grid-cols-7 border-b bg-white">
           {weekDates.map((d, colIdx) => {
             const dt = new Date(`${d}T00:00:00Z`);
             const isToday = d === todayIso;
@@ -878,34 +699,8 @@ function WeekTimetable({
           {TT_HOURS.map((h, rowIdx) => (
             <Fragment key={h}>
               {weekDates.map((d, colIdx) => {
-                const h0 = h * 60;
-                const h1 = h0 + 30;
-                const free0 = freeAt(d, h0);
-                const free1 = freeAt(d, h1);
-                const info0 = resolveInfo(instrId, d, h0, free0);
-                const info1 = resolveInfo(instrId, d, h1, free1);
-                const blocks: {
-                  block: NonNullable<SlotInfo["scheduleBlock"]>;
-                  kind: SlotInfo["kind"];
-                  del: SlotInfo["deleteAction"];
-                  edit: SlotInfo["editAction"];
-                }[] = [];
-                if (info0.scheduleBlock) {
-                  blocks.push({
-                    block: info0.scheduleBlock,
-                    kind: info0.kind,
-                    del: info0.deleteAction,
-                    edit: info0.editAction,
-                  });
-                }
-                if (info1.scheduleBlock) {
-                  blocks.push({
-                    block: info1.scheduleBlock,
-                    kind: info1.kind,
-                    del: info1.deleteAction,
-                    edit: info1.editAction,
-                  });
-                }
+                const { h0, h1, free0, free1, info0, info1, blocks } =
+                  cells[rowIdx][colIdx];
                 const isSelected = d === selectedDate;
                 // Highlight only the 30-minute halves that are actually pending.
                 // A cell is a full hour, so outlining the whole cell for either
@@ -1002,7 +797,6 @@ function WeekTimetable({
 
 interface InstructorRowGroupProps {
   instr: InstructorRow;
-  freeSet: Set<number> | undefined;
   windowTotal: number;
   isExpanded: boolean;
   // True only while THIS row's own expand/collapse is the one still being
@@ -1011,24 +805,14 @@ interface InstructorRowGroupProps {
   isExpandPending: boolean;
   isSelected: boolean;
   rowColor: string | undefined;
-  timeCols: string[];
-  timeStarts: number[];
+  locTag: { label: string; nearby: boolean } | undefined;
   dates: string[];
   selectedDate: string;
   weekDates: string[];
-  panelRangeLabel: string;
-  canPanelPrev: boolean;
-  canPanelNext: boolean;
-  gridMinutes: number;
   slotStart: string;
   slotEnd: string;
   freeGrid: Map<string, Map<string, number[]>>;
   onToggleExpand: (id: string) => void;
-  onPanelPrevWeek: () => void;
-  onPanelNextWeek: () => void;
-  onPanelPrevDay: () => void;
-  onPanelNextDay: () => void;
-  onPanelToday: () => void;
   onToggleSelectRow: (id: string) => void;
   onRemove?: (id: string) => void;
   onSelect?: (
@@ -1051,33 +835,22 @@ interface InstructorRowGroupProps {
 function InstructorRowGroupInner(props: InstructorRowGroupProps) {
   const {
     instr,
-    freeSet,
     windowTotal,
     isExpanded,
     isExpandPending,
     isSelected,
     rowColor,
-    timeCols,
-    timeStarts,
+    locTag,
     dates,
     selectedDate,
     weekDates,
-    panelRangeLabel,
-    canPanelPrev,
-    canPanelNext,
     onSelect,
     onDeleteTentative,
     onEditBooking,
-    gridMinutes,
     slotStart,
     slotEnd,
     freeGrid,
     onToggleExpand,
-    onPanelPrevWeek,
-    onPanelNextWeek,
-    onPanelPrevDay,
-    onPanelNextDay,
-    onPanelToday,
     onToggleSelectRow,
     onRemove,
     resolveInfo,
@@ -1097,173 +870,92 @@ function InstructorRowGroupInner(props: InstructorRowGroupProps) {
 
   return (
     <Fragment>
-      <tr className={isSelected ? "row row-selected" : "row"}>
-        <td className="instructor-cell" title={detailTitle}>
-          <div className="instructor-cell-inner">
-            <button
-              type="button"
-              className="row-select"
-              aria-label={
-                isSelected
-                  ? `Un-highlight ${instr.name}'s row`
-                  : `Highlight ${instr.name}'s row`
-              }
-              title="Highlight this row"
-              onClick={() => onToggleSelectRow(instr.id)}
-            >
-              {isSelected ? "●" : "○"}
-            </button>
-            {rowColor && (
-              <span
-                className="loc-swatch"
-                style={{ background: rowColor }}
-                title={`${instr.name}’s zone colour on the map`}
-              />
-            )}
-            <button
-              type="button"
-              className={isExpanded ? "expand open" : "expand"}
-              aria-expanded={isExpanded}
-              aria-label={
-                isExpanded
-                  ? `Hide ${instr.name}'s expanded timetable`
-                  : `Show ${instr.name}'s expanded timetable`
-              }
-              title={
-                isExpanded
-                  ? "Hide this instructor's full timetable"
-                  : "Show this instructor's monthly schedule"
-              }
-              onClick={() => onToggleExpand(instr.id)}
-            >
-              <span className="expand-chev" aria-hidden="true">
-                {isExpanded ? "▲" : "▼"}
-              </span>
-              <span className="expand-label">Schedule</span>
-            </button>
-            <button
-              type="button"
-              className="instructor-name"
-              title={detailTitle}
-              onClick={() => onToggleExpand(instr.id)}
-            >
-              {instr.name}
-              {statusNote(instr) && (
-                <span className="break-badge">{statusNote(instr)}</span>
-              )}
-            </button>
-            {onRemove && (
-              <button
-                type="button"
-                className="remove-instr"
-                title={`Remove ${instr.name} from the grid`}
-                aria-label={`Remove ${instr.name} from the grid`}
-                onClick={() => onRemove(instr.id)}
-              >
-                ×
-              </button>
-            )}
-          </div>
-        </td>
-        {timeCols.map((t, ti) => {
-          const m = timeStarts[ti];
-          const free = freeSet?.has(m) ?? false;
-          const band = Math.floor(ti / 2) % 2 === 1;
-          const canBook1Hour =
-            free && validateOneHourBlock(instr.id, selectedDate, m, freeGrid);
-          return (
-            <SlotCell
-              key={t}
-              instrId={instr.id}
-              date={selectedDate}
-              free={free}
-              band={band}
-              minute={m}
-              timeLabel={`${t}–${minutesToTime(m + gridMinutes)}`}
-              canBook1Hour={canBook1Hour}
-              onSelect={onSelect}
-              onDeleteTentative={onDeleteTentative}
-              onEditBooking={onEditBooking}
-              resolveInfo={resolveInfo}
-            />
-          );
-        })}
-      </tr>
-      {(isExpanded || isExpandPending) && (
-        <tr className="detail-row">
-          <td colSpan={timeCols.length + 1}>
-            <div className="detail">
-              <div className="detail-header">
-                <span className="detail-title">
-                  <span className="detail-chev" aria-hidden="true">
-                    ▲
-                  </span>
-                  {instr.name}
-                  <span className="detail-badge">weekly timetable</span>
-                </span>
-                <span className="detail-sub">
-                  {weekDates.length} days · {windowTotal} free slots
-                </span>
-                <div
-                  className="detail-month-nav"
-                  aria-label={`${instr.name} schedule week navigation`}
+      <tr className="instr-group">
+        <td>
+          <div
+            className={
+              isSelected ? "row row-selected instr-plate" : "row instr-plate"
+            }
+          >
+            <div className="instructor-cell" title={detailTitle}>
+              <div className="instructor-cell-inner">
+                <button
+                  type="button"
+                  className="row-select"
+                  aria-label={
+                    isSelected
+                      ? `Un-highlight ${instr.name}'s row`
+                      : `Highlight ${instr.name}'s row`
+                  }
+                  title="Highlight this row"
+                  onClick={() => onToggleSelectRow(instr.id)}
                 >
-                  <button
-                    type="button"
-                    className="detail-month-btn"
-                    onClick={onPanelPrevWeek}
-                    disabled={!canPanelPrev}
-                    aria-label={`Show previous week in ${instr.name}'s expanded schedule`}
-                    title="Previous week"
+                  {isSelected ? "●" : "○"}
+                </button>
+                {rowColor && (
+                  <span
+                    className="loc-swatch"
+                    style={{ background: rowColor }}
+                    title={`${instr.name}’s zone colour on the map`}
+                  />
+                )}
+                <button
+                  type="button"
+                  className={isExpanded ? "expand open" : "expand"}
+                  aria-expanded={isExpanded}
+                  aria-label={
+                    isExpanded
+                      ? `Hide ${instr.name}'s expanded timetable`
+                      : `Show ${instr.name}'s expanded timetable`
+                  }
+                  title={
+                    isExpanded
+                      ? "Hide this instructor's full timetable"
+                      : "Show this instructor's monthly schedule"
+                  }
+                  onClick={() => onToggleExpand(instr.id)}
+                >
+                  <span className="expand-chev" aria-hidden="true">
+                    {isExpanded ? "▲" : "▼"}
+                  </span>
+                  <span className="expand-label">Schedule</span>
+                </button>
+                <button
+                  type="button"
+                  className="instructor-name"
+                  title={detailTitle}
+                  onClick={() => onToggleExpand(instr.id)}
+                >
+                  {instr.name}
+                  {statusNote(instr) && (
+                    <span className="break-badge">{statusNote(instr)}</span>
+                  )}
+                </button>
+                {locTag && (
+                  <span
+                    className={
+                      locTag.nearby ? "loc-tag loc-tag-nearby" : "loc-tag"
+                    }
                   >
-                    <ChevronsLeft aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    className="detail-month-btn"
-                    onClick={onPanelPrevDay}
-                    disabled={!canPanelPrev}
-                    aria-label={`Show previous day in ${instr.name}'s expanded schedule`}
-                    title="Previous day"
-                  >
-                    <ChevronLeft aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    className="detail-today-btn"
-                    onClick={onPanelToday}
-                    title="Jump to today"
-                  >
-                    Today
-                  </button>
-                  <button
-                    type="button"
-                    className="detail-month-btn"
-                    onClick={onPanelNextDay}
-                    disabled={!canPanelNext}
-                    aria-label={`Show next day in ${instr.name}'s expanded schedule`}
-                    title="Next day"
-                  >
-                    <ChevronRight aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    className="detail-month-btn"
-                    onClick={onPanelNextWeek}
-                    disabled={!canPanelNext}
-                    aria-label={`Show next week in ${instr.name}'s expanded schedule`}
-                    title="Next week"
-                  >
-                    <ChevronsRight aria-hidden="true" />
-                  </button>
-                  <span className="detail-month-label">{panelRangeLabel}</span>
-                </div>
-                {instr.areas.length > 0 && (
-                  <span className="detail-areas">
-                    Areas: {instr.areas.join(", ")}
+                    {locTag.label}
                   </span>
                 )}
+                {onRemove && (
+                  <button
+                    type="button"
+                    className="remove-instr"
+                    title={`Remove ${instr.name} from the grid`}
+                    aria-label={`Remove ${instr.name} from the grid`}
+                    onClick={() => onRemove(instr.id)}
+                  >
+                    ×
+                  </button>
+                )}
               </div>
+            </div>
+          </div>
+          {(isExpanded || isExpandPending) && (
+            <div className="detail">
               {isExpandPending && !isExpanded ? (
                 // Keep immediate feedback while React renders the selected
                 // month's rows. The transition is also used by collapse, so
@@ -1288,52 +980,40 @@ function InstructorRowGroupInner(props: InstructorRowGroupProps) {
                 />
               )}
             </div>
-          </td>
-        </tr>
-      )}
+          )}
+        </td>
+      </tr>
       <tr className="row-gap" aria-hidden="true">
-        <td colSpan={timeCols.length + 1} />
+        <td />
       </tr>
     </Fragment>
   );
 }
 
-// Memoized: since `openPop` is `null` (referentially stable) for every
-// instructor except the one whose popover just changed, this bails out
-// entirely for all other instructors on every click — including skipping
-// their expanded monthly table.
+// Memoized: props are referentially stable for every instructor whose own
+// data did not change, so a click or hover elsewhere skips re-rendering this
+// instructor's expanded weekly timetable.
 const InstructorRowGroup = memo(InstructorRowGroupInner);
 
 function AvailabilityGridInner(props: GridProps) {
   const {
     instructors,
     freeGrid,
-    freeSets,
     windowTotals,
-    timeCols,
-    timeStarts,
     dates,
     selectedDate,
     weekDates,
-    panelRangeLabel,
-    canPanelPrev,
-    canPanelNext,
-    gridMinutes,
     slotStart,
     slotEnd,
-    expanded,
+    collapsed,
     pendingExpandId,
     selectedRows,
     rowColors,
+    rowTags,
     loadingRows,
     errorRows,
     onRetryLoad,
     onToggleExpand,
-    onPanelPrevWeek,
-    onPanelNextWeek,
-    onPanelPrevDay,
-    onPanelNextDay,
-    onPanelToday,
     onToggleSelectRow,
     onRemove,
     onSelect,
@@ -1344,16 +1024,6 @@ function AvailabilityGridInner(props: GridProps) {
 
   return (
     <table className="roster grid">
-      <thead>
-        <tr>
-          <th className="col-instructor">Instructor</th>
-          {timeCols.map((t) => (
-            <th key={t} className="col-time-h">
-              <span className="time-label">{t}</span>
-            </th>
-          ))}
-        </tr>
-      </thead>
       <tbody>
         {instructors.map((instr) => (
           <InstructorRowGroup
@@ -1361,28 +1031,17 @@ function AvailabilityGridInner(props: GridProps) {
             slotStart={slotStart}
             slotEnd={slotEnd}
             instr={instr}
-            freeSet={freeSets.get(instr.id)}
             windowTotal={windowTotals.get(instr.id) ?? 0}
-            isExpanded={expanded.has(instr.id)}
+            isExpanded={!collapsed.has(instr.id)}
             isExpandPending={pendingExpandId === instr.id}
             isSelected={selectedRows.has(instr.id)}
             rowColor={rowColors.get(instr.id)}
-            timeCols={timeCols}
-            timeStarts={timeStarts}
+            locTag={rowTags.get(instr.id)}
             dates={dates}
             selectedDate={selectedDate}
             weekDates={weekDates}
-            panelRangeLabel={panelRangeLabel}
-            canPanelPrev={canPanelPrev}
-            canPanelNext={canPanelNext}
-            gridMinutes={gridMinutes}
             freeGrid={freeGrid}
             onToggleExpand={onToggleExpand}
-            onPanelPrevWeek={onPanelPrevWeek}
-            onPanelNextWeek={onPanelNextWeek}
-            onPanelPrevDay={onPanelPrevDay}
-            onPanelNextDay={onPanelNextDay}
-            onPanelToday={onPanelToday}
             onToggleSelectRow={onToggleSelectRow}
             onRemove={onRemove}
             onSelect={onSelect}
@@ -1394,29 +1053,29 @@ function AvailabilityGridInner(props: GridProps) {
         {loadingRows.map((li) => (
           <tr key={li.id} className="row row-loading">
             <td className="instructor-cell">
-              <div className="instructor-cell-inner">{li.name}</div>
-            </td>
-            <td colSpan={timeCols.length}>
-              <span className="row-loading-msg">Loading schedule…</span>
+              <div className="instructor-cell-inner">
+                {li.name}
+                <span className="row-loading-msg">Loading schedule…</span>
+              </div>
             </td>
           </tr>
         ))}
         {errorRows.map((er) => (
           <tr key={`err-${er.id}`} className="row row-error">
             <td className="instructor-cell">
-              <div className="instructor-cell-inner">{er.name}</div>
-            </td>
-            <td colSpan={timeCols.length}>
-              <span className="row-error-msg">
-                Couldn&apos;t load schedule: {er.message}
-              </span>
-              <button
-                type="button"
-                className="row-error-retry"
-                onClick={() => onRetryLoad(er.id)}
-              >
-                Retry
-              </button>
+              <div className="instructor-cell-inner">
+                {er.name}
+                <span className="row-error-msg">
+                  Couldn&apos;t load schedule: {er.message}
+                </span>
+                <button
+                  type="button"
+                  className="row-error-retry"
+                  onClick={() => onRetryLoad(er.id)}
+                >
+                  Retry
+                </button>
+              </div>
             </td>
           </tr>
         ))}
@@ -1469,22 +1128,25 @@ export default function SalesDashboard() {
 
   const [filter, setFilter] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
-  const [dateIndex, setDateIndex] = useState(0);
-  const [sortAnchorDate, setSortAnchorDate] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Timetables are expanded by default; this tracks the rows the user has
+  // collapsed with their Schedule button.
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   // Keep expanding/collapsing the monthly timetable responsive and retain
   // immediate feedback while its slot grid is rendered.
   const [isExpandTransitionPending, startExpandTransition] = useTransition();
   const [pendingExpandId, setPendingExpandId] = useState<string | null>(null);
   const [compareIds, setCompareIds] = useState<string[]>([]);
-  const [sort, setSort] = useState<SortKey>("freeDesc");
-  const [selectedMonth, setSelectedMonth] = useState<string>("");
+  // Instructors added from a map polygon popup. During a location search the
+  // grid shows the matches; these are shown alongside them.
+  const [mapAddedIds, setMapAddedIds] = useState<Set<string>>(new Set());
+  // Default: with a location search, Area instructors first, then Nearby by
+  // distance; with no search it behaves like "most free slots".
+  const [sort, setSort] = useState<SortKey>("distance");
   // Expanded Schedule panel is an independent rolling 7-day window over the
   // full loaded range (past + future), navigated like Instructor Management's
   // "View Schedule". This holds its anchor day (empty = today).
   const [panelAnchorInput, setPanelAnchorInput] = useState<string>("");
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
-  const [theme, setTheme] = useState<"light" | "dark">(initialTheme);
   const [helpOpen, setHelpOpen] = useState(false);
   const [dbZones, setDbZones] = useState<DbZone[] | null>(null);
   const [companyIds, setCompanyIds] = useState<Set<string> | null>(null);
@@ -1510,9 +1172,23 @@ export default function SalesDashboard() {
   // survive the modal hiding/reopening while Sales picks each additional
   // class on the grid (see handleAddAnotherSlot / addingSlotMode below).
   const [pendingSlots, setPendingSlots] = useState<SlotPick[]>([]);
+  // The booking that was just saved, kept (name, REAL phone, classes) after the
+  // form clears so the slot panel can offer "Send Tentative Slots on WhatsApp".
+  // Dropped as soon as the agent starts another booking.
+  const [justBooked, setJustBooked] = useState<{
+    name: string;
+    phone: string;
+    email?: string;
+    courseId?: string;
+    paymentStatus: "unpaid" | "half_paid" | "full_paid";
+    slots: { date: string; startTime: string; endTime: string }[];
+  } | null>(null);
   const [customerFormData, setCustomerFormData] = useState<CustomerFormValues>(
     () => DEFAULT_CUSTOMER_FORM(currentUserName),
   );
+  useEffect(() => {
+    if (tentativeModalOpen) setJustBooked(null);
+  }, [tentativeModalOpen]);
   // currentUserName resolves asynchronously (a real DB/edge-function call),
   // so it's almost always still empty at the lazy-init above -- keep
   // salesAgent synced to it as soon as it resolves, and again if it ever
@@ -1579,17 +1255,17 @@ export default function SalesDashboard() {
   // removed), then grew again once the effect expanded the row (via a
   // transition that first showed a short "Loading…" placeholder). Deriving the
   // locked instructor as expanded here folds both into the SAME render, so the
-  // grid's height changes exactly once. The `expanded` set is still updated by
+  // grid's height changes exactly once. The `collapsed` set is still updated by
   // the effect, so cancelling a booking leaves the row open (see the Playwright
   // "hides the other rows" spec).
-  const expandedForRender = useMemo(() => {
-    if (!lockedInstructorId || expanded.has(lockedInstructorId)) {
-      return expanded;
+  const collapsedForRender = useMemo(() => {
+    if (!lockedInstructorId || !collapsed.has(lockedInstructorId)) {
+      return collapsed;
     }
-    const next = new Set(expanded);
-    next.add(lockedInstructorId);
+    const next = new Set(collapsed);
+    next.delete(lockedInstructorId);
     return next;
-  }, [expanded, lockedInstructorId]);
+  }, [collapsed, lockedInstructorId]);
   const [slotNotice, setSlotNotice] = useState<string | null>(null);
   const slotNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
@@ -1627,6 +1303,19 @@ export default function SalesDashboard() {
   // useCallback dep array is evaluated during render — referencing it up
   // here would throw a temporal-dead-zone ReferenceError.
 
+  // While editing, adding/removing/moving classes is only saved on Save, so
+  // leaving the form with such changes must ask first. A plain new booking
+  // asks once 2+ classes are picked.
+  const unsavedEditChanges =
+    editContext !== null &&
+    (pendingSlots.some((s) => s.scheduleId == null) ||
+      editContext.rowIds.some(
+        (id) => !pendingSlots.some((s) => s.scheduleId === id),
+      ));
+  const needsDiscardConfirm = editContext
+    ? unsavedEditChanges
+    : pendingSlots.length > 1;
+
   const handleRemoveSlot = useCallback((index: number) => {
     setPendingSlots((prev) => prev.filter((_, i) => i !== index));
   }, []);
@@ -1643,21 +1332,28 @@ export default function SalesDashboard() {
   }, [currentUserName]);
 
   // Closing (X / Cancel / Esc / click-away) throws the whole batch away, so
-  // ask first when more than one class has been picked. Editing an existing
-  // booking is exempt: nothing there is lost, it is already saved.
+  // ask first when more than one class has been picked, or when an edit has
+  // unsaved class changes (added / removed / moved classes).
   const handleCloseTentativeModal = useCallback(() => {
-    if (pendingSlots.length > 1 && !editContext) {
+    if (needsDiscardConfirm) {
       setDiscardPrompt({
         count: pendingSlots.length,
-        title: "Discard these classes?",
-        message: `You have ${pendingSlots.length} classes selected for this customer. Closing the form will remove all of them.`,
-        confirmLabel: "Discard classes",
+        title: editContext ? "Discard your changes?" : "Discard these classes?",
+        message: editContext
+          ? "You have unsaved changes to this booking's classes. Closing the form will throw them away."
+          : `You have ${pendingSlots.length} classes selected for this customer. Closing the form will remove all of them.`,
+        confirmLabel: editContext ? "Discard changes" : "Discard classes",
         run: discardAndCloseTentativeModal,
       });
       return;
     }
     discardAndCloseTentativeModal();
-  }, [pendingSlots.length, editContext, discardAndCloseTentativeModal]);
+  }, [
+    needsDiscardConfirm,
+    pendingSlots.length,
+    editContext,
+    discardAndCloseTentativeModal,
+  ]);
 
   const handleTentativeSuccess = useCallback(() => {
     const message = editContext
@@ -1673,6 +1369,21 @@ export default function SalesDashboard() {
     // reason. Targeted refresh keeps this to a brief per-row skeleton on
     // just the affected instructor(s).
     const affectedIds = [...new Set(pendingSlots.map((s) => s.instructorId))];
+    setJustBooked({
+      name: customerFormData.customerName,
+      phone: customerFormData.customerPhone,
+      email: customerFormData.customerEmail,
+      courseId:
+        customerFormData.course && customerFormData.course !== NO_COURSE
+          ? customerFormData.course
+          : undefined,
+      paymentStatus: customerFormData.paymentStatus,
+      slots: pendingSlots.map((p) => ({
+        date: p.date,
+        startTime: p.startTime,
+        endTime: p.endTime,
+      })),
+    });
     setTentativeModalOpen(false);
     setPendingSlots([]);
     setCustomerFormData(DEFAULT_CUSTOMER_FORM(currentUserName));
@@ -1683,6 +1394,7 @@ export default function SalesDashboard() {
     refreshInstructors,
     editContext,
     pendingSlots,
+    customerFormData,
     currentUserName,
     showSuccessNotice,
   ]);
@@ -1708,45 +1420,27 @@ export default function SalesDashboard() {
 
   const config = data?.config ?? null;
   const dates = useMemo(() => data?.dates ?? [], [data]);
-  // Full past+future window (the roster grid's `dates` above stays
-  // forward-only so the main month grid and its totals are unchanged).
+  // Full past+future window the timetables navigate over (`dates` above is
+  // forward-only and feeds the roster's free-slot counts and sort order).
   const windowDates = useMemo(
     () => (data?.windowDates?.length ? data.windowDates : dates),
     [data, dates],
   );
-  const displayGrid = useMemo(
-    () => data?.displayGrid ?? new Map<string, Map<string, number[]>>(),
-    [data],
-  );
-  const timeStarts = data?.timeStarts ?? [];
+  const timeStarts = useMemo(() => data?.timeStarts ?? [], [data]);
 
-  const months = useMemo(() => {
-    const out: string[] = [];
-    for (const d of dates) {
-      const m = d.slice(0, 7);
-      if (out[out.length - 1] !== m) out.push(m);
-    }
-    return out;
-  }, [dates]);
-  const activeMonth = months.includes(selectedMonth)
-    ? selectedMonth
-    : (months[0] ?? "");
-  const monthIdx = months.indexOf(activeMonth);
+  // The roster's free-slot counts and sort order are measured over the first
+  // month of the forward window; the timetables below navigate on their own.
+  const activeMonth = dates[0]?.slice(0, 7) ?? "";
   const visibleDates = useMemo(
     () => dates.filter((d) => d.startsWith(activeMonth)),
     [dates, activeMonth],
   );
-
-  const safeDateIndex = Math.min(
-    dateIndex,
-    Math.max(0, visibleDates.length - 1),
-  );
-  const selectedDate = visibleDates[safeDateIndex] ?? null;
+  const selectedDate = visibleDates[0] ?? null;
 
   // Expanded Schedule panel: an independent rolling 7-day window over the full
   // loaded range (past + future), navigated like Instructor Management's
-  // "View Schedule" (<< < Today > >>). The main roster grid's month nav/day
-  // strip above is untouched.
+  // "View Schedule" (<< < Today > >>). One shared control in the top bar moves
+  // every instructor's timetable at once.
   const today = useMemo(() => istTodayISO(), []);
   const panelMinAnchor = windowDates[0] ?? today;
   const panelMaxAnchor =
@@ -1761,6 +1455,9 @@ export default function SalesDashboard() {
     const start = Math.max(0, windowDates.indexOf(panelAnchor));
     return windowDates.slice(start, start + 7);
   }, [windowDates, panelAnchor]);
+  // The arrows and the date label update immediately; the (heavy) timetables
+  // catch up in a lower-priority render so a click never waits on them.
+  const deferredWeekDates = useDeferredValue(weekDates);
   const panelRangeLabel = useMemo(
     () => formatPanelRange(weekDates),
     [weekDates],
@@ -1783,37 +1480,10 @@ export default function SalesDashboard() {
   const panelPrevDay = useCallback(() => shiftPanel(-1), [shiftPanel]);
   const panelNextDay = useCallback(() => shiftPanel(1), [shiftPanel]);
   const panelToday = useCallback(() => setPanelAnchorInput(today), [today]);
-  const goPrev = useCallback(() => {
-    if (monthIdx > 0) {
-      setSortAnchorDate((current) => current ?? selectedDate);
-      setSelectedMonth(months[monthIdx - 1]);
-      setDateIndex(0);
-    }
-  }, [monthIdx, months, selectedDate]);
-  const goNext = useCallback(() => {
-    if (monthIdx < months.length - 1) {
-      setSortAnchorDate((current) => current ?? selectedDate);
-      setSelectedMonth(months[monthIdx + 1]);
-      setDateIndex(0);
-    }
-  }, [monthIdx, months, selectedDate]);
 
   useOutsideClick(searchRef, () => setSearchOpen(false));
 
-  // Theme is scoped to this component's own wrapper (.sales-dashboard-root),
-  // NOT document.documentElement — toggling it must never reskin the rest of
-  // the admin app. The wrapper also gets a literal "dark" class (alongside
-  // data-theme, which the --gc-* CSS variables key off) purely so
-  // Tailwind's darkMode: ["class"] config activates the dark: variants
-  // already used inside sales-dashboard components (e.g.
-  // TentativeBookingModal) -- those never had a real trigger before, since
-  // Tailwind's dark: only ever responds to an ancestor .dark class, not a
-  // data-theme attribute.
   const rootRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    rootRef.current?.setAttribute("data-theme", theme);
-    localStorage.setItem("lane-sales-dashboard-theme", theme);
-  }, [theme]);
 
   // Entering "pick a slot on the grid" mode (add-another-class) is easy to
   // miss if the grid is scrolled out of view or the user doesn't notice the
@@ -1821,6 +1491,21 @@ export default function SalesDashboard() {
   // highlighted border for as long as picking mode is active, so it's
   // unmistakable where to click next.
   const gridWrapRef = useRef<HTMLDivElement>(null);
+  // Each instructor's nameplate sticks just under the (also sticky) top bar
+  // while its timetable scrolls; the bar's height varies with wrapping, so it
+  // is measured into a CSS var the stylesheet offsets the nameplates by.
+  const topbarRef = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const el = topbarRef.current;
+    const root = rootRef.current;
+    if (!el || !root) return;
+    const apply = () =>
+      root.style.setProperty("--sd-topbar-h", `${el.offsetHeight}px`);
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [config]);
   useEffect(() => {
     if (addingSlotMode) {
       gridWrapRef.current?.scrollIntoView({
@@ -1831,9 +1516,8 @@ export default function SalesDashboard() {
   }, [addingSlotMode]);
 
   // The expanded timetable is a copy of Instructor Management's grid, whose 7
-  // day-columns fill the *visible panel*. The roster grid is far wider than the
-  // viewport (18 slot columns), so expose the viewport width as a CSS var and
-  // let .detail/.week-timetable size to it instead of the full table.
+  // day-columns fill the *visible panel*. Expose the grid's visible width as a CSS
+  // var so .detail/.week-timetable size to the viewport, not the table.
   useLayoutEffect(() => {
     const el = gridWrapRef.current;
     if (!el) return;
@@ -1923,7 +1607,7 @@ export default function SalesDashboard() {
   const toggleExpand = useCallback((id: string) => {
     setPendingExpandId(id);
     startExpandTransition(() => {
-      setExpanded((prev) => {
+      setCollapsed((prev) => {
         const next = new Set(prev);
         if (next.has(id)) next.delete(id);
         else next.add(id);
@@ -1940,14 +1624,19 @@ export default function SalesDashboard() {
   const expandRow = useCallback((id: string) => {
     setPendingExpandId(id);
     startExpandTransition(() => {
-      setExpanded((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+      setCollapsed((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     });
   }, []);
 
   // Opening a booking auto-opens that instructor's "Schedule" view.
   //
   // Every next step of the flow ("+ Add another class", "Change slot") tells
-  // Sales to click a green cell on the schedule, so the FIRST class should be
+  // Sales to click a white (free) cell on the schedule, so the FIRST class should be
   // picked from the same view the later ones are, rather than having to be
   // chosen from a collapsed row and then re-opened mid-booking. Only the locked
   // instructor is on screen at this point (see the gridRows filter), so this
@@ -2004,12 +1693,12 @@ export default function SalesDashboard() {
     // "+ Add another class" snapped the panel to "In this booking / Already
     // added to this booking", i.e. the summary of the class they were in the
     // middle of building. Keeping the form mounted leaves the customer form
-    // and Selected Slots exactly where they were; the next green cell click
+    // and Selected Slots exactly where they were; the next free cell click
     // appends and the form updates in place. See handleSlotSelect's
     // `addingSlotMode` append branch.
     // Reuse the row's existing "Schedule" control so the next class is
     // picked from the same view Sales would reach by hand, and from where
-    // other days and months are reachable via its month arrows. Safe on an
+    // other days are reachable via the shared date navigation. Safe on an
     // already-open row: expandRow only opens, so it can be called
     // unconditionally.
     if (lockedInstructorId) expandRow(lockedInstructorId);
@@ -2099,6 +1788,17 @@ export default function SalesDashboard() {
     setSearchOpen(false);
   };
 
+  const addFromMap = useCallback(
+    (id: string) => {
+      addRosterInstructor(id);
+      setMapAddedIds((prev) => new Set(prev).add(id));
+      setCompareIds((prev) =>
+        prev.length > 0 && !prev.includes(id) ? [...prev, id] : prev,
+      );
+    },
+    [addRosterInstructor],
+  );
+
   const removeFromCompare = useCallback((id: string) => {
     setCompareIds((prev) => prev.filter((x) => x !== id));
   }, []);
@@ -2147,6 +1847,10 @@ export default function SalesDashboard() {
     zones: string[];
     via: "polygon" | "none";
     zoneIds: Map<string, string>;
+    // instructorId -> km from the pin to the edge of their polygon, for the
+    // instructors who are NOT inside it but within the nearby radius. These
+    // are appended after the inside matches in `ids`/`zones`/`zoneIds`.
+    nearbyKm: Map<string, number>;
   } | null>(() => {
     if (!locSearch || !dbZones) return null;
     // Polygon-only by design: an instructor matches when the searched point
@@ -2174,14 +1878,31 @@ export default function SalesDashboard() {
     // authoritative; the name list covers the window before that migration is
     // applied, and any zone whose Instructor.name changed. `z.name` is the
     // authoritative `Instructor.name` (see zones-db.ts), not the KML spelling.
-    const names = dbZones
-      .filter(
-        (z) =>
-          !isCompanyInstructorId(z.instructorId, companyIds) &&
-          !isCompanyInstructor(z.name) &&
-          pointInPolygon({ lat: locSearch.lat, lng: locSearch.lng }, z.coords),
-      )
+    //
+    // Nearby: an instructor whose polygon does NOT contain the pin but whose
+    // nearest edge is within `nearby_radius_km` (app_settings booking_flow)
+    // is listed after the inside matches, closest first. Same eligibility
+    // rules as above (no rough polygons, no company instructors).
+    const pin = { lat: locSearch.lat, lng: locSearch.lng };
+    const radiusKm = config?.nearby_radius_km ?? DEFAULT_NEARBY_RADIUS_KM;
+    const eligible = dbZones.filter(
+      (z) =>
+        !isCompanyInstructorId(z.instructorId, companyIds) &&
+        !isCompanyInstructor(z.name),
+    );
+    const insideNames = eligible
+      .filter((z) => pointInPolygon(pin, z.coords))
       .map((z) => z.name);
+    const insideSet = new Set(insideNames);
+    const nearbyZones = eligible
+      .filter((z) => !insideSet.has(z.name))
+      .map((z) => ({ z, km: distanceToPolygonKm(pin, z.coords) }))
+      .filter(({ km }) => km <= radiusKm)
+      .sort((a, b) => a.km - b.km)
+      .slice(0, config?.nearby_max_results ?? DEFAULT_NEARBY_MAX_RESULTS);
+    const names = [...insideNames, ...nearbyZones.map(({ z }) => z.name)];
+    const nearbyKm = new Map<string, number>();
+    for (const { z, km } of nearbyZones) nearbyKm.set(z.instructorId, km);
     const ids: string[] = [];
     const zoneIds = new Map<string, string>();
     for (const name of names) {
@@ -2195,12 +1916,30 @@ export default function SalesDashboard() {
       zones: names,
       via: names.length ? "polygon" : "none",
       zoneIds,
+      nearbyKm,
     };
-  }, [locSearch, dbZones, companyIds, zoneIdByName]);
+  }, [locSearch, dbZones, companyIds, zoneIdByName, config]);
 
+  // Staged load: Area instructors first, so the most relevant rows appear as
+  // soon as possible; the (capped) Nearby instructors are fetched only after
+  // the area batch has settled, instead of one large simultaneous request.
+  const areaIdsKey = locMatch
+    ? locMatch.ids.filter((id) => !locMatch.nearbyKm.has(id)).join(",")
+    : "";
+  const nearbyIdsKey = locMatch
+    ? locMatch.ids.filter((id) => locMatch.nearbyKm.has(id)).join(",")
+    : "";
   useEffect(() => {
-    if (locMatch && locMatch.ids.length > 0) loadInstructors(locMatch.ids);
-  }, [locMatch, loadInstructors]);
+    if (areaIdsKey) loadInstructors(areaIdsKey.split(","));
+  }, [areaIdsKey, loadInstructors]);
+  const areaBatchSettled = !(data?.loading ?? []).some((li) =>
+    areaIdsKey.split(",").includes(li.id),
+  );
+  useEffect(() => {
+    if (nearbyIdsKey && areaBatchSettled) {
+      loadInstructors(nearbyIdsKey.split(","));
+    }
+  }, [nearbyIdsKey, areaBatchSettled, loadInstructors]);
 
   const locResult = useMemo(() => {
     if (!locMatch || !dbZones) return null;
@@ -2233,6 +1972,7 @@ export default function SalesDashboard() {
       instrs,
       zones: locMatch.zones,
       via: locMatch.via,
+      nearbyKm: locMatch.nearbyKm,
       instrColors,
       zoneInfo,
     };
@@ -2242,6 +1982,35 @@ export default function SalesDashboard() {
     () => new Map(Object.entries(locResult?.instrColors ?? {})),
     [locResult],
   );
+
+  // Nameplate tag for a location search: inside the instructor's polygon
+  // ("Area instructor") or just outside it within the radius ("Nearby
+  // instructor", with the distance to their nearest edge).
+  const rowTags = useMemo(() => {
+    const map = new Map<string, { label: string; nearby: boolean }>();
+    for (const i of locResult?.instrs ?? []) {
+      const km = locResult?.nearbyKm.get(i.id);
+      map.set(
+        i.id,
+        km === undefined
+          ? { label: "Area instructor", nearby: false }
+          : { label: `Nearby instructor · ${km.toFixed(1)} km`, nearby: true },
+      );
+    }
+    return map;
+  }, [locResult]);
+
+  // Stable identity: a fresh object per render made the map rebuild every
+  // overlay (and re-fit the view) on every dashboard re-render.
+  const locPoint = useMemo(
+    () => (locSearch ? { lat: locSearch.lat, lng: locSearch.lng } : null),
+    [locSearch],
+  );
+
+  const mapMatchedNames = useStableJson(
+    locResult?.zones ?? EMPTY_MATCHED_NAMES,
+  );
+  const mapZoneInfo = useStableJson(locResult?.zoneInfo ?? EMPTY_ZONE_INFO);
 
   const locStatus: LocateStatus = useMemo(() => {
     if (!locSearch) return "idle";
@@ -2277,12 +2046,10 @@ export default function SalesDashboard() {
     }
     setFilter("");
     setSearchOpen(false);
-    setDateIndex(0);
-    setSortAnchorDate(null);
-    setExpanded(new Set());
+    setCollapsed(new Set());
     setCompareIds([]);
-    setSort("freeDesc");
-    setSelectedMonth("");
+    setMapAddedIds(new Set());
+    setSort("distance");
     setSelectedRows(new Set());
     clearLocation();
   };
@@ -2312,11 +2079,19 @@ export default function SalesDashboard() {
   // or typing a new name to add hides every already-added instructor that
   // doesn't happen to match, making them look removed.
   const visibleInstructors = useMemo(() => {
-    const roster = locSearch
-      ? (locResult?.instrs ?? [])
-      : (data?.instructors ?? []);
+    let roster: InstructorRow[];
+    if (locSearch) {
+      const matched = locResult?.instrs ?? [];
+      const matchedIds = new Set(matched.map((i) => i.id));
+      const extras = (data?.instructors ?? []).filter(
+        (i) => mapAddedIds.has(i.id) && !matchedIds.has(i.id),
+      );
+      roster = [...matched, ...extras];
+    } else {
+      roster = data?.instructors ?? [];
+    }
     return roster.filter((i) => isBookable(i) || workingOnMap.has(i.id));
-  }, [data, locSearch, locResult, workingOnMap]);
+  }, [data, locSearch, locResult, workingOnMap, mapAddedIds]);
 
   const searchResults = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -2355,33 +2130,9 @@ export default function SalesDashboard() {
   }, [data, compareIds]);
   const inSelectionMode = compareIds.length > 0;
 
-  // displayGrid on purpose, unlike windowTotals/dateTotals below -- this
-  // feeds cell coloring (freeSet in AvailabilityGridInner -> free =
-  // freeSet.has(m)), where a 30-min-only opening still needs to render as
-  // free (canBook1Hour separately downgrades it to the striped .cell-half
-  // look rather than solid green). Collapsing this to freeGrid would make
-  // that half-free/half-buffer distinction impossible to render at all --
-  // see bookableCounts below for the freeGrid-based version used for the
-  // "X free" counts/sort order, which is a different requirement from
-  // what this feeds.
-  const freeSets = useMemo(() => {
-    const map = new Map<string, Set<number>>();
-    if (!selectedDate || !data) return map;
-    for (const instr of data.instructors) {
-      if (!isBookable(instr) && !workingOnMap.has(instr.id)) continue;
-      map.set(
-        instr.id,
-        new Set(displayGrid.get(instr.id)?.get(selectedDate) ?? []),
-      );
-    }
-    return map;
-  }, [data, selectedDate, workingOnMap, displayGrid]);
-
-  // The freeGrid-based (bookable full-hour) counterpart to freeSets above,
-  // used anywhere a NUMBER is shown ("X free"), so those always agree with
-  // the strict, actually-bookable count windowTotals/dateTotals and the
-  // expanded mini-row use, rather than freeSets' more lenient half-hour
-  // opening count.
+  // Bookable (full-hour) free-slot count on the selected date, used anywhere a
+  // NUMBER is shown ("X free"), so it always agrees with windowTotals and the
+  // weekly timetable.
   const bookableCounts = useMemo(() => {
     const map = new Map<string, number>();
     if (!selectedDate || !data) return map;
@@ -2395,38 +2146,23 @@ export default function SalesDashboard() {
     return map;
   }, [data, selectedDate, workingOnMap]);
 
-  // Month navigation changes the displayed date but must not reshuffle the
-  // roster. Keep sorting anchored to the date that was active before the
-  // first month-arrow click; selecting a date or sort option resets it.
-  const effectiveSortDate =
-    sortAnchorDate && dates.includes(sortAnchorDate)
-      ? sortAnchorDate
-      : selectedDate;
   const sortBookableCounts = useMemo(() => {
     const map = new Map<string, number>();
-    if (!effectiveSortDate || !data) return map;
+    if (!selectedDate || !data) return map;
     for (const instr of data.instructors) {
       if (!isBookable(instr) && !workingOnMap.has(instr.id)) continue;
       map.set(
         instr.id,
-        data.freeGrid.get(instr.id)?.get(effectiveSortDate)?.length ?? 0,
+        data.freeGrid.get(instr.id)?.get(selectedDate)?.length ?? 0,
       );
     }
     return map;
-  }, [data, effectiveSortDate, workingOnMap]);
+  }, [data, selectedDate, workingOnMap]);
 
-  // freeGrid, not displayGrid: these are the collapsed-row/date-tab summary
-  // counts, and they need to agree with what the expanded view's own count
-  // and green cells show (both driven by freeGrid, the strict "a full
-  // 1-hour class actually fits here" grid -- see MiniTimeRowInner's
-  // per-cell freeGrid read below). displayGrid only requires a 30-min
-  // gridMinutes-long opening,
-  // which is right for coloring buffer-vs-free half-hour cells but counts
-  // scattered half-hour gaps that can't fit an actual class -- e.g. an
-  // instructor with classes back-to-back except for a 30-min gap every
-  // hour would show as "7 free" in the summary while the expanded view,
-  // correctly, shows zero bookable hours. Using the same grid everywhere
-  // means the summary number always matches what expanding it shows.
+  // Free-slot totals use freeGrid -- the strict "a full 1-hour class actually
+  // fits here" grid -- so the number always matches the free slots the
+  // weekly timetable shows (scattered 30-min gaps that can't fit a class are
+  // not counted).
   const windowTotals = useMemo(() => {
     const map = new Map<string, number>();
     if (!data) return map;
@@ -2440,26 +2176,24 @@ export default function SalesDashboard() {
     return map;
   }, [data, visibleDates, workingOnMap]);
 
-  const dateTotals = useMemo(() => {
-    const map = new Map<string, number>();
-    if (!data) return map;
-    for (const d of data.dates) {
-      let total = 0;
-      for (const instr of data.instructors) {
-        if (!isBookable(instr) && !workingOnMap.has(instr.id)) continue;
-        total += data.freeGrid.get(instr.id)?.get(d)?.length ?? 0;
-      }
-      map.set(d, total);
-    }
-    return map;
-  }, [data, workingOnMap]);
-
   const sortRoster = useCallback(
     (list: InstructorRow[]): InstructorRow[] => {
       const freeCount = (i: InstructorRow) => sortBookableCounts.get(i.id) ?? 0;
       const byStatus = (a: InstructorRow, b: InstructorRow) =>
         instructorDisplayRank(a) - instructorDisplayRank(b);
       switch (sort) {
+        case "distance": {
+          // Area instructors (no entry in nearbyKm) first, then Nearby by
+          // distance; ties fall back to the usual status/free/name order.
+          const km = (i: InstructorRow) => locResult?.nearbyKm.get(i.id) ?? -1;
+          return [...list].sort(
+            (a, b) =>
+              km(a) - km(b) ||
+              byStatus(a, b) ||
+              freeCount(b) - freeCount(a) ||
+              a.name.localeCompare(b.name),
+          );
+        }
         case "alpha":
           return [...list].sort(
             (a, b) => byStatus(a, b) || a.name.localeCompare(b.name),
@@ -2480,7 +2214,7 @@ export default function SalesDashboard() {
           );
       }
     },
-    [sort, sortBookableCounts],
+    [sort, sortBookableCounts, locResult],
   );
 
   const rows = useMemo(() => {
@@ -2520,7 +2254,20 @@ export default function SalesDashboard() {
       // to book, so it just displays its details -- no validation, no notice,
       // and it must not disturb an in-progress booking.
       setSelectedSlot({ instrId, date, minute, free, info });
-      if (!free) return;
+      // The "Booking saved" card outranks slot details in the panel, so any
+      // new selection has to retire it or the click would appear to do nothing.
+      setJustBooked(null);
+      if (!free) {
+        // The booking form owns the side panel while it is open, so a taken
+        // slot's details would never show until the form was closed. Hide the
+        // form instead (pendingSlots / customerFormData / editContext live
+        // here, so nothing is lost) -- the panel offers "Back to booking
+        // form". A cell of the in-progress booking itself keeps the form.
+        if (tentativeModalOpen && info.kind !== "pending") {
+          setTentativeModalOpen(false);
+        }
+        return;
+      }
 
       // Defence in depth for the one-instructor-per-booking lock. Other
       // instructors' rows aren't rendered while locked, so this should be
@@ -2705,12 +2452,16 @@ export default function SalesDashboard() {
       // This replaces the whole in-progress batch and blanks the customer
       // form, so confirm first when more than one class was already picked
       // (a stray click on a free slot used to wipe the set silently).
-      if (pendingSlots.length > 1 && !editContext) {
+      if (needsDiscardConfirm) {
         setDiscardPrompt({
           count: pendingSlots.length,
           title: "Start a new booking?",
-          message: `You have ${pendingSlots.length} classes selected for this customer. Starting a new booking from this slot will remove all of them and clear the form.`,
-          confirmLabel: "Remove & start new",
+          message: editContext
+            ? "You have unsaved changes to the booking you are editing. Starting a new booking from this slot will throw them away."
+            : `You have ${pendingSlots.length} classes selected for this customer. Starting a new booking from this slot will remove all of them and clear the form.`,
+          confirmLabel: editContext
+            ? "Discard & start new"
+            : "Remove & start new",
           run: startFreshBooking,
         });
         return;
@@ -2726,12 +2477,14 @@ export default function SalesDashboard() {
       replacingSlotIndex,
       pendingSlots,
       editContext,
+      needsDiscardConfirm,
       currentUserName,
       customerFormData.customerPhone,
       data?.freeGrid,
       locSearch,
       lockedInstructorId,
       lockedInstructorName,
+      tentativeModalOpen,
     ],
   );
 
@@ -2807,11 +2560,11 @@ export default function SalesDashboard() {
 
   // Bulk Add (copied from Instructor Management's "Bulk Add Schedules").
   //
-  // Like Instructor Management, this appends EVERY generated slot (only a
-  // slot for a different instructor than the locked one is ignored). It does
-  // not filter busy slots out: the modal checks each row against the DB and
-  // shows Free / Conflict, and a conflicting row blocks submit until it is
-  // removed. Filtering here is what used to turn 10 copies into 7.
+  // Generated slots that land on a GREY cell (the instructor's unavailability or
+  // a travel-gap buffer) are skipped and reported -- the DB conflict check in
+  // the modal only knows about bookings, so it would have shown them as Free.
+  // A slot that overlaps an actual booking is still appended: the modal shows
+  // it as a Conflict and blocks submit until it is removed.
   const handleAddBulkSlots = useCallback(
     async (
       newSlots: SlotPick[],
@@ -2820,11 +2573,38 @@ export default function SalesDashboard() {
         return { added: 0, skipped: ["No booking is in progress."] };
       }
 
+      const gapMinutes = Math.max(
+        0,
+        Math.floor(config?.instructor_gap_minutes ?? 0),
+      );
       const accepted: SlotPick[] = [];
+      const skipped: string[] = [];
       for (const slot of newSlots) {
         if (slot.instructorId !== lockedInstructorId) {
           // skip silently like instructor management
           continue;
+        }
+        const minute = timeToMinutes(slot.startTime);
+        const isFree = validateOneHourBlock(
+          slot.instructorId,
+          slot.date,
+          minute,
+          data?.freeGrid ?? null,
+        );
+        if (!isFree) {
+          const conflict = classifySlotConflict(
+            slot.instructorId,
+            slot.date,
+            minute,
+            gapMinutes,
+            blocksIndex,
+          );
+          if (conflict.kind !== "direct") {
+            skipped.push(
+              `${slot.date} ${slot.startTime}-${slot.endTime}: not available (instructor unavailable or travel-gap buffer)`,
+            );
+            continue;
+          }
         }
         accepted.push(slot);
       }
@@ -2833,9 +2613,14 @@ export default function SalesDashboard() {
         setPendingSlots((prev) => [...prev, ...accepted]);
       }
 
-      return { added: accepted.length, skipped: [] };
+      return { added: accepted.length, skipped };
     },
-    [lockedInstructorId],
+    [
+      lockedInstructorId,
+      config?.instructor_gap_minutes,
+      data?.freeGrid,
+      blocksIndex,
+    ],
   );
 
   // Edit an existing tentative booking: reopen the booking form loaded with
@@ -2919,6 +2704,7 @@ export default function SalesDashboard() {
         customerAddress: typeof td.address === "string" ? td.address : "",
         course:
           typeof td.course === "string" && td.course ? td.course : NO_COURSE,
+        customerEmail: typeof td.email === "string" ? td.email : undefined,
       });
       setSelectedSlot(null);
       setTentativeModalOpen(true);
@@ -2930,19 +2716,21 @@ export default function SalesDashboard() {
   // ask first when more than one class is picked.
   const handleEditBooking = useCallback(
     (action: NonNullable<SlotInfo["editAction"]>) => {
-      if (pendingSlots.length > 1 && !editContext) {
+      if (needsDiscardConfirm) {
         setDiscardPrompt({
           count: pendingSlots.length,
           title: "Open another booking?",
-          message: `You have ${pendingSlots.length} classes selected for a new booking. Opening another booking to edit will remove all of them.`,
-          confirmLabel: "Remove & open",
+          message: editContext
+            ? "You have unsaved changes to the booking you are editing. Opening another booking will throw them away."
+            : `You have ${pendingSlots.length} classes selected for a new booking. Opening another booking to edit will remove all of them.`,
+          confirmLabel: editContext ? "Discard & open" : "Remove & open",
           run: () => startEditBooking(action),
         });
         return;
       }
       startEditBooking(action);
     },
-    [pendingSlots.length, editContext, startEditBooking],
+    [needsDiscardConfirm, pendingSlots.length, editContext, startEditBooking],
   );
 
   // Lets Sales fix a wrong entry (e.g. a typo'd name/phone or a slot picked
@@ -3265,6 +3053,11 @@ export default function SalesDashboard() {
           // for a real tentative row, but favors allowing the edit over
           // silently hiding it).
           const paymentStatus = cover.paymentStatus ?? "unpaid";
+          const tentativeCourseLabel =
+            typeof cover.rawTentativeDetails?.course_name === "string" &&
+            cover.rawTentativeDetails.course_name !== "None"
+              ? cover.rawTentativeDetails.course_name
+              : "";
           const isUnpaid = paymentStatus === "unpaid";
           // Same fields (and the same cover.learnerName/area/courseName
           // already computed from tentative_details) the "booked" branch
@@ -3334,9 +3127,9 @@ export default function SalesDashboard() {
               lessonNumber: cover.lessonNumber,
               phone: displayPhone(cover.learnerPhone),
               location: cover.area,
-              // Instructor Management's tentative card shows the hold's
-              // description (not a course) plus its lead and payment info.
-              course: "",
+              // Sales saves the chosen course as `course_name`; a description
+              // (Instructor Management holds) is shown on its own row.
+              course: tentativeCourseLabel,
               description: cover.courseName,
               lead: cover.rawTentativeDetails?.leadName
                 ? String(cover.rawTentativeDetails.leadName)
@@ -3370,6 +3163,35 @@ export default function SalesDashboard() {
                 }
               : null,
             scheduleBlock: scheduleBlock("Tentative"),
+            // Every tentative hold gets the Learner section. Holds made in
+            // Instructor Management carry no phone, so the section then looks
+            // the learner up by name instead.
+            customer: {
+              name:
+                typeof cover.rawTentativeDetails?.name === "string" &&
+                cover.rawTentativeDetails.name
+                  ? cover.rawTentativeDetails.name
+                  : cover.learnerName,
+              phone:
+                typeof cover.rawTentativeDetails?.phone === "string" &&
+                cover.rawTentativeDetails.phone
+                  ? cover.rawTentativeDetails.phone
+                  : cover.learnerPhone,
+              course: tentativeCourseLabel || cover.courseName,
+              courseId:
+                typeof cover.rawTentativeDetails?.course === "string" &&
+                cover.rawTentativeDetails.course !== NO_COURSE
+                  ? cover.rawTentativeDetails.course
+                  : undefined,
+              email:
+                typeof cover.rawTentativeDetails?.email === "string"
+                  ? cover.rawTentativeDetails.email
+                  : undefined,
+              paymentStatus:
+                paymentStatus === "half_paid" || paymentStatus === "full_paid"
+                  ? paymentStatus
+                  : "unpaid",
+            },
           };
         }
         if (cover.status === "paused") {
@@ -3415,33 +3237,32 @@ export default function SalesDashboard() {
         };
       }
 
-      // Nothing real (class, buffer, leave) explains this cell, so it is not
-      // "busy" -- it simply is not a valid class start. Say why instead of
-      // showing a generic "Busy" that reads like a conflict: a class starting
-      // here would not fit inside the configured booking hours.
+      // The cell itself is clear, yet it is not free: a full class starting here
+      // would run into the next booking, its travel-gap buffer, or the
+      // instructor's own unavailability. That is still a buffer / unavailability
+      // reason, so it is grey and says so -- white means free, nothing else.
       if (config?.slotStart && config?.slotEnd) {
         const openMin = timeToMinutes(config.slotStart);
         const closeMin = timeToMinutes(config.slotEnd);
         const classMin = config.slotDurationMinutes ?? 60;
-        if (minute < openMin || minute >= closeMin) {
+        if (minute >= openMin && minute + classMin <= closeMin) {
+          const conflict = classifySlotConflict(
+            instrId,
+            date,
+            minute,
+            g,
+            blocksIndex,
+          );
           return {
-            title: "Outside business hours",
+            title: "Not enough time for a full class",
             detail: [
               timeLabel,
               `Instructor: ${name}`,
-              `Bookable hours are ${config.slotStart}–${config.slotEnd}.`,
-            ],
-            kind: "default",
-            deleteAction: null,
-          };
-        }
-        if (minute + classMin > closeMin) {
-          return {
-            title: `Closes at ${config.slotEnd}`,
-            detail: [
-              timeLabel,
-              `Instructor: ${name}`,
-              `A ${classMin}-minute class can't start here — it would end after ${config.slotEnd}.`,
+              conflict.kind === "direct"
+                ? `A ${classMin}-minute class starting here would overlap another booking.`
+                : conflict.kind === "buffer"
+                  ? `A ${classMin}-minute class starting here would run into the ${g}-minute travel gap around another booking.`
+                  : `A ${classMin}-minute class starting here would run into the instructor's unavailable time.`,
             ],
             kind: "default",
             deleteAction: null,
@@ -3449,10 +3270,12 @@ export default function SalesDashboard() {
         }
       }
 
+      // Outside the bookable window (or no config): no reason to show, and not
+      // shaded.
       return {
-        title: "Busy",
+        title: "Not bookable",
         detail: [timeLabel, `Instructor: ${name}`],
-        kind: "default",
+        kind: "idle",
         deleteAction: null,
       };
     };
@@ -3479,6 +3302,12 @@ export default function SalesDashboard() {
     if (!lockedInstructorId) return base;
     return base.filter((i) => i.id === lockedInstructorId);
   }, [compareIds, compareInstructors, rows, sortRoster, lockedInstructorId]);
+
+  // Instructors currently on the grid, for the map popup's "already added".
+  const dashboardIds = useMemo(
+    () => new Set(gridRows.map((i) => i.id)),
+    [gridRows],
+  );
 
   // Guarantees the timeline (06:00 column onward) always starts exactly
   // where the Instructor column ends, for any name length. The table's own
@@ -3555,13 +3384,7 @@ export default function SalesDashboard() {
 
   if (phase === "loading") {
     return (
-      <div
-        className={["sales-dashboard-root", theme === "dark" && "dark"]
-          .filter(Boolean)
-          .join(" ")}
-        data-theme={theme}
-        ref={rootRef}
-      >
+      <div className="sales-dashboard-root" data-theme="light" ref={rootRef}>
         <main className="shell">
           <div className="state dashboard-loading-state">
             <LoadingSpinner size="sm" className="dashboard-loading-spinner" />
@@ -3574,13 +3397,7 @@ export default function SalesDashboard() {
 
   if (phase === "error" || !data) {
     return (
-      <div
-        className={["sales-dashboard-root", theme === "dark" && "dark"]
-          .filter(Boolean)
-          .join(" ")}
-        data-theme={theme}
-        ref={rootRef}
-      >
+      <div className="sales-dashboard-root" data-theme="light" ref={rootRef}>
         <main className="shell">
           <div className="state error">
             <p>
@@ -3598,86 +3415,111 @@ export default function SalesDashboard() {
   if (!config) return null;
 
   const fromLabel = shortDate(dates[0]);
-  const timeCols = timeStarts.map((m) => minutesToTime(m));
 
   return (
-    <div
-      className={["sales-dashboard-root", theme === "dark" && "dark"]
-        .filter(Boolean)
-        .join(" ")}
-      data-theme={theme}
-      ref={rootRef}
-    >
+    <div className="sales-dashboard-root" data-theme="light" ref={rootRef}>
       <main className="shell">
-        <header className="topbar">
-          <h1 className="topbar-title">Instructor availability</h1>
-          <div className="topbar-row">
-            <div className="cal-nav">
+        <header className="topbar" ref={topbarRef}>
+          <div className="topbar-title-row">
+            <div
+              className="detail-month-nav"
+              aria-label="Timetable date navigation"
+            >
               <button
                 type="button"
-                className="cal-btn chev"
-                onClick={goPrev}
-                disabled={monthIdx <= 0}
-                aria-label="Previous month"
+                className="detail-month-btn"
+                onClick={panelPrevWeek}
+                disabled={!canPanelPrev}
+                aria-label="Show previous week in all timetables"
+                title="Previous week"
               >
-                ‹
+                <ChevronsLeft aria-hidden="true" />
               </button>
-              <div className="cal-month">{monthLabel(activeMonth)}</div>
               <button
                 type="button"
-                className="cal-btn chev"
-                onClick={goNext}
-                disabled={monthIdx >= months.length - 1}
-                aria-label="Next month"
+                className="detail-month-btn"
+                onClick={panelPrevDay}
+                disabled={!canPanelPrev}
+                aria-label="Show previous day in all timetables"
+                title="Previous day"
               >
-                ›
+                <ChevronLeft aria-hidden="true" />
               </button>
+              <button
+                type="button"
+                className="detail-today-btn"
+                onClick={panelToday}
+                title="Jump to today"
+              >
+                Today
+              </button>
+              <button
+                type="button"
+                className="detail-month-btn"
+                onClick={panelNextDay}
+                disabled={!canPanelNext}
+                aria-label="Show next day in all timetables"
+                title="Next day"
+              >
+                <ChevronRight aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="detail-month-btn"
+                onClick={panelNextWeek}
+                disabled={!canPanelNext}
+                aria-label="Show next week in all timetables"
+                title="Next week"
+              >
+                <ChevronsRight aria-hidden="true" />
+              </button>
+              <span className="detail-month-label">{panelRangeLabel}</span>
             </div>
-
+          </div>
+          <div className="topbar-legend" aria-label="Schedule status legend">
+            <span className="tt-legend-item">
+              <span className="h-2 w-2 rounded-sm bg-indigo-500" />
+              Booked
+            </span>
+            <span className="tt-legend-item">
+              <span className="h-2 w-2 rounded-sm bg-amber-400" />
+              Tentative
+            </span>
+            <span className="tt-legend-item">
+              <span className="h-2 w-2 rounded-sm bg-blue-500" />
+              Ongoing
+            </span>
+            <span className="tt-legend-item">
+              <span className="h-2 w-2 rounded-sm bg-emerald-500" />
+              Done (OTP)
+            </span>
+            <span className="tt-legend-item">
+              <span className="h-2 w-2 rounded-sm bg-orange-400" />
+              Done (manual)
+            </span>
+            <span className="tt-legend-item">
+              <span className="h-2 w-2 rounded-sm bg-slate-500" />
+              Paused
+            </span>
+            <span className="tt-legend-item">
+              <span className="h-2 w-2 rounded-sm bg-red-500" />
+              Payment Due
+            </span>
+          </div>
+          <div className="topbar-row">
             <div className="controls">
-              <div
-                className="topbar-legend"
-                aria-label="Schedule status legend"
-              >
-                <span className="tt-legend-item">
-                  <span className="h-2 w-2 rounded-sm bg-indigo-500" />
-                  Booked
-                </span>
-                <span className="tt-legend-item">
-                  <span className="h-2 w-2 rounded-sm bg-amber-400" />
-                  Tentative
-                </span>
-                <span className="tt-legend-item">
-                  <span className="h-2 w-2 rounded-sm bg-blue-500" />
-                  Ongoing
-                </span>
-                <span className="tt-legend-item">
-                  <span className="h-2 w-2 rounded-sm bg-emerald-500" />
-                  Done (OTP)
-                </span>
-                <span className="tt-legend-item">
-                  <span className="h-2 w-2 rounded-sm bg-orange-400" />
-                  Done (manual)
-                </span>
-                <span className="tt-legend-item">
-                  <span className="h-2 w-2 rounded-sm bg-slate-500" />
-                  Paused
-                </span>
-                <span className="tt-legend-item">
-                  <span className="h-2 w-2 rounded-sm bg-red-500" />
-                  Payment Due
-                </span>
-              </div>
               <div className="controls-row">
                 <select
                   className="sort-select"
                   value={sort}
                   onChange={(e) => {
                     setSort(e.target.value as SortKey);
-                    setSortAnchorDate(selectedDate);
                   }}
                   aria-label="Sort instructors"
                 >
+                  <option value="distance">
+                    Filter (Area → Nearby by distance)
+                  </option>
                   <option value="freeDesc">Filter (Most free slots)</option>
                   <option value="freeAsc">Filter (Least free slots)</option>
                   <option value="alpha">Filter (A → Z)</option>
@@ -3745,15 +3587,6 @@ export default function SalesDashboard() {
                 </div>
                 <button
                   type="button"
-                  className="cal-btn icon-btn"
-                  onClick={() => setTheme(theme === "light" ? "dark" : "light")}
-                  aria-label="Toggle dark theme"
-                  title="Toggle dark theme"
-                >
-                  {theme === "dark" ? "☀" : "☾"}
-                </button>
-                <button
-                  type="button"
                   className="reset-dash"
                   onClick={resetDashboard}
                   aria-label="Reset dashboard"
@@ -3784,6 +3617,26 @@ export default function SalesDashboard() {
               "select a slot" prompt when nothing is picked. Every cell is a
               single click now, so both cases come through this one handler. */}
           <aside className="slot-panel" aria-label="Slot panel">
+            {!tentativeModalOpen &&
+              (pendingSlots.length > 0 || editContext !== null) && (
+                <button
+                  type="button"
+                  className="slot-panel-back-to-form"
+                  onClick={() => setTentativeModalOpen(true)}
+                  style={{
+                    margin: "8px 12px 0",
+                    padding: "6px 10px",
+                    fontSize: 13,
+                    fontWeight: 600,
+                    border: "1px solid var(--gc-border)",
+                    borderRadius: 6,
+                    background: "transparent",
+                    cursor: "pointer",
+                  }}
+                >
+                  ← Back to booking form
+                </button>
+              )}
             {tentativeModalOpen ? (
               <TentativeBookingModal
                 variant="panel"
@@ -3800,6 +3653,38 @@ export default function SalesDashboard() {
                 onFormDataChange={setCustomerFormData}
                 editContext={editContext}
               />
+            ) : justBooked && justBooked.slots.length > 0 ? (
+              <div className="slot-panel-detail">
+                <div className="slot-panel-detail-top">
+                  <span className="slot-panel-badge slot-panel-badge-tentative">
+                    Booking saved
+                  </span>
+                  <button
+                    type="button"
+                    className="slot-panel-detail-close"
+                    onClick={() => setJustBooked(null)}
+                    aria-label="Dismiss"
+                  >
+                    ×
+                  </button>
+                </div>
+                <SendSlotsWhatsApp
+                  customerName={justBooked.name}
+                  phone={justBooked.phone}
+                  slots={justBooked.slots}
+                />
+                <SlotLearnerActions
+                  key={`booked-${justBooked.phone}`}
+                  customer={{
+                    name: justBooked.name,
+                    phone: justBooked.phone,
+                    email: justBooked.email,
+                    courseId: justBooked.courseId,
+                    course: "",
+                    paymentStatus: justBooked.paymentStatus,
+                  }}
+                />
+              </div>
             ) : selectedSlot ? (
               <div className="slot-panel-detail">
                 <div className="slot-panel-detail-top">
@@ -3886,6 +3771,51 @@ export default function SalesDashboard() {
                     )}
                   </div>
                 )}
+                {selectedSlot.info.kind === "tentative" &&
+                  selectedSlot.info.customer &&
+                  (() => {
+                    const c = selectedSlot.info.customer;
+                    const key = normalizePhone(c.phone);
+                    const picked = {
+                      date: selectedSlot.date,
+                      startTime: minutesToTime(selectedSlot.minute),
+                      endTime: minutesToTime(selectedSlot.minute + 60),
+                    };
+                    // Same phone => same customer: send every upcoming hold,
+                    // not just the one clicked. No phone => just this slot.
+                    const siblings: (typeof picked)[] = [];
+                    if (key) {
+                      for (const perDate of blocksIndex.values())
+                        for (const list of perDate.values())
+                          for (const b of list) {
+                            const bp = normalizePhone(
+                              typeof b.rawTentativeDetails?.phone === "string"
+                                ? b.rawTentativeDetails.phone
+                                : "",
+                            );
+                            if (b.isTentative && bp === key && b.date >= today)
+                              siblings.push({
+                                date: b.date,
+                                startTime: minutesToTime(b.startMinute),
+                                endTime: minutesToTime(b.endMinute),
+                              });
+                          }
+                    }
+                    return (
+                      <SendSlotsWhatsApp
+                        key={`wa-${selectedSlot.instrId}-${selectedSlot.date}-${selectedSlot.minute}`}
+                        customerName={c.name}
+                        phone={c.phone}
+                        slots={siblings.length > 0 ? siblings : [picked]}
+                      />
+                    );
+                  })()}
+                {selectedSlot.info.customer && (
+                  <SlotLearnerActions
+                    key={`${selectedSlot.instrId}-${selectedSlot.date}-${selectedSlot.minute}-${selectedSlot.info.customer.phone}`}
+                    customer={selectedSlot.info.customer}
+                  />
+                )}
               </div>
             ) : (
               <div className="slot-panel-empty">
@@ -3897,7 +3827,7 @@ export default function SalesDashboard() {
                 </p>
                 <p className="slot-panel-empty-hint">
                   {addingSlotMode
-                    ? `Click a green (free) cell on ${lockedInstructorName}'s schedule to pick ${
+                    ? `Click a white (free) cell on ${lockedInstructorName}'s schedule to pick ${
                         replacingSlotIndex !== null
                           ? "a replacement slot"
                           : "the next class"
@@ -3914,17 +3844,16 @@ export default function SalesDashboard() {
                 zonesError={zoneError}
                 status={locStatus}
                 resultLabel={locSearch?.label ?? null}
-                point={
-                  locSearch ? { lat: locSearch.lat, lng: locSearch.lng } : null
-                }
-                matchedNames={locResult?.zones ?? []}
+                point={locPoint}
+                matchedNames={mapMatchedNames}
                 via={locResult?.via ?? "none"}
-                zoneInfo={locResult?.zoneInfo ?? {}}
+                zoneInfo={mapZoneInfo}
                 onLocate={handleLocation}
                 onClear={clearLocation}
                 collapsed={locCollapsed}
                 onToggleCollapsed={toggleLocCollapsed}
-                theme={theme}
+                onAddInstructor={addFromMap}
+                dashboardInstructorIds={dashboardIds}
               />
             </Suspense>
 
@@ -4004,28 +3933,6 @@ export default function SalesDashboard() {
               )}
             </div>
 
-            <nav className="tabs" aria-label="Select date">
-              {visibleDates.map((d, i) => {
-                const { weekday, day } = shortDate(d);
-                const total = dateTotals.get(d) ?? 0;
-                return (
-                  <button
-                    type="button"
-                    key={d}
-                    className={i === safeDateIndex ? "tab active" : "tab"}
-                    onClick={() => {
-                      setDateIndex(i);
-                      setSortAnchorDate(d);
-                    }}
-                  >
-                    <span>{weekday}</span>
-                    <strong>{day}</strong>
-                    <em>{total} free</em>
-                  </button>
-                );
-              })}
-            </nav>
-
             <div
               className={
                 addingSlotMode ? "grid-wrap grid-wrap-picking" : "grid-wrap"
@@ -4034,42 +3941,24 @@ export default function SalesDashboard() {
             >
               <AvailabilityGrid
                 instructors={gridRows}
-                // The strict, full-60-min grid -- canBook1Hour (in both the
-                // main row and MiniTimeRow) validates against this prop, so it
-                // must NOT be displayGrid (30-min duration check), or
-                // validateOneHourBlock trivially agrees with `free` itself and
-                // the cell-half downgrade never fires. Cell color/coloring
-                // still gets the lenient displayGrid separately via freeSets
-                // below.
                 freeGrid={
                   data?.freeGrid ?? new Map<string, Map<string, number[]>>()
                 }
-                freeSets={freeSets}
                 windowTotals={windowTotals}
-                timeCols={timeCols}
-                timeStarts={timeStarts}
                 dates={visibleDates}
                 selectedDate={selectedDate}
-                weekDates={weekDates}
-                panelRangeLabel={panelRangeLabel}
-                canPanelPrev={canPanelPrev}
-                canPanelNext={canPanelNext}
-                gridMinutes={config.gridMinutes}
+                weekDates={deferredWeekDates}
                 slotStart={config.slotStart}
                 slotEnd={config.slotEnd}
-                expanded={expandedForRender}
+                collapsed={collapsedForRender}
                 pendingExpandId={pendingExpandRowId}
                 selectedRows={selectedRows}
                 rowColors={rowColors}
+                rowTags={rowTags}
                 loadingRows={loadingRows}
                 errorRows={errorRows}
                 onRetryLoad={retryLoadInstructor}
                 onToggleExpand={toggleExpand}
-                onPanelPrevWeek={panelPrevWeek}
-                onPanelNextWeek={panelNextWeek}
-                onPanelPrevDay={panelPrevDay}
-                onPanelNextDay={panelNextDay}
-                onPanelToday={panelToday}
                 onToggleSelectRow={toggleSelectRow}
                 onRemove={
                   inSelectionMode ? removeFromCompare : removeRosterInstructor
@@ -4110,24 +3999,6 @@ export default function SalesDashboard() {
             </div>
 
             <footer className="legend">
-              <span>
-                <i className="swatch free" /> Free slot (no class, not on
-                unavailability, outside the {config.instructor_gap_minutes}
-                -minute travel gap)
-              </span>
-              <span>
-                <i className="swatch tentative" /> 🟡 Tentative (unpaid slots
-                can be edited by anyone)
-              </span>
-              <span>
-                <i className="swatch booked" /> 🟣 Booked
-              </span>
-              <span>
-                <i className="swatch pending" /> 🔵 Selected for this booking
-              </span>
-              <span>
-                <i className="swatch busy" /> Busy / other
-              </span>
               <button
                 type="button"
                 className="reload"
@@ -4253,8 +4124,10 @@ export default function SalesDashboard() {
                       </li>
                       <li>
                         The grid narrows to instructors who work in that
-                        location. Click a name chip to pin instructor(s) for
-                        comparison.
+                        location, tagged <strong>Area instructor</strong>, plus
+                        the closest <strong>Nearby instructors</strong> just
+                        outside their area (with the distance). Click a name
+                        chip to pin instructor(s) for comparison.
                       </li>
                       <li>
                         Clear location or ↺ Reset to go back to the full roster.
@@ -4266,10 +4139,12 @@ export default function SalesDashboard() {
                     <h3>Read the grid</h3>
                     <ul>
                       <li>
-                        Columns are 30-minute slots; rows are instructors.
+                        Each instructor has a weekly timetable: days run across
+                        and hours run down. Use the arrows and Today in the top
+                        bar to move every timetable at once.
                       </li>
                       <li>
-                        <strong>🟢 Green</strong> = free: no class, no time off,
+                        <strong>⚪ White</strong> = free: no class, no time off,
                         enough travel time.
                       </li>
                       <li>
@@ -4282,8 +4157,10 @@ export default function SalesDashboard() {
                         never editable from here.
                       </li>
                       <li>
-                        Plain/unshaded = paused, unavailable, or a travel-gap
-                        buffer around another slot.
+                        <strong>⚪ Grey</strong> = paused, unavailable
+                        (instructor time off / outside their working hours), or
+                        a travel-gap buffer around another slot. White is only
+                        ever a free slot.
                       </li>
                       <li>
                         <strong>Hover</strong> any slot for full details:
@@ -4292,7 +4169,7 @@ export default function SalesDashboard() {
                       </li>
                       <li>
                         A {config.instructor_gap_minutes}-minute travel gap
-                        around classes is applied, so green slots are safe to
+                        around classes is applied, so white slots are safe to
                         assign.
                       </li>
                     </ul>
@@ -4302,7 +4179,7 @@ export default function SalesDashboard() {
                     <h3>Create a tentative booking</h3>
                     <ul>
                       <li>
-                        <strong>Click</strong> any green (free) slot to open the
+                        <strong>Click</strong> any white (free) slot to open the
                         booking form for that 1-hour block.
                       </li>
                       <li>
@@ -4391,21 +4268,17 @@ export default function SalesDashboard() {
                     <h3>View an instructor&apos;s schedule</h3>
                     <ul>
                       <li>
-                        Click an instructor&apos;s name or the Schedule button
-                        to open their day-by-day timetable for the selected
-                        month.
+                        Every instructor&apos;s weekly timetable is open by
+                        default, one below another, with their name staying
+                        pinned while you scroll.
                       </li>
                       <li>
-                        Each day shows its free-slot count; the highlighted row
-                        is the currently selected date.
+                        Use the arrows and Today in the top bar to change the
+                        week for all timetables together.
                       </li>
                       <li>
-                        Use the month arrows in the expanded timetable to view
-                        the previous or next loaded month.
-                      </li>
-                      <li>
-                        Click the name or Hide schedule to collapse the
-                        timetable.
+                        Click the name or Schedule button to collapse or expand
+                        a single timetable.
                       </li>
                     </ul>
                   </div>
@@ -4415,7 +4288,7 @@ export default function SalesDashboard() {
                     <ul>
                       <li>Bottom-right Refresh fetches the latest data.</li>
                       <li>
-                        The legend explains the slot colors used in the grid.
+                        The legend in the top bar explains the slot colors.
                       </li>
                     </ul>
                   </div>
@@ -4541,7 +4414,7 @@ export default function SalesDashboard() {
                 <strong>
                   👉 Pick a new slot for Class {replacingSlotIndex + 1} now:
                 </strong>{" "}
-                click any green (free) cell on {lockedInstructorName}
+                click any white (free) cell on {lockedInstructorName}
                 &apos;s schedule below to replace the conflicting class. The
                 form isn&apos;t closed — it will reopen with your new slot in
                 place of Class {replacingSlotIndex + 1}.
@@ -4551,7 +4424,7 @@ export default function SalesDashboard() {
                 <strong>
                   👉 Pick {lockedInstructorName}&apos;s next class now:
                 </strong>{" "}
-                click any green (free) cell on {lockedInstructorName}
+                click any white (free) cell on {lockedInstructorName}
                 &apos;s schedule to add it to this booking. Other instructors
                 are hidden — this booking must stay with the same instructor.
                 Your form stays open here and updates as you pick.

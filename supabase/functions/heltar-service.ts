@@ -23,6 +23,16 @@ export const TEMPLATES = {
     content:
       "Hey {{1}},  \n\nGreat choice with the {{2}}! You're one step away from starting your driving journey 🚗.  \n\n*Amount Due:* {{3}} \n*Duration:* {{4}} hours  \n\nTo complete the registration, you can pay here: {{5}}  \n\nThank you so much 🤩. We're in this together - everyone starts from the beginning, and soon you'll be driving with the breeze in your hair! 🌬️   \n\nIf you need any help, please ping us. We can't wait to see you behind the wheel!  \n\nLet's go, \nLane 😊🚘",
   },
+  // Sales Dashboard -> tentative class slots shared with a prospect. NEW on
+  // Heltar: create & get this template approved with exactly this name and
+  // these 2 body variables before it will deliver. {{2}} is ONE line (WhatsApp
+  // rejects newlines in variables), slots separated by " • ".
+  TENTATIVE_SLOTS: {
+    name: "webapp_tentative_class_slots",
+    language: "en",
+    content:
+      "Hey {{1}},\n\nThank you for your interest in learning to drive with Lane 🚗\n\nHere are the tentative class slots we have kept for you:\n\n{{2}}\n\nPlease let us know if these timings work for you, and complete your payment to confirm them ✅\n\nThank you,\nLane Team 😊",
+  },
   THANK_YOU_PAYMENT_DL: {
     name: "webapp_thank_you_payment_book_classes",
     id: "1326402785451338",
@@ -459,8 +469,9 @@ class HeltarMessageService {
     templateKey: keyof typeof TEMPLATES,
     variables: any[],
     refId?: string,
+    templateOverride?: { name: string; language: string; content: string },
   ) {
-    const template = TEMPLATES[templateKey];
+    const template = templateOverride ?? TEMPLATES[templateKey];
 
     if (!template) {
       throw new Error(`Template ${templateKey} not found`);
@@ -510,6 +521,38 @@ class HeltarMessageService {
       console.error("Error sending message:", error);
       throw error;
     }
+  }
+
+  // Function to get learner details by ID
+  // Template name/language/body for a message type, editable without a code
+  // change: `app_settings` row `whatsapp_<key>_template` =
+  // {"name": "...", "language": "en", "content": "..."}. Falls back to the
+  // built-in TEMPLATES entry when the row is missing or malformed.
+  async getTemplateOverride(settingKey: string) {
+    const { data, error } = await this.supabaseClient
+      .from("app_settings")
+      .select("value")
+      .eq("key", settingKey)
+      .maybeSingle();
+    if (error) {
+      console.error(`app_settings ${settingKey} read failed:`, error);
+      return undefined;
+    }
+    const v = data?.value;
+    if (
+      v &&
+      typeof v.name === "string" &&
+      v.name.trim() &&
+      typeof v.content === "string" &&
+      v.content.trim()
+    ) {
+      return {
+        name: v.name.trim() as string,
+        language: (typeof v.language === "string" && v.language) || "en",
+        content: v.content as string,
+      };
+    }
+    return undefined;
   }
 
   // Function to get learner details by ID
@@ -1325,6 +1368,42 @@ class HeltarMessageService {
                 : "with our support team",
             ],
             `dl-not-delivered-${learner_id}-${Date.now()}`,
+          );
+        }
+
+        // Phone-based (not learner_id): the customer is usually a prospect who
+        // is not a Learner yet. Slot lines are built by the Sales Dashboard.
+        case "TENTATIVE_SLOTS": {
+          const { phone, customer_name, slots } = data;
+          const digits = String(phone ?? "").replace(/\D/g, "");
+          const local =
+            digits.length === 12 && digits.startsWith("91")
+              ? digits.slice(2)
+              : digits.length === 11 && digits.startsWith("0")
+                ? digits.slice(1)
+                : digits;
+          if (!/^[6-9]\d{9}$/.test(local)) {
+            throw new Error("TENTATIVE_SLOTS requires a valid 10-digit phone");
+          }
+          if (
+            !Array.isArray(slots) ||
+            slots.length === 0 ||
+            slots.length > 20 ||
+            slots.some((x: unknown) => typeof x !== "string" || !x.trim())
+          ) {
+            throw new Error("TENTATIVE_SLOTS requires 1-20 slot lines");
+          }
+          const name =
+            typeof customer_name === "string" && customer_name.trim()
+              ? customer_name.trim().slice(0, 60)
+              : "there";
+          const clean = (x: string) => x.replace(/\s+/g, " ").trim();
+          return this.sendTemplate(
+            `91${local}`,
+            "TENTATIVE_SLOTS",
+            [name, slots.map(clean).join("  •  ")],
+            `tentative-slots-${local}-${Date.now()}`,
+            await this.getTemplateOverride("whatsapp_tentative_slots_template"),
           );
         }
 
