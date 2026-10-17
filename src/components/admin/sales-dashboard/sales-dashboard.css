@@ -1888,9 +1888,10 @@
 /* Map toolbar (polygon toggle + expand) and the full-screen state. */
 .loc-map-tools {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 6px 14px;
   margin-top: 12px;
 }
 

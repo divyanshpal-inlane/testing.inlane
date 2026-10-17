@@ -1,7 +1,10 @@
+import { useQuery } from "@tanstack/react-query";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 
+import { drawServiceAreaMask } from "@/components/instructor-zones/serviceAreaMask";
 import type { GeoPoint, KmlZone } from "@/lib/sales-dashboard/kml";
 import { geocodeText, loadMapsApi } from "@/lib/sales-dashboard/maps";
+import { fetchServiceAreaLayer } from "@/lib/sales-dashboard/zones-db";
 import { googleMapsLoader } from "@/utils/googleMaps";
 
 export type LocateStatus = "idle" | "loading" | "found" | "none";
@@ -88,6 +91,15 @@ function LocationSearch({
   // Off: the map shows only the matched (Area + Nearby) polygons. On: every
   // instructor polygon is drawn too, in neutral grey.
   const [showAllZones, setShowAllZones] = useState(false);
+  // Grey = areas we do not serve. Read from `service_area_zones` (the same rows
+  // the admin Zone Map edits), so a change there shows up here on its own.
+  const [showNonService, setShowNonService] = useState(true);
+  const { data: serviceLayer } = useQuery({
+    queryKey: ["service-area-layer"],
+    queryFn: fetchServiceAreaLayer,
+    staleTime: 60 * 1000,
+  });
+  const hasServiceLayer = (serviceLayer?.serviceable.length ?? 0) > 0;
   // Full-screen map, for focusing on the polygons alone.
   const [expanded, setExpanded] = useState(false);
 
@@ -459,6 +471,16 @@ function LocationSearch({
     expanded,
   ]);
 
+  // Grey shading for areas we do not serve. Separate from the overlay effect
+  // above so a search or a "show all polygons" toggle never redraws it. It runs
+  // after that effect (which creates the map), and re-runs whenever the map is
+  // rebuilt (collapse / expand) or the layer changes.
+  useEffect(() => {
+    const map = mapObjRef.current;
+    if (!maps || collapsed || !map || !serviceLayer || !showNonService) return;
+    return drawServiceAreaMask(maps, map, serviceLayer);
+  }, [maps, collapsed, serviceLayer, showNonService, expanded]);
+
   const clearLocal = (): void => {
     selectedPlaceRef.current = null;
     setGeoError(null);
@@ -588,6 +610,19 @@ function LocationSearch({
                   />
                   Show all polygons
                 </label>
+                {hasServiceLayer && (
+                  <label
+                    className="loc-toggle"
+                    title="Grey = areas where we do not offer service"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={showNonService}
+                      onChange={(e) => setShowNonService(e.target.checked)}
+                    />
+                    Grey out areas we don&apos;t serve
+                  </label>
+                )}
               </div>
               <div
                 className="loc-map"

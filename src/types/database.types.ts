@@ -1300,6 +1300,39 @@ export type Database = {
         };
         Relationships: [];
       };
+      service_area_zones: {
+        Row: {
+          coordinates: Json;
+          created_at: string;
+          id: string;
+          kind: string;
+          name: string;
+          notes: string | null;
+          source: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          coordinates: Json;
+          created_at?: string;
+          id?: string;
+          kind: string;
+          name: string;
+          notes?: string | null;
+          source?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          coordinates?: Json;
+          created_at?: string;
+          id?: string;
+          kind?: string;
+          name?: string;
+          notes?: string | null;
+          source?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       [_ in never]: never;
