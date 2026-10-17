@@ -1303,6 +1303,19 @@ export default function SalesDashboard() {
   // useCallback dep array is evaluated during render — referencing it up
   // here would throw a temporal-dead-zone ReferenceError.
 
+  // While editing, adding/removing/moving classes is only saved on Save, so
+  // leaving the form with such changes must ask first. A plain new booking
+  // asks once 2+ classes are picked.
+  const unsavedEditChanges =
+    editContext !== null &&
+    (pendingSlots.some((s) => s.scheduleId == null) ||
+      editContext.rowIds.some(
+        (id) => !pendingSlots.some((s) => s.scheduleId === id),
+      ));
+  const needsDiscardConfirm = editContext
+    ? unsavedEditChanges
+    : pendingSlots.length > 1;
+
   const handleRemoveSlot = useCallback((index: number) => {
     setPendingSlots((prev) => prev.filter((_, i) => i !== index));
   }, []);
@@ -1319,21 +1332,28 @@ export default function SalesDashboard() {
   }, [currentUserName]);
 
   // Closing (X / Cancel / Esc / click-away) throws the whole batch away, so
-  // ask first when more than one class has been picked. Editing an existing
-  // booking is exempt: nothing there is lost, it is already saved.
+  // ask first when more than one class has been picked, or when an edit has
+  // unsaved class changes (added / removed / moved classes).
   const handleCloseTentativeModal = useCallback(() => {
-    if (pendingSlots.length > 1 && !editContext) {
+    if (needsDiscardConfirm) {
       setDiscardPrompt({
         count: pendingSlots.length,
-        title: "Discard these classes?",
-        message: `You have ${pendingSlots.length} classes selected for this customer. Closing the form will remove all of them.`,
-        confirmLabel: "Discard classes",
+        title: editContext ? "Discard your changes?" : "Discard these classes?",
+        message: editContext
+          ? "You have unsaved changes to this booking's classes. Closing the form will throw them away."
+          : `You have ${pendingSlots.length} classes selected for this customer. Closing the form will remove all of them.`,
+        confirmLabel: editContext ? "Discard changes" : "Discard classes",
         run: discardAndCloseTentativeModal,
       });
       return;
     }
     discardAndCloseTentativeModal();
-  }, [pendingSlots.length, editContext, discardAndCloseTentativeModal]);
+  }, [
+    needsDiscardConfirm,
+    pendingSlots.length,
+    editContext,
+    discardAndCloseTentativeModal,
+  ]);
 
   const handleTentativeSuccess = useCallback(() => {
     const message = editContext
@@ -2432,12 +2452,16 @@ export default function SalesDashboard() {
       // This replaces the whole in-progress batch and blanks the customer
       // form, so confirm first when more than one class was already picked
       // (a stray click on a free slot used to wipe the set silently).
-      if (pendingSlots.length > 1 && !editContext) {
+      if (needsDiscardConfirm) {
         setDiscardPrompt({
           count: pendingSlots.length,
           title: "Start a new booking?",
-          message: `You have ${pendingSlots.length} classes selected for this customer. Starting a new booking from this slot will remove all of them and clear the form.`,
-          confirmLabel: "Remove & start new",
+          message: editContext
+            ? "You have unsaved changes to the booking you are editing. Starting a new booking from this slot will throw them away."
+            : `You have ${pendingSlots.length} classes selected for this customer. Starting a new booking from this slot will remove all of them and clear the form.`,
+          confirmLabel: editContext
+            ? "Discard & start new"
+            : "Remove & start new",
           run: startFreshBooking,
         });
         return;
@@ -2453,6 +2477,7 @@ export default function SalesDashboard() {
       replacingSlotIndex,
       pendingSlots,
       editContext,
+      needsDiscardConfirm,
       currentUserName,
       customerFormData.customerPhone,
       data?.freeGrid,
@@ -2691,19 +2716,21 @@ export default function SalesDashboard() {
   // ask first when more than one class is picked.
   const handleEditBooking = useCallback(
     (action: NonNullable<SlotInfo["editAction"]>) => {
-      if (pendingSlots.length > 1 && !editContext) {
+      if (needsDiscardConfirm) {
         setDiscardPrompt({
           count: pendingSlots.length,
           title: "Open another booking?",
-          message: `You have ${pendingSlots.length} classes selected for a new booking. Opening another booking to edit will remove all of them.`,
-          confirmLabel: "Remove & open",
+          message: editContext
+            ? "You have unsaved changes to the booking you are editing. Opening another booking will throw them away."
+            : `You have ${pendingSlots.length} classes selected for a new booking. Opening another booking to edit will remove all of them.`,
+          confirmLabel: editContext ? "Discard & open" : "Remove & open",
           run: () => startEditBooking(action),
         });
         return;
       }
       startEditBooking(action);
     },
-    [pendingSlots.length, editContext, startEditBooking],
+    [needsDiscardConfirm, pendingSlots.length, editContext, startEditBooking],
   );
 
   // Lets Sales fix a wrong entry (e.g. a typo'd name/phone or a slot picked

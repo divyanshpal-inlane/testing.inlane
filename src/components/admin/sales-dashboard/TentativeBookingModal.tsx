@@ -464,6 +464,21 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
           updated_at: new Date().toISOString(),
         };
 
+        // Check every NEW class (added, or moved -- a moved class loses its
+        // scheduleId) against the live grid BEFORE any write. The deletes and
+        // updates below are separate statements, so a conflict found only at
+        // the final insert would leave the booking half-edited.
+        for (let i = 0; i < slots.length; i++) {
+          const s = slots[i];
+          if (s.scheduleId != null) continue;
+          const result = validateSlot(s);
+          if (!result.ok) {
+            throw new Error(
+              `Class ${i + 1} (${s.date} • ${formatSlotTime(s.startTime, s.endTime)} • ${s.instructorName}) is ${result.reason ?? "no longer available"}. Remove or change it and try again.`,
+            );
+          }
+        }
+
         // Rows that belonged to the booking but are no longer in `slots`
         // were removed. Deleted FIRST so a class moved onto a time freed by
         // one of them cannot collide with the row it replaced.
@@ -735,25 +750,32 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                 </div>
               }
             </div>
-            {!editContext && (
-              <div className="mb-2 grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  className="whitespace-nowrap rounded-full bg-blue-100 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-200"
-                  onClick={() => {
-                    onAddAnotherSlot();
-                  }}
-                >
-                  + Add another class
-                </button>
-                <button
-                  type="button"
-                  className="whitespace-nowrap rounded-full bg-purple-100 px-3 py-1.5 text-xs font-semibold text-purple-700 hover:bg-purple-200"
-                  onClick={openBulkDialog}
-                >
-                  ⚡ Bulk Add
-                </button>
-              </div>
+            {/* Also offered while editing: classes can be added to (or
+                removed from, with the × on a row) an existing booking. New
+                rows are inserted into the same booking on Save. */}
+            <div className="mb-2 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                className="whitespace-nowrap rounded-full bg-blue-100 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-200"
+                onClick={() => {
+                  onAddAnotherSlot();
+                }}
+              >
+                + Add another class
+              </button>
+              <button
+                type="button"
+                className="whitespace-nowrap rounded-full bg-purple-100 px-3 py-1.5 text-xs font-semibold text-purple-700 hover:bg-purple-200"
+                onClick={openBulkDialog}
+              >
+                ⚡ Bulk Add
+              </button>
+            </div>
+            {editContext && (
+              <p className="mb-2 text-xs text-muted-foreground">
+                Add or remove classes here — changes are saved when you click
+                Save.
+              </p>
             )}
             {bulkSkippedNotice && (
               <div
