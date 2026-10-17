@@ -25,6 +25,8 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { ServiceAreaEditor } from "@/components/instructor-zones/ServiceAreaEditor";
+import { drawServiceAreaMask } from "@/components/instructor-zones/serviceAreaMask";
 import type { ZoneCoordinate } from "@/components/instructor-zones/types";
 import {
   arraysEqual,
@@ -58,6 +60,7 @@ import { pointInPolygon } from "@/lib/sales-dashboard/kml";
 import {
   deleteZoneById,
   fetchDbZones,
+  fetchServiceAreaLayer,
   insertZone,
   invalidateDbZoneCache,
   updateZoneById,
@@ -298,6 +301,9 @@ export default function InstructorZoneMap() {
   // only rendered when an admin explicitly asks for them. Refetching on toggle
   // is free: zones-db caches the superset and applies the filter in memory.
   const [showRoughPolygons, setShowRoughPolygons] = useState(false);
+  // Grey "we don't serve here" shading (service_area_zones). On by default: it
+  // is the answer to "where do we operate at all".
+  const [showNonService, setShowNonService] = useState(true);
 
   /**
    * Which instructor statuses are SHOWN, as three independent toggles.
@@ -352,6 +358,19 @@ export default function InstructorZoneMap() {
         .filter((z) => z.ring.length >= 3);
     },
   });
+
+  const { data: serviceLayer } = useQuery({
+    queryKey: ["service-area-layer"],
+    queryFn: fetchServiceAreaLayer,
+    staleTime: 5 * 60 * 1000,
+  });
+  const hasServiceLayer = (serviceLayer?.serviceable.length ?? 0) > 0;
+  // The service-area editor (white/grey) is a separate mode from editing an
+  // instructor's polygon; only one of the two can be active at a time.
+  const [serviceEditorOpen, setServiceEditorOpen] = useState(false);
+  const refreshServiceLayer = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ["service-area-layer"] });
+  }, [queryClient]);
 
   const { data: instructors = [] } = useQuery({
     queryKey: ["instructor-zone-roster"],
@@ -859,7 +878,10 @@ export default function InstructorZoneMap() {
    * reaches the map. See the `clickable: !firstDrawActive` options in the
    * overlay effect below. Live overlays are rebuilt when it flips.
    */
-  const firstDrawActive = Boolean(editingId) && draftRing.length < 3;
+  // While the service-area editor is open the instructor overlays are inert
+  // for the same reason: its draw clicks must reach the map, not open a card.
+  const firstDrawActive =
+    (Boolean(editingId) && draftRing.length < 3) || serviceEditorOpen;
 
   const [placeQuery, setPlaceQuery] = useState("");
   const [pin, setPin] = useState<{ at: ZoneCoordinate; label: string } | null>(
@@ -1205,6 +1227,14 @@ export default function InstructorZoneMap() {
     clearOverlays,
   ]);
 
+  // Grey "we do not serve here" shading, drawn by the helper shared with the
+  // Sales Dashboard map. Never clickable, so it cannot swallow clicks meant for
+  // the instructor polygons or the editors' vertex handles.
+  useEffect(() => {
+    if (!mapInstance || !mapsLib || !serviceLayer || !showNonService) return;
+    return drawServiceAreaMask(mapsLib, mapInstance, serviceLayer);
+  }, [mapInstance, mapsLib, serviceLayer, showNonService]);
+
   useEffect(
     () => () => {
       clearOverlays();
@@ -1413,6 +1443,8 @@ export default function InstructorZoneMap() {
    */
   const startInlineEdit = useCallback(
     (id: string, name: string) => {
+      // One editor at a time: the service-area editor owns the map while open.
+      if (serviceEditorOpen) return;
       const existing = zoneByInstructor.get(id);
       const initial = existing ? closeRing(existing.ring) : null;
       setEditingId(id);
@@ -1425,7 +1457,7 @@ export default function InstructorZoneMap() {
       setDraft(initial);
       setSelectedId(id);
     },
-    [zoneByInstructor],
+    [zoneByInstructor, serviceEditorOpen],
   );
 
   const startDrawing = useCallback(
@@ -2437,37 +2469,144 @@ export default function InstructorZoneMap() {
               <button>, and a `<label for>` pointing at a button is not a
               reliable accessible-name association, so the control would be
               announced as an unlabelled switch. */}
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-normal">Service areas</span>
+                    {/* ---- Instructors ---- */}
+                    <p className="pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                      Instructors
+                    </p>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="text-xs font-normal">
+                          Coverage areas
+                        </span>
+                        <p className="text-[11px] text-muted-foreground">
+                          Each instructor&apos;s own area, in their colour.
+                        </p>
+                      </div>
                       <Switch
-                        aria-label="Service areas"
+                        aria-label="Instructor areas"
                         checked={showPolygons}
                         onCheckedChange={setShowPolygons}
+                        className="mt-0.5 shrink-0"
                       />
                     </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-normal">
-                        Instructor markers
-                      </span>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="text-xs font-normal">
+                          Home markers
+                        </span>
+                        <p className="text-[11px] text-muted-foreground">
+                          A dot where each instructor lives.
+                        </p>
+                      </div>
                       <Switch
                         aria-label="Instructor markers"
                         checked={showMarkers}
                         onCheckedChange={setShowMarkers}
+                        className="mt-0.5 shrink-0"
                       />
                     </div>
                     {/* Rough polygons are provisional onboarding boundaries, not
                 serviceability zones, so they are opt-in. They are stored in the
                 same table as real areas and are only ever excluded from sales
                 matching, never deleted. */}
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-normal">
-                        Rough polygons
-                      </span>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="text-xs font-normal">
+                          Rough areas ({roughCount})
+                        </span>
+                        <p className="text-[11px] text-muted-foreground">
+                          Unverified outlines. Never used for matching.
+                        </p>
+                      </div>
                       <Switch
                         aria-label="Show Rough Polygons"
                         checked={showRoughPolygons}
                         onCheckedChange={setShowRoughPolygons}
+                        className="mt-0.5 shrink-0"
                       />
+                    </div>
+
+                    {/* ---- Company service area (white / grey) ----
+                Where Lane offers service at all, independent of any one
+                instructor. Stored in service_area_zones; edited with its own
+                button so it is never confused with an instructor's polygon. */}
+                    <div
+                      className="mt-1 space-y-1.5 border-t pt-2"
+                      data-testid="service-area-group"
+                    >
+                      <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                        Our service area
+                      </p>
+                      <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+                        <span className="flex items-center gap-1">
+                          <span className="inline-block h-3 w-3 rounded-sm border bg-white" />
+                          We serve
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <span className="inline-block h-3 w-3 rounded-sm bg-gray-500/60" />
+                          We don&apos;t serve
+                        </span>
+                      </div>
+                      {hasServiceLayer ? (
+                        <>
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <span className="text-xs font-normal">
+                                Shade areas we don&apos;t serve
+                              </span>
+                              <p
+                                className="text-[11px] text-muted-foreground"
+                                data-testid="non-service-note"
+                              >
+                                {serviceLayer?.serviceable.length} serviceable
+                                area
+                                {serviceLayer?.serviceable.length === 1
+                                  ? ""
+                                  : "s"}
+                                {serviceLayer &&
+                                serviceLayer.excluded.length > 0
+                                  ? `, ${serviceLayer.excluded.length} excluded pocket${serviceLayer.excluded.length === 1 ? "" : "s"}`
+                                  : ""}
+                                .
+                              </p>
+                            </div>
+                            <Switch
+                              aria-label="Shade non-service areas"
+                              checked={showNonService}
+                              onCheckedChange={setShowNonService}
+                              className="mt-0.5 shrink-0"
+                            />
+                          </div>
+                        </>
+                      ) : (
+                        <p
+                          className="text-[11px] text-muted-foreground"
+                          data-testid="service-area-empty"
+                        >
+                          No service area has been drawn yet.
+                        </p>
+                      )}
+                      <Button
+                        size="sm"
+                        variant={serviceEditorOpen ? "secondary" : "outline"}
+                        className="w-full"
+                        data-testid="service-area-edit-open"
+                        aria-pressed={serviceEditorOpen}
+                        disabled={Boolean(editingId)}
+                        title={
+                          editingId
+                            ? "Finish or cancel the instructor edit first"
+                            : undefined
+                        }
+                        onClick={() => setServiceEditorOpen((v) => !v)}
+                      >
+                        <Pencil className="mr-1.5 h-3.5 w-3.5" />
+                        {serviceEditorOpen
+                          ? "Close service-area editor"
+                          : hasServiceLayer
+                            ? "Edit service area"
+                            : "Draw service area"}
+                      </Button>
                     </div>
                     {showRoughPolygons ? (
                       <p className="text-[11px] text-muted-foreground">
@@ -2489,7 +2628,7 @@ export default function InstructorZoneMap() {
                 `allRosterZones`. */}
                     <div className="mt-1 space-y-1 border-t pt-2">
                       <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                        Show instructors
+                        Show instructors by status
                       </p>
                       {INSTRUCTOR_STATUSES.map(({ value: status }) => {
                         const count = instructors.filter(
@@ -2772,6 +2911,15 @@ export default function InstructorZoneMap() {
           ) : null}
 
           <div ref={mapDivRef} className="absolute inset-0" />
+
+          <ServiceAreaEditor
+            map={mapInstance}
+            mapsLib={mapsLib}
+            layer={serviceLayer}
+            open={serviceEditorOpen}
+            onClose={() => setServiceEditorOpen(false)}
+            onChanged={refreshServiceLayer}
+          />
 
           {editingId ? (
             <div

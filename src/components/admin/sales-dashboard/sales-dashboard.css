@@ -1640,7 +1640,7 @@
 .loc-map {
   margin-top: 12px;
   width: 100%;
-  height: 320px;
+  height: 360px;
   border: 1px solid var(--gc-border);
   border-radius: 12px;
   overflow: hidden;
@@ -1888,14 +1888,175 @@
 /* Map toolbar (polygon toggle + expand) and the full-screen state. */
 .loc-map-tools {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 6px 14px;
   margin-top: 12px;
 }
 
 .loc-map-tools .loc-toggle {
   margin: 0;
+}
+
+/* Pill toggles in the map toolbar: a real checkbox under the hood (keyboard and
+   screen-reader friendly), shown as a chip that fills when on. */
+.loc-pill {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px 0 10px;
+  border: 1px solid var(--gc-border);
+  border-radius: 999px;
+  background: var(--gc-bg);
+  color: var(--gc-text-2);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    color 0.15s;
+}
+
+.loc-pill:hover {
+  border-color: var(--gc-blue);
+  color: var(--gc-text);
+}
+
+.loc-pill.on {
+  border-color: var(--gc-blue);
+  background: var(--gc-blue-bg);
+  color: var(--gc-text);
+}
+
+/* The input stays focusable but invisible; focus is drawn on the pill. */
+.loc-pill input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.loc-pill:focus-within {
+  outline: 2px solid var(--gc-blue);
+  outline-offset: 2px;
+}
+
+.loc-pill-dots {
+  display: inline-flex;
+}
+
+.loc-pill-dots i {
+  width: 9px;
+  height: 9px;
+  margin-left: -3px;
+  border-radius: 50%;
+  border: 1.5px solid var(--gc-bg);
+}
+
+.loc-pill-dots i:first-child {
+  margin-left: 0;
+}
+
+.loc-pill-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--gc-border);
+  color: var(--gc-text);
+  font-size: 10.5px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.loc-pill.on .loc-pill-count {
+  background: var(--gc-blue);
+  color: var(--gc-blue-contrast);
+}
+
+/* "From map" tag on a results chip for an instructor added from the map. */
+.loc-chip-origin {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--gc-blue-bg);
+  color: var(--gc-blue);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.loc-pill-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex: none;
+  vertical-align: -2px;
+}
+
+.loc-pill-swatch.grey {
+  background: rgba(75, 85, 99, 0.55);
+}
+
+.loc-pill-swatch.white {
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.3);
+}
+
+.loc-pill-swatch.area {
+  background: rgba(37, 99, 235, 0.25);
+  box-shadow: inset 0 0 0 2px #2563eb;
+}
+
+/* Legend floated over the map (bottom-left, clear of Google's logo). */
+.loc-legend {
+  position: absolute;
+  left: 10px;
+  bottom: 30px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #374151;
+  font-size: 11.5px;
+  box-shadow: 0 1px 4px -1px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+}
+
+.loc-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* Name tag that follows the pointer over an instructor area. */
+.loc-map-tip {
+  position: absolute;
+  z-index: 3;
+  max-width: 220px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: #111827;
+  color: #ffffff;
+  font-size: 11.5px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.loc-map-tip[hidden] {
+  display: none;
 }
 
 .loc-map-tools + .loc-map {

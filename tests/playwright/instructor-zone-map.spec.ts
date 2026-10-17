@@ -94,7 +94,7 @@ test.describe("Instructor Zone Map — layout", () => {
   test("sidebar chrome renders", async ({ page }) => {
     await expect(filterBox(page)).toBeVisible();
     await expect(page.getByLabel("Search an address")).toBeVisible();
-    await expect(page.getByLabel("Service areas")).toBeVisible();
+    await expect(page.getByLabel("Instructor areas")).toBeVisible();
     await expect(page.getByLabel("Instructor markers")).toBeVisible();
     await expect(
       page.getByRole("button", { name: "Fit all zones" }),
@@ -129,7 +129,7 @@ test.describe("Instructor Zone Map — layout", () => {
   });
 
   test("layer switches toggle", async ({ page }) => {
-    const polygons = page.getByRole("switch", { name: "Service areas" });
+    const polygons = page.getByRole("switch", { name: "Instructor areas" });
     await expect(polygons).toHaveAttribute("aria-checked", "true");
     await polygons.click();
     await expect(polygons).toHaveAttribute("aria-checked", "false");

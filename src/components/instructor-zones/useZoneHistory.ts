@@ -104,6 +104,12 @@ export function useZoneHistory(
   onChange: (next: ZoneCoordinate[] | null) => void,
   /** Re-seeds the history whenever one of these changes. */
   deps: unknown[] = [],
+  /**
+   * Largest ring `apply` accepts. Defaults to MAX_VERTICES (an instructor
+   * area). The company service area is far bigger (the Bengaluru piece alone is
+   * 286 points), so its editor passes a higher cap.
+   */
+  maxVertices: number = MAX_VERTICES,
 ): ZoneHistory {
   const stateRef = useRef<HistoryState>(initialState(initial));
   const [state, setState] = useState<HistoryState>(stateRef.current);
@@ -165,7 +171,7 @@ export function useZoneHistory(
       if (arraysEqual(open, current)) return false;
       // Do not let an over-long ring enter the stack: undo would then have to
       // walk through states the database CHECK constraint rejects.
-      if (open.length > MAX_VERTICES) return false;
+      if (open.length > maxVertices) return false;
 
       const coalesce = options?.coalesce ?? null;
       const continuingBurst =
@@ -181,7 +187,7 @@ export function useZoneHistory(
       commit({ stack, index: stack.length - 1 });
       return true;
     },
-    [commit],
+    [commit, maxVertices],
   );
 
   const undo = useCallback(() => {
