@@ -17,6 +17,7 @@ import {
   Pentagon,
   Redo2,
   RefreshCw,
+  Ruler,
   Search,
   Trash2,
   Undo2,
@@ -25,6 +26,10 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import {
+  DistanceMeasure,
+  type MeasureFrom,
+} from "@/components/instructor-zones/DistanceMeasure";
 import { ServiceAreaEditor } from "@/components/instructor-zones/ServiceAreaEditor";
 import { drawServiceAreaMask } from "@/components/instructor-zones/serviceAreaMask";
 import type { ZoneCoordinate } from "@/components/instructor-zones/types";
@@ -368,6 +373,11 @@ export default function InstructorZoneMap() {
   // The service-area editor (white/grey) is a separate mode from editing an
   // instructor's polygon; only one of the two can be active at a time.
   const [serviceEditorOpen, setServiceEditorOpen] = useState(false);
+  // "Measure distance": from an instructor's HOME to any place. `measureFrom`
+  // is the instructor whose home was picked; the other end is the page's
+  // search/drop pin, so the address search and a draggable pin both set it.
+  const [measureOn, setMeasureOn] = useState(false);
+  const [measureFrom, setMeasureFrom] = useState<MeasureFrom | null>(null);
   const refreshServiceLayer = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["service-area-layer"] });
   }, [queryClient]);
@@ -986,6 +996,10 @@ export default function InstructorZoneMap() {
    * depending on it would tear down and rebuild all 66 polygons each time.
    */
   const onSelectRef = useRef<(id: string) => void>(() => {});
+  // Read by the overlay effect's click handlers (see onSelectRef): while
+  // measuring, a home dot starts a measurement instead of selecting.
+  const measureOnRef = useRef(false);
+  const startMeasureRef = useRef<(id: string) => void>(() => {});
 
   /**
    * Whether an inline edit is in progress, readable from callbacks that must not
@@ -1137,7 +1151,9 @@ export default function InstructorZoneMap() {
             // During a first draw the NEW boundary must own every click, so the
             // other polygons are made non-clickable — otherwise the admin can
             // only add points in the empty gaps between everyone's areas.
-            clickable: !firstDrawActive,
+            // While measuring, a click on an area must reach the map (it drops
+            // the other end), so areas are inert; home dots stay clickable.
+            clickable: !firstDrawActive && !measureOn,
             zIndex: selected ? 3 : 1,
           });
           polygon.addListener("click", () =>
@@ -1158,7 +1174,7 @@ export default function InstructorZoneMap() {
               strokeColor: selected ? SELECTED_STROKE : color,
               strokeWeight: selected ? 3 : 2,
               strokeOpacity: 0.95,
-              clickable: !firstDrawActive,
+              clickable: !firstDrawActive && !measureOn,
               zIndex: selected ? 3 : 1,
               icons: [
                 {
@@ -1202,7 +1218,9 @@ export default function InstructorZoneMap() {
             zIndex: selected ? 4 : 2,
           });
           marker.addListener("click", () =>
-            onSelectRef.current(z.instructorId),
+            measureOnRef.current
+              ? startMeasureRef.current(z.instructorId)
+              : onSelectRef.current(z.instructorId),
           );
         }
         if (polygon || marker || dash) {
@@ -1224,6 +1242,7 @@ export default function InstructorZoneMap() {
     statusById,
     locationMatchedIds,
     firstDrawActive,
+    measureOn,
     clearOverlays,
   ]);
 
@@ -1843,7 +1862,7 @@ export default function InstructorZoneMap() {
     pinMarkerRef.current?.setMap(null);
     pinMarkerRef.current = null;
     if (!pin) return;
-    pinMarkerRef.current = new mapsLib.Marker({
+    const marker = new mapsLib.Marker({
       map,
       position: pin.at,
       title: pin.label,
@@ -1852,6 +1871,18 @@ export default function InstructorZoneMap() {
       draggable: !firstDrawActive,
       clickable: !firstDrawActive,
     });
+    // Dropping the pin somewhere new re-checks who covers it and re-measures.
+    // (The pin was draggable but nothing listened, so a drag left the app state
+    // on the old spot while the marker sat on the new one.)
+    marker.addListener("dragend", (e: google.maps.MapMouseEvent) => {
+      if (!e.latLng) return;
+      const at = { lat: e.latLng.lat(), lng: e.latLng.lng() };
+      setPin({
+        at,
+        label: `Pin ${at.lat.toFixed(5)}, ${at.lng.toFixed(5)}`,
+      });
+    });
+    pinMarkerRef.current = marker;
   }, [mapInstance, mapsLib, pin, firstDrawActive]);
 
   /**
@@ -2172,6 +2203,51 @@ export default function InstructorZoneMap() {
   // admin is already looking at the shape they clicked, so re-framing the map
   // on them would be a jarring jump.
   onSelectRef.current = (id) => selectZone(id, false);
+
+  /**
+   * Start measuring from this instructor's HOME (their registered address,
+   * `Instructor.latitude/longitude`). Always the real home, never the polygon
+   * centre the dot falls back to when no home is on file: a distance from the
+   * middle of someone's service area would be a plausible-looking wrong number.
+   */
+  const startMeasure = useCallback(
+    (id: string) => {
+      const home = rosterPointById.get(id);
+      const name =
+        instructors.find((i) => i.id === id)?.name ??
+        zoneByInstructor.get(id)?.name ??
+        "Instructor";
+      if (!home) {
+        toast({
+          title: "No home location on file",
+          description: `${name} has no registered home coordinates, so there is nothing to measure from. Add them in Instructor Management.`,
+          variant: "destructive",
+        });
+        return;
+      }
+      setMeasureFrom({ id, name, at: home });
+      setMeasureOn(true);
+    },
+    [rosterPointById, instructors, zoneByInstructor, toast],
+  );
+  measureOnRef.current = measureOn;
+  startMeasureRef.current = startMeasure;
+
+  const closeMeasure = useCallback(() => {
+    setMeasureOn(false);
+    setMeasureFrom(null);
+  }, []);
+
+  // One map tool at a time: starting an instructor edit or the service-area
+  // editor turns measuring off (their clicks must reach the map).
+  useEffect(() => {
+    if (editingId || serviceEditorOpen) closeMeasure();
+  }, [editingId, serviceEditorOpen, closeMeasure]);
+
+  const measureTo = useMemo(
+    () => (pin ? { at: pin.at, label: pin.label } : null),
+    [pin],
+  );
 
   // A map click selects a layer the sidebar may be scrolled far away from, so
   // bring that row into view. Scrolling runs for sidebar-originated selections
@@ -2912,6 +2988,23 @@ export default function InstructorZoneMap() {
 
           <div ref={mapDivRef} className="absolute inset-0" />
 
+          {measureOn ? (
+            <DistanceMeasure
+              map={mapInstance}
+              mapsLib={mapsLib}
+              from={measureFrom}
+              to={measureTo}
+              onSetTo={(to) => setPin(to)}
+              onClear={() => {
+                setMeasureFrom(null);
+                // The pin is shared with the location filter: only drop it when
+                // that filter is not using it.
+                if (!locationFilter.active) setPin(null);
+              }}
+              onClose={closeMeasure}
+            />
+          ) : null}
+
           <ServiceAreaEditor
             map={mapInstance}
             mapsLib={mapsLib}
@@ -3168,6 +3261,20 @@ export default function InstructorZoneMap() {
                   {selectedCard.hasZone ? "Edit points" : "Draw area"}
                 </Button>
               </div>
+              {/* Works for an instructor with no drawn area too (the card opens
+                  from the sidebar's "Not mapped" list), where there is no home
+                  dot to click. */}
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-2 w-full"
+                data-testid="info-card-measure"
+                disabled={Boolean(editingId) || serviceEditorOpen}
+                onClick={() => startMeasure(selectedCard.instructorId)}
+              >
+                <Ruler className="mr-1.5 h-3.5 w-3.5" />
+                Measure distance from home
+              </Button>
               {/* Promote, only for a rough boundary. The one irreversible-feeling
                   action on the card, so it is not tucked into the edit flow: Ops
                   review a rough polygon, decide it is right, and promote it here
