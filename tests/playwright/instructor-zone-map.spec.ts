@@ -266,6 +266,12 @@ test.describe("Instructor Zone Map — location matching", () => {
     await expect(
       matches.getByText(/instructor[s]? serve this location|No polygon covers/),
     ).toBeVisible();
+
+    // The header search only MARKS the pin. It is "Filter by location" that
+    // narrows the list, so the filter must still be off after a header search.
+    await expect(page.getByTestId("location-filter-toggle")).toContainText(
+      "Filter by location",
+    );
   });
 });
 
