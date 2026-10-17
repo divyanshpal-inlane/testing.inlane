@@ -1,5 +1,11 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import {
+  formatSlotLines,
+  istToday,
+  planTentativeSlotsMessage,
+  type TentativeRow,
+} from "../_shared/tentative-slots.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -817,6 +823,69 @@ async function updateTentativeSchedule(body: {
   return { ids: [id], phoneStored: !!phone };
 }
 
+// "Send Tentative Slots on WhatsApp". The browser only says WHICH tentative
+// rows (Schedule ids, or the batch_id of a just-saved booking); the customer's
+// REAL phone is read here from tentative_details and is never sent back to the
+// browser, so agents who only see masked numbers can still message customers.
+// The message text is built here too, from the rows -- the caller cannot
+// supply a phone number or free text.
+async function sendTentativeSlots(body: {
+  scheduleIds?: unknown;
+  batchId?: unknown;
+}) {
+  const ids = [
+    ...new Set(
+      (Array.isArray(body.scheduleIds) ? body.scheduleIds : [])
+        .map((v) => Number(v))
+        .filter((n) => Number.isInteger(n) && n > 0),
+    ),
+  ].slice(0, 50);
+  const batchId = typeof body.batchId === "string" ? body.batchId.trim() : "";
+  if (ids.length === 0 && !batchId) {
+    return { error: "scheduleIds or batchId is required", code: "BAD_REQUEST" };
+  }
+
+  let query = supabase
+    .from("Schedule")
+    .select("id, date, start_time, end_time, isTentative, tentative_details");
+  query =
+    ids.length > 0
+      ? query.in("id", ids)
+      : query.eq("tentative_details->>batch_id", batchId);
+  const { data, error } = await query.limit(50);
+  if (error) {
+    console.error("[instructor-slot-booking] sendTentativeSlots read:", error);
+    return { error: "Failed to read the booking", code: "DB_ERROR" };
+  }
+
+  const plan = planTentativeSlotsMessage(
+    (data ?? []) as TentativeRow[],
+    istToday(),
+  );
+  if (!plan.ok) return { error: plan.error, code: plan.code };
+
+  try {
+    // Imported lazily so a problem in the WhatsApp module can never stop the
+    // other actions of this function from booting.
+    const { heltarMessageService } = await import("../heltar-service.ts");
+    await heltarMessageService.processMessageRequest("TENTATIVE_SLOTS", {
+      phone: plan.phone,
+      customer_name: plan.name,
+      slots: formatSlotLines(plan.rows),
+    });
+  } catch (err) {
+    console.error("[instructor-slot-booking] WhatsApp send failed:", err);
+    return {
+      error: err instanceof Error ? err.message : "WhatsApp send failed",
+      code: "SEND_FAILED",
+    };
+  }
+  return {
+    sentTo: maskPhone(plan.phone),
+    classes: plan.rows.length,
+  };
+}
+
 // Only users with an Admin record may read CRM data or validate booking slots.
 // Permission (managed in User / Admin Management, like "View Unmasked Phone
 // Numbers" which is for the ops team and is not touched here) that allows
@@ -922,6 +991,8 @@ serve(async (req) => {
       leadBy?: string;
       instructorId?: string;
       slots?: unknown;
+      scheduleIds?: unknown;
+      batchId?: unknown;
       id?: string;
       slot?: Record<string, unknown>;
       details?: Record<string, unknown>;
@@ -986,6 +1057,17 @@ serve(async (req) => {
         return json(400, { success: false, ...result });
       }
       return json(200, { success: true, ids: result.ids });
+    }
+
+    if (action === "sendTentativeSlots") {
+      const result = await sendTentativeSlots(body);
+      if (result.error) {
+        return json(result.code === "SEND_FAILED" ? 502 : 400, {
+          success: false,
+          ...result,
+        });
+      }
+      return json(200, { success: true, ...result });
     }
 
     if (action === "update") {
