@@ -2225,7 +2225,17 @@ export default function SalesDashboard() {
       // to book, so it just displays its details -- no validation, no notice,
       // and it must not disturb an in-progress booking.
       setSelectedSlot({ instrId, date, minute, free, info });
-      if (!free) return;
+      if (!free) {
+        // The booking form owns the side panel while it is open, so a taken
+        // slot's details would never show until the form was closed. Hide the
+        // form instead (pendingSlots / customerFormData / editContext live
+        // here, so nothing is lost) -- the panel offers "Back to booking
+        // form". A cell of the in-progress booking itself keeps the form.
+        if (tentativeModalOpen && info.kind !== "pending") {
+          setTentativeModalOpen(false);
+        }
+        return;
+      }
 
       // Defence in depth for the one-instructor-per-booking lock. Other
       // instructors' rows aren't rendered while locked, so this should be
@@ -2437,6 +2447,7 @@ export default function SalesDashboard() {
       locSearch,
       lockedInstructorId,
       lockedInstructorName,
+      tentativeModalOpen,
     ],
   );
 
@@ -3567,6 +3578,26 @@ export default function SalesDashboard() {
               "select a slot" prompt when nothing is picked. Every cell is a
               single click now, so both cases come through this one handler. */}
           <aside className="slot-panel" aria-label="Slot panel">
+            {!tentativeModalOpen &&
+              (pendingSlots.length > 0 || editContext !== null) && (
+                <button
+                  type="button"
+                  className="slot-panel-back-to-form"
+                  onClick={() => setTentativeModalOpen(true)}
+                  style={{
+                    margin: "8px 12px 0",
+                    padding: "6px 10px",
+                    fontSize: 13,
+                    fontWeight: 600,
+                    border: "1px solid var(--gc-border)",
+                    borderRadius: 6,
+                    background: "transparent",
+                    cursor: "pointer",
+                  }}
+                >
+                  ← Back to booking form
+                </button>
+              )}
             {tentativeModalOpen ? (
               <TentativeBookingModal
                 variant="panel"
