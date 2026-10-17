@@ -183,6 +183,9 @@ interface SlotInfo {
   // Who a tentative hold is for, so the panel can offer "Create New Learner" /
   // "Send Payment Link". Only set when the booking has a phone number.
   customer?: SlotCustomer;
+  // Schedule row id of a tentative hold, so "Send Tentative Slots on WhatsApp"
+  // can tell the server which booking to message (the phone stays server-side).
+  scheduleId?: number;
 }
 
 type SortKey = "distance" | "freeDesc" | "freeAsc" | "alpha";
@@ -1181,6 +1184,8 @@ export default function SalesDashboard() {
     email?: string;
     courseId?: string;
     paymentStatus: "unpaid" | "half_paid" | "full_paid";
+    /** batch_id the booking's rows were saved with (identifies them server-side). */
+    batchId?: string;
     slots: { date: string; startTime: string; endTime: string }[];
   } | null>(null);
   const [customerFormData, setCustomerFormData] = useState<CustomerFormValues>(
@@ -1303,6 +1308,19 @@ export default function SalesDashboard() {
   // useCallback dep array is evaluated during render — referencing it up
   // here would throw a temporal-dead-zone ReferenceError.
 
+  // While editing, adding/removing/moving classes is only saved on Save, so
+  // leaving the form with such changes must ask first. A plain new booking
+  // asks once 2+ classes are picked.
+  const unsavedEditChanges =
+    editContext !== null &&
+    (pendingSlots.some((s) => s.scheduleId == null) ||
+      editContext.rowIds.some(
+        (id) => !pendingSlots.some((s) => s.scheduleId === id),
+      ));
+  const needsDiscardConfirm = editContext
+    ? unsavedEditChanges
+    : pendingSlots.length > 1;
+
   const handleRemoveSlot = useCallback((index: number) => {
     setPendingSlots((prev) => prev.filter((_, i) => i !== index));
   }, []);
@@ -1319,65 +1337,76 @@ export default function SalesDashboard() {
   }, [currentUserName]);
 
   // Closing (X / Cancel / Esc / click-away) throws the whole batch away, so
-  // ask first when more than one class has been picked. Editing an existing
-  // booking is exempt: nothing there is lost, it is already saved.
+  // ask first when more than one class has been picked, or when an edit has
+  // unsaved class changes (added / removed / moved classes).
   const handleCloseTentativeModal = useCallback(() => {
-    if (pendingSlots.length > 1 && !editContext) {
+    if (needsDiscardConfirm) {
       setDiscardPrompt({
         count: pendingSlots.length,
-        title: "Discard these classes?",
-        message: `You have ${pendingSlots.length} classes selected for this customer. Closing the form will remove all of them.`,
-        confirmLabel: "Discard classes",
+        title: editContext ? "Discard your changes?" : "Discard these classes?",
+        message: editContext
+          ? "You have unsaved changes to this booking's classes. Closing the form will throw them away."
+          : `You have ${pendingSlots.length} classes selected for this customer. Closing the form will remove all of them.`,
+        confirmLabel: editContext ? "Discard changes" : "Discard classes",
         run: discardAndCloseTentativeModal,
       });
       return;
     }
     discardAndCloseTentativeModal();
-  }, [pendingSlots.length, editContext, discardAndCloseTentativeModal]);
-
-  const handleTentativeSuccess = useCallback(() => {
-    const message = editContext
-      ? "✅ Tentative booking updated successfully."
-      : pendingSlots.length > 1
-        ? `✅ ${pendingSlots.length} tentative classes booked successfully.`
-        : "✅ Tentative slot booked successfully.";
-    showSuccessNotice(message);
-    // Only the instructor(s) just booked actually changed -- a full
-    // reload() would reset phase to "loading" and re-fetch every OTHER
-    // instructor in the roster too, showing a disruptive full-page loading
-    // screen (which would also hide the success toast above) for no
-    // reason. Targeted refresh keeps this to a brief per-row skeleton on
-    // just the affected instructor(s).
-    const affectedIds = [...new Set(pendingSlots.map((s) => s.instructorId))];
-    setJustBooked({
-      name: customerFormData.customerName,
-      phone: customerFormData.customerPhone,
-      email: customerFormData.customerEmail,
-      courseId:
-        customerFormData.course && customerFormData.course !== NO_COURSE
-          ? customerFormData.course
-          : undefined,
-      paymentStatus: customerFormData.paymentStatus,
-      slots: pendingSlots.map((p) => ({
-        date: p.date,
-        startTime: p.startTime,
-        endTime: p.endTime,
-      })),
-    });
-    setTentativeModalOpen(false);
-    setPendingSlots([]);
-    setCustomerFormData(DEFAULT_CUSTOMER_FORM(currentUserName));
-    setEditContext(null);
-    setAddingSlotMode(false);
-    refreshInstructors(affectedIds);
   }, [
-    refreshInstructors,
+    needsDiscardConfirm,
+    pendingSlots.length,
     editContext,
-    pendingSlots,
-    customerFormData,
-    currentUserName,
-    showSuccessNotice,
+    discardAndCloseTentativeModal,
   ]);
+
+  const handleTentativeSuccess = useCallback(
+    (batchId?: string) => {
+      const message = editContext
+        ? "✅ Tentative booking updated successfully."
+        : pendingSlots.length > 1
+          ? `✅ ${pendingSlots.length} tentative classes booked successfully.`
+          : "✅ Tentative slot booked successfully.";
+      showSuccessNotice(message);
+      // Only the instructor(s) just booked actually changed -- a full
+      // reload() would reset phase to "loading" and re-fetch every OTHER
+      // instructor in the roster too, showing a disruptive full-page loading
+      // screen (which would also hide the success toast above) for no
+      // reason. Targeted refresh keeps this to a brief per-row skeleton on
+      // just the affected instructor(s).
+      const affectedIds = [...new Set(pendingSlots.map((s) => s.instructorId))];
+      setJustBooked({
+        name: customerFormData.customerName,
+        phone: customerFormData.customerPhone,
+        email: customerFormData.customerEmail,
+        courseId:
+          customerFormData.course && customerFormData.course !== NO_COURSE
+            ? customerFormData.course
+            : undefined,
+        paymentStatus: customerFormData.paymentStatus,
+        batchId,
+        slots: pendingSlots.map((p) => ({
+          date: p.date,
+          startTime: p.startTime,
+          endTime: p.endTime,
+        })),
+      });
+      setTentativeModalOpen(false);
+      setPendingSlots([]);
+      setCustomerFormData(DEFAULT_CUSTOMER_FORM(currentUserName));
+      setEditContext(null);
+      setAddingSlotMode(false);
+      refreshInstructors(affectedIds);
+    },
+    [
+      refreshInstructors,
+      editContext,
+      pendingSlots,
+      customerFormData,
+      currentUserName,
+      showSuccessNotice,
+    ],
+  );
 
   useEffect(() => {
     if (!addingSlotMode) return;
@@ -2234,6 +2263,9 @@ export default function SalesDashboard() {
       // to book, so it just displays its details -- no validation, no notice,
       // and it must not disturb an in-progress booking.
       setSelectedSlot({ instrId, date, minute, free, info });
+      // The "Booking saved" card outranks slot details in the panel, so any
+      // new selection has to retire it or the click would appear to do nothing.
+      setJustBooked(null);
       if (!free) {
         // The booking form owns the side panel while it is open, so a taken
         // slot's details would never show until the form was closed. Hide the
@@ -2429,12 +2461,16 @@ export default function SalesDashboard() {
       // This replaces the whole in-progress batch and blanks the customer
       // form, so confirm first when more than one class was already picked
       // (a stray click on a free slot used to wipe the set silently).
-      if (pendingSlots.length > 1 && !editContext) {
+      if (needsDiscardConfirm) {
         setDiscardPrompt({
           count: pendingSlots.length,
           title: "Start a new booking?",
-          message: `You have ${pendingSlots.length} classes selected for this customer. Starting a new booking from this slot will remove all of them and clear the form.`,
-          confirmLabel: "Remove & start new",
+          message: editContext
+            ? "You have unsaved changes to the booking you are editing. Starting a new booking from this slot will throw them away."
+            : `You have ${pendingSlots.length} classes selected for this customer. Starting a new booking from this slot will remove all of them and clear the form.`,
+          confirmLabel: editContext
+            ? "Discard & start new"
+            : "Remove & start new",
           run: startFreshBooking,
         });
         return;
@@ -2450,6 +2486,7 @@ export default function SalesDashboard() {
       replacingSlotIndex,
       pendingSlots,
       editContext,
+      needsDiscardConfirm,
       currentUserName,
       customerFormData.customerPhone,
       data?.freeGrid,
@@ -2688,19 +2725,21 @@ export default function SalesDashboard() {
   // ask first when more than one class is picked.
   const handleEditBooking = useCallback(
     (action: NonNullable<SlotInfo["editAction"]>) => {
-      if (pendingSlots.length > 1 && !editContext) {
+      if (needsDiscardConfirm) {
         setDiscardPrompt({
           count: pendingSlots.length,
           title: "Open another booking?",
-          message: `You have ${pendingSlots.length} classes selected for a new booking. Opening another booking to edit will remove all of them.`,
-          confirmLabel: "Remove & open",
+          message: editContext
+            ? "You have unsaved changes to the booking you are editing. Opening another booking will throw them away."
+            : `You have ${pendingSlots.length} classes selected for a new booking. Opening another booking to edit will remove all of them.`,
+          confirmLabel: editContext ? "Discard & open" : "Remove & open",
           run: () => startEditBooking(action),
         });
         return;
       }
       startEditBooking(action);
     },
-    [pendingSlots.length, editContext, startEditBooking],
+    [needsDiscardConfirm, pendingSlots.length, editContext, startEditBooking],
   );
 
   // Lets Sales fix a wrong entry (e.g. a typo'd name/phone or a slot picked
@@ -3133,6 +3172,7 @@ export default function SalesDashboard() {
                 }
               : null,
             scheduleBlock: scheduleBlock("Tentative"),
+            scheduleId: cover.id,
             // Every tentative hold gets the Learner section. Holds made in
             // Instructor Management carry no phone, so the section then looks
             // the learner up by name instead.
@@ -3640,8 +3680,13 @@ export default function SalesDashboard() {
                 </div>
                 <SendSlotsWhatsApp
                   customerName={justBooked.name}
-                  phone={justBooked.phone}
                   slots={justBooked.slots}
+                  target={
+                    justBooked.batchId
+                      ? { batchId: justBooked.batchId }
+                      : { scheduleIds: [] }
+                  }
+                  hasPhone={Boolean(normalizePhone(justBooked.phone))}
                 />
                 <SlotLearnerActions
                   key={`booked-${justBooked.phone}`}
@@ -3753,7 +3798,7 @@ export default function SalesDashboard() {
                     };
                     // Same phone => same customer: send every upcoming hold,
                     // not just the one clicked. No phone => just this slot.
-                    const siblings: (typeof picked)[] = [];
+                    const siblings: (typeof picked & { id: number })[] = [];
                     if (key) {
                       for (const perDate of blocksIndex.values())
                         for (const list of perDate.values())
@@ -3765,6 +3810,7 @@ export default function SalesDashboard() {
                             );
                             if (b.isTentative && bp === key && b.date >= today)
                               siblings.push({
+                                id: b.id,
                                 date: b.date,
                                 startTime: minutesToTime(b.startMinute),
                                 endTime: minutesToTime(b.endMinute),
@@ -3775,8 +3821,16 @@ export default function SalesDashboard() {
                       <SendSlotsWhatsApp
                         key={`wa-${selectedSlot.instrId}-${selectedSlot.date}-${selectedSlot.minute}`}
                         customerName={c.name}
-                        phone={c.phone}
                         slots={siblings.length > 0 ? siblings : [picked]}
+                        target={{
+                          scheduleIds:
+                            siblings.length > 0
+                              ? siblings.map((x) => x.id)
+                              : selectedSlot.info.scheduleId != null
+                                ? [selectedSlot.info.scheduleId]
+                                : [],
+                        }}
+                        hasPhone={Boolean(key)}
                       />
                     );
                   })()}

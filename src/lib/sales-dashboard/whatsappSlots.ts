@@ -1,7 +1,5 @@
 import { supabase } from "@/lib/supabaseClient";
 
-import { normalizePhone } from "./validation";
-
 /** One class to tell the customer about. Times are "HH:MM" (24h), date is ISO. */
 export interface WhatsAppSlot {
   date: string;
@@ -65,29 +63,39 @@ export function buildSlotLines(slots: WhatsAppSlot[]): string[] {
   );
 }
 
-/**
- * Sends the tentative slots through the integrated WhatsApp system (the
- * `send-message` edge function -> Heltar template `TENTATIVE_SLOTS`). Resolves
- * on success, throws an Error with a readable message otherwise.
- */
-export async function sendTentativeSlotsWhatsApp(args: {
-  customerName: string;
-  phone: string;
-  slots: WhatsAppSlot[];
-}): Promise<void> {
-  const phone = normalizePhone(args.phone);
-  if (!phone) throw new Error("Enter a valid 10-digit phone number.");
-  const lines = buildSlotLines(args.slots);
-  if (lines.length === 0) throw new Error("There are no slots to send.");
+/** Which saved tentative rows to message: their Schedule ids, or a batch id. */
+export type WhatsAppTarget =
+  | { scheduleIds: number[]; batchId?: undefined }
+  | { batchId: string; scheduleIds?: undefined };
 
-  const { data, error } = await supabase.functions.invoke("send-message", {
-    body: {
-      message_type: "TENTATIVE_SLOTS",
-      phone,
-      customer_name: args.customerName,
-      slots: lines,
+/**
+ * Sends the customer their tentative slots through the integrated WhatsApp
+ * system. Only booking ids go to the server (`instructor-slot-booking`,
+ * action `sendTentativeSlots`): it checks the caller is staff, reads the
+ * customer's REAL phone from the booking, builds the message and sends it.
+ * The number never reaches the browser, so agents who only see masked phones
+ * can still use this. Resolves with the masked number it was sent to, throws
+ * an Error with a readable message otherwise.
+ */
+export async function sendTentativeSlotsWhatsApp(
+  target: WhatsAppTarget,
+): Promise<{ sentTo: string; classes: number }> {
+  const hasIds = (target.scheduleIds?.length ?? 0) > 0;
+  if (!hasIds && !target.batchId) {
+    throw new Error("There are no saved slots to send.");
+  }
+
+  const { data, error } = await supabase.functions.invoke(
+    "instructor-slot-booking",
+    {
+      body: {
+        action: "sendTentativeSlots",
+        ...(hasIds
+          ? { scheduleIds: target.scheduleIds }
+          : { batchId: target.batchId }),
+      },
     },
-  });
+  );
   if (error) {
     // FunctionsHttpError hides the real reason inside the response body.
     let reason = error.message;
@@ -101,7 +109,14 @@ export async function sendTentativeSlotsWhatsApp(args: {
     }
     throw new Error(reason);
   }
-  if (data && (data as { success?: boolean }).success === false) {
-    throw new Error("WhatsApp message was not accepted.");
+  const payload = data as {
+    success?: boolean;
+    error?: string;
+    sentTo?: string;
+    classes?: number;
+  } | null;
+  if (!payload || payload.success === false) {
+    throw new Error(payload?.error ?? "WhatsApp message was not accepted.");
   }
+  return { sentTo: payload.sentTo ?? "", classes: payload.classes ?? 0 };
 }
