@@ -18,6 +18,21 @@ Deno.serve(async (req) => {
       throw new Error("message_type is required");
     }
 
+    // Tentative-slot messages go through the authenticated
+    // `instructor-slot-booking` function (action "sendTentativeSlots"), which
+    // looks the phone up server-side. Refuse them here.
+    if (message_type === "TENTATIVE_SLOTS") {
+      return new Response(
+        JSON.stringify({
+          error: "TENTATIVE_SLOTS is not available on this endpoint",
+        }),
+        {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          status: 403,
+        },
+      );
+    }
+
     const result = await heltarMessageService.processMessageRequest(
       message_type,
       data,

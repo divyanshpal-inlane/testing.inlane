@@ -34,10 +34,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Build (static test deploy)
         env:
-          # Serves the app from /sales-requirement-dashboard/ instead of
-          # domain root — see vite.config.ts / App.tsx's BrowserRouter
-          # basename, both of which key off this.
-          VITE_BASE_PATH: /sales-requirement-dashboard/
+          # Serves the app from /testing.inlane/ instead of domain root — see
+          # vite.config.ts / App.tsx's BrowserRouter basename, both of which
+          # key off this. Must match this repo's Pages project path
+          # (divyanshpal-inlane.github.io/testing.inlane/).
+          VITE_BASE_PATH: /testing.inlane/
           VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
           VITE_GOOGLE_MAPS_API_KEY: ${{ vars.VITE_GOOGLE_MAPS_API_KEY }}

@@ -246,6 +246,157 @@ async function fetchAllDbZones(force = false): Promise<DbZone[]> {
   }
 }
 
+/**
+ * The serviceable (white) / non-serviceable (grey) layer, from
+ * `service_area_zones`. Independent of the instructor polygons above: it says
+ * where Lane offers service at all, not who covers an address.
+ *
+ *  - `serviceable`: an area we serve (white).
+ *  - `excluded`: a pocket inside a serviceable area that we do not serve.
+ *
+ * Grey is "everywhere that is not serviceable", so it is never stored; the map
+ * draws it as the world with the serviceable rings cut out.
+ */
+export interface ServiceAreaPiece {
+  id: string;
+  name: string;
+  /** Open ring (the closing duplicate point is dropped). */
+  ring: GeoPoint[];
+}
+export interface ServiceAreaLayer {
+  serviceable: ServiceAreaPiece[];
+  excluded: ServiceAreaPiece[];
+}
+
+const EMPTY_SERVICE_LAYER: ServiceAreaLayer = { serviceable: [], excluded: [] };
+
+export type ServiceAreaKind = "serviceable" | "excluded";
+
+/** Largest ring the service-area editor will save (the Bengaluru piece is 286). */
+export const MAX_SERVICE_AREA_VERTICES = 1000;
+
+function toServicePiece(row: {
+  id: string;
+  name: string;
+  coordinates: unknown;
+}): ServiceAreaPiece | null {
+  if (!Array.isArray(row.coordinates)) return null;
+  const ring: GeoPoint[] = [];
+  for (const p of row.coordinates as { lat?: unknown; lng?: unknown }[]) {
+    const lat = Number(p?.lat);
+    const lng = Number(p?.lng);
+    if (
+      Number.isFinite(lat) &&
+      Number.isFinite(lng) &&
+      Math.abs(lat) <= 90 &&
+      Math.abs(lng) <= 180
+    )
+      ring.push({ lat, lng });
+  }
+  // stored closed (KML convention); the map wants it open
+  if (
+    ring.length > 1 &&
+    ring[0].lat === ring[ring.length - 1].lat &&
+    ring[0].lng === ring[ring.length - 1].lng
+  )
+    ring.pop();
+  return ring.length >= 3 ? { id: row.id, name: row.name, ring } : null;
+}
+
+/** Stored form of a ring: closed ([{lat,lng}], first point repeated last). */
+function closedCoordinates(ring: GeoPoint[]) {
+  const pts = ring.map((p) => ({ lat: p.lat, lng: p.lng }));
+  const first = pts[0];
+  const last = pts[pts.length - 1];
+  if (first && last && (first.lat !== last.lat || first.lng !== last.lng)) {
+    pts.push({ ...first });
+  }
+  return pts;
+}
+
+/**
+ * Tolerant read: until migration 20261017_100000 is applied the table does not
+ * exist and PostgREST rejects the select, so this resolves to an empty layer
+ * (the maps then simply hide the grey shading) instead of breaking the page.
+ */
+export async function fetchServiceAreaLayer(): Promise<ServiceAreaLayer> {
+  const { data, error } = await supabase
+    .from("service_area_zones")
+    .select("id,kind,name,coordinates")
+    .order("name", { ascending: true });
+  if (error) {
+    console.warn("service_area_zones unavailable:", error.message);
+    return EMPTY_SERVICE_LAYER;
+  }
+  const layer: ServiceAreaLayer = { serviceable: [], excluded: [] };
+  for (const row of data ?? []) {
+    const piece = toServicePiece(row);
+    if (!piece) continue;
+    if (row.kind === "serviceable") layer.serviceable.push(piece);
+    else if (row.kind === "excluded") layer.excluded.push(piece);
+  }
+  return layer;
+}
+
+/** True for a unique-violation on (kind, name). */
+export function isDuplicateServiceAreaError(error: unknown): boolean {
+  const e = error as { code?: string; message?: string } | null;
+  return (
+    e?.code === "23505" ||
+    /duplicate key|already exists/i.test(e?.message ?? "")
+  );
+}
+
+export const DUPLICATE_SERVICE_AREA_MESSAGE =
+  "An area with this name already exists. Pick a different name.";
+
+/** Adds a serviceable area or an excluded pocket. Returns the new row's id. */
+export async function insertServiceAreaZone(params: {
+  kind: ServiceAreaKind;
+  name: string;
+  ring: GeoPoint[];
+}): Promise<string> {
+  const { data, error } = await supabase
+    .from("service_area_zones")
+    .insert({
+      kind: params.kind,
+      name: params.name.trim(),
+      coordinates: closedCoordinates(params.ring),
+      source: "Zone Map editor",
+    })
+    .select("id")
+    .single();
+  if (error) throw error;
+  return data.id;
+}
+
+/** Renames and/or reshapes one area, by its row id. */
+export async function updateServiceAreaZone(params: {
+  id: string;
+  name?: string;
+  ring?: GeoPoint[];
+}): Promise<void> {
+  const patch: {
+    name?: string;
+    coordinates?: ReturnType<typeof closedCoordinates>;
+  } = {};
+  if (params.name !== undefined) patch.name = params.name.trim();
+  if (params.ring) patch.coordinates = closedCoordinates(params.ring);
+  const { error } = await supabase
+    .from("service_area_zones")
+    .update(patch)
+    .eq("id", params.id);
+  if (error) throw error;
+}
+
+export async function deleteServiceAreaZone(id: string): Promise<void> {
+  const { error } = await supabase
+    .from("service_area_zones")
+    .delete()
+    .eq("id", id);
+  if (error) throw error;
+}
+
 /** Call after saving/deleting a zone so the next fetch sees the change. */
 export function invalidateDbZoneCache(): void {
   cache = null;

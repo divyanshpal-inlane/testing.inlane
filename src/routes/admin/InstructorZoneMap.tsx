@@ -17,6 +17,7 @@ import {
   Pentagon,
   Redo2,
   RefreshCw,
+  Ruler,
   Search,
   Trash2,
   Undo2,
@@ -25,7 +26,14 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import {
+  DistanceMeasure,
+  type MeasureFrom,
+} from "@/components/instructor-zones/DistanceMeasure";
+import { ServiceAreaEditor } from "@/components/instructor-zones/ServiceAreaEditor";
+import { drawServiceAreaMask } from "@/components/instructor-zones/serviceAreaMask";
 import type { ZoneCoordinate } from "@/components/instructor-zones/types";
+import { usePlacesAutocomplete } from "@/components/instructor-zones/usePlacesAutocomplete";
 import {
   arraysEqual,
   closeRing,
@@ -58,6 +66,7 @@ import { pointInPolygon } from "@/lib/sales-dashboard/kml";
 import {
   deleteZoneById,
   fetchDbZones,
+  fetchServiceAreaLayer,
   insertZone,
   invalidateDbZoneCache,
   updateZoneById,
@@ -95,84 +104,6 @@ interface ZoneView {
   /** Provisional boundary awaiting Ops review; never a serviceability zone. */
   isRough: boolean;
 }
-
-/**
- * The Places dropdown is appended to `<body>`, so it needs an explicit z-index to
- * clear the header (`z-30`) and sidebar (`z-20`), plus pointer events restored
- * for its items.
- *
- * Reference-counted because two widgets can be live at once (the header search
- * and the sidebar location filter). A naive per-effect append/remove would let
- * whichever effect cleaned up first strip the override out from under the other,
- * leaving the open dropdown unclickable.
- */
-let pacStyleEl: HTMLStyleElement | null = null;
-let pacStyleUsers = 0;
-const acquirePacStyles = (): (() => void) => {
-  pacStyleUsers += 1;
-  if (!pacStyleEl) {
-    const el = document.createElement("style");
-    el.dataset.mapPac = "1";
-    el.textContent =
-      ".pac-container{z-index:10000 !important;pointer-events:auto !important}" +
-      ".pac-item{cursor:pointer !important}";
-    document.head.appendChild(el);
-    pacStyleEl = el;
-  }
-  return () => {
-    pacStyleUsers -= 1;
-    if (pacStyleUsers > 0 || !pacStyleEl) return;
-    pacStyleEl.remove();
-    pacStyleEl = null;
-  };
-};
-
-/**
- * Attach a Google Places suggestion dropdown to one text input.
- *
- * `onPlace` fires only when the user picks a suggestion, which is the commit
- * point: half-typed text is not a location, so nothing is filtered on keystroke.
- * Free text is still handled separately by the Geocoder path, so both the header
- * search and the sidebar location filter get suggestions *and* accept an address
- * that has no matching suggestion.
- *
- * Country-restricted to IN: every service area is in Bengaluru, and without this
- * "Koramangala" resolves to a same-named street on another continent.
- */
-const usePlacesAutocomplete = (
-  inputRef: React.RefObject<HTMLInputElement | null>,
-  enabled: boolean,
-  onPlace: (place: { at: ZoneCoordinate; label: string }) => void,
-) => {
-  // Held in a ref so re-rendering with a new callback does not tear the widget
-  // down and re-attach it mid-typing, which drops the open dropdown.
-  const onPlaceRef = useRef(onPlace);
-  onPlaceRef.current = onPlace;
-  useEffect(() => {
-    const input = inputRef.current;
-    if (!enabled || !input) return;
-    if (!window.google?.maps?.places) return;
-
-    const releaseStyles = acquirePacStyles();
-    const ac = new window.google.maps.places.Autocomplete(input, {
-      componentRestrictions: { country: "IN" },
-      fields: ["formatted_address", "geometry"],
-    });
-    const listener = ac.addListener("place_changed", () => {
-      const place = ac.getPlace();
-      const loc = place?.geometry?.location;
-      if (!loc) return;
-      onPlaceRef.current({
-        at: { lat: loc.lat(), lng: loc.lng() },
-        label: place?.formatted_address ?? "Pinned location",
-      });
-    });
-    return () => {
-      if (listener) google.maps.event.removeListener(listener);
-      releaseStyles();
-    };
-  }, [enabled, inputRef]);
-};
 
 /**
  * My Maps-style categorical palette. Distinct enough to tell 66 polygons apart
@@ -298,6 +229,9 @@ export default function InstructorZoneMap() {
   // only rendered when an admin explicitly asks for them. Refetching on toggle
   // is free: zones-db caches the superset and applies the filter in memory.
   const [showRoughPolygons, setShowRoughPolygons] = useState(false);
+  // Grey "we don't serve here" shading (service_area_zones). On by default: it
+  // is the answer to "where do we operate at all".
+  const [showNonService, setShowNonService] = useState(true);
 
   /**
    * Which instructor statuses are SHOWN, as three independent toggles.
@@ -352,6 +286,24 @@ export default function InstructorZoneMap() {
         .filter((z) => z.ring.length >= 3);
     },
   });
+
+  const { data: serviceLayer } = useQuery({
+    queryKey: ["service-area-layer"],
+    queryFn: fetchServiceAreaLayer,
+    staleTime: 5 * 60 * 1000,
+  });
+  const hasServiceLayer = (serviceLayer?.serviceable.length ?? 0) > 0;
+  // The service-area editor (white/grey) is a separate mode from editing an
+  // instructor's polygon; only one of the two can be active at a time.
+  const [serviceEditorOpen, setServiceEditorOpen] = useState(false);
+  // "Measure distance": from an instructor's HOME to any place. `measureFrom`
+  // is the instructor whose home was picked; the other end is the page's
+  // search/drop pin, so the address search and a draggable pin both set it.
+  const [measureOn, setMeasureOn] = useState(false);
+  const [measureFrom, setMeasureFrom] = useState<MeasureFrom | null>(null);
+  const refreshServiceLayer = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ["service-area-layer"] });
+  }, [queryClient]);
 
   const { data: instructors = [] } = useQuery({
     queryKey: ["instructor-zone-roster"],
@@ -859,7 +811,10 @@ export default function InstructorZoneMap() {
    * reaches the map. See the `clickable: !firstDrawActive` options in the
    * overlay effect below. Live overlays are rebuilt when it flips.
    */
-  const firstDrawActive = Boolean(editingId) && draftRing.length < 3;
+  // While the service-area editor is open the instructor overlays are inert
+  // for the same reason: its draw clicks must reach the map, not open a card.
+  const firstDrawActive =
+    (Boolean(editingId) && draftRing.length < 3) || serviceEditorOpen;
 
   const [placeQuery, setPlaceQuery] = useState("");
   const [pin, setPin] = useState<{ at: ZoneCoordinate; label: string } | null>(
@@ -882,8 +837,14 @@ export default function InstructorZoneMap() {
 
   const mapDivRef = useRef<HTMLDivElement | null>(null);
   const mapWrapRef = useRef<HTMLDivElement | null>(null);
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const locationInputRef = useRef<HTMLInputElement | null>(null);
+  // The two address inputs, as elements in state (a state setter is a stable
+  // callback ref). The Places widget is keyed on the element, so it follows the
+  // sidebar filter's input, which is re-created every time the filter opens.
+  const [searchInputEl, setSearchInputEl] = useState<HTMLInputElement | null>(
+    null,
+  );
+  const [locationInputEl, setLocationInputEl] =
+    useState<HTMLInputElement | null>(null);
   const overlaysRef = useRef<
     Map<
       string,
@@ -964,6 +925,10 @@ export default function InstructorZoneMap() {
    * depending on it would tear down and rebuild all 66 polygons each time.
    */
   const onSelectRef = useRef<(id: string) => void>(() => {});
+  // Read by the overlay effect's click handlers (see onSelectRef): while
+  // measuring, a home dot starts a measurement instead of selecting.
+  const measureOnRef = useRef(false);
+  const startMeasureRef = useRef<(id: string) => void>(() => {});
 
   /**
    * Whether an inline edit is in progress, readable from callbacks that must not
@@ -1019,14 +984,16 @@ export default function InstructorZoneMap() {
     };
   }, [searchEngaged, locationFilterEngaged]);
 
-  usePlacesAutocomplete(
-    locationInputRef,
-    placesReady,
-    useCallback(({ at, label }) => {
-      setLocationFilter((f) => ({ ...f, query: label, active: true }));
-      setPin({ at, label });
-    }, []),
-  );
+  // Load `places` shortly after the map is ready instead of waiting for the
+  // first focus. Waiting for focus meant the library was still downloading while
+  // the first characters were typed, and a widget attached after typing only
+  // shows suggestions on the NEXT keystroke — the dropdown simply never appeared
+  // for a quick first search.
+  useEffect(() => {
+    if (!mapsLib) return;
+    const t = window.setTimeout(() => setSearchEngaged(true), 700);
+    return () => window.clearTimeout(t);
+  }, [mapsLib]);
 
   useEffect(() => {
     const el = mapDivRef.current;
@@ -1115,7 +1082,9 @@ export default function InstructorZoneMap() {
             // During a first draw the NEW boundary must own every click, so the
             // other polygons are made non-clickable — otherwise the admin can
             // only add points in the empty gaps between everyone's areas.
-            clickable: !firstDrawActive,
+            // While measuring, a click on an area must reach the map (it drops
+            // the other end), so areas are inert; home dots stay clickable.
+            clickable: !firstDrawActive && !measureOn,
             zIndex: selected ? 3 : 1,
           });
           polygon.addListener("click", () =>
@@ -1136,7 +1105,7 @@ export default function InstructorZoneMap() {
               strokeColor: selected ? SELECTED_STROKE : color,
               strokeWeight: selected ? 3 : 2,
               strokeOpacity: 0.95,
-              clickable: !firstDrawActive,
+              clickable: !firstDrawActive && !measureOn,
               zIndex: selected ? 3 : 1,
               icons: [
                 {
@@ -1180,7 +1149,9 @@ export default function InstructorZoneMap() {
             zIndex: selected ? 4 : 2,
           });
           marker.addListener("click", () =>
-            onSelectRef.current(z.instructorId),
+            measureOnRef.current
+              ? startMeasureRef.current(z.instructorId)
+              : onSelectRef.current(z.instructorId),
           );
         }
         if (polygon || marker || dash) {
@@ -1202,8 +1173,17 @@ export default function InstructorZoneMap() {
     statusById,
     locationMatchedIds,
     firstDrawActive,
+    measureOn,
     clearOverlays,
   ]);
+
+  // Grey "we do not serve here" shading, drawn by the helper shared with the
+  // Sales Dashboard map. Never clickable, so it cannot swallow clicks meant for
+  // the instructor polygons or the editors' vertex handles.
+  useEffect(() => {
+    if (!mapInstance || !mapsLib || !serviceLayer || !showNonService) return;
+    return drawServiceAreaMask(mapsLib, mapInstance, serviceLayer);
+  }, [mapInstance, mapsLib, serviceLayer, showNonService]);
 
   useEffect(
     () => () => {
@@ -1413,6 +1393,8 @@ export default function InstructorZoneMap() {
    */
   const startInlineEdit = useCallback(
     (id: string, name: string) => {
+      // One editor at a time: the service-area editor owns the map while open.
+      if (serviceEditorOpen) return;
       const existing = zoneByInstructor.get(id);
       const initial = existing ? closeRing(existing.ring) : null;
       setEditingId(id);
@@ -1425,7 +1407,7 @@ export default function InstructorZoneMap() {
       setDraft(initial);
       setSelectedId(id);
     },
-    [zoneByInstructor],
+    [zoneByInstructor, serviceEditorOpen],
   );
 
   const startDrawing = useCallback(
@@ -1811,7 +1793,7 @@ export default function InstructorZoneMap() {
     pinMarkerRef.current?.setMap(null);
     pinMarkerRef.current = null;
     if (!pin) return;
-    pinMarkerRef.current = new mapsLib.Marker({
+    const marker = new mapsLib.Marker({
       map,
       position: pin.at,
       title: pin.label,
@@ -1820,6 +1802,18 @@ export default function InstructorZoneMap() {
       draggable: !firstDrawActive,
       clickable: !firstDrawActive,
     });
+    // Dropping the pin somewhere new re-checks who covers it and re-measures.
+    // (The pin was draggable but nothing listened, so a drag left the app state
+    // on the old spot while the marker sat on the new one.)
+    marker.addListener("dragend", (e: google.maps.MapMouseEvent) => {
+      if (!e.latLng) return;
+      const at = { lat: e.latLng.lat(), lng: e.latLng.lng() };
+      setPin({
+        at,
+        label: `Pin ${at.lat.toFixed(5)}, ${at.lng.toFixed(5)}`,
+      });
+    });
+    pinMarkerRef.current = marker;
   }, [mapInstance, mapsLib, pin, firstDrawActive]);
 
   /**
@@ -1889,16 +1883,49 @@ export default function InstructorZoneMap() {
    * looking empty. Falls back to the pin when nothing covers it, so an uncovered
    * address still shows where it is.
    */
+  const commitLocation = useCallback(
+    (hit: { at: ZoneCoordinate; label: string }) => {
+      const covering = zones.filter(
+        (z) => !isCompanyInstructor(z.name) && pointInPolygon(hit.at, z.ring),
+      );
+      setPin(hit);
+      setLocationFilter((f) => ({ ...f, active: true }));
+      fitTo(covering.length ? covering.flatMap((z) => z.ring) : [hit.at]);
+    },
+    [fitTo, zones],
+  );
+
   const applyLocationFilter = useCallback(async () => {
     const hit = await geocodeToPin(locationFilter.query);
     if (!hit) return;
-    const covering = zones.filter(
-      (z) => !isCompanyInstructor(z.name) && pointInPolygon(hit.at, z.ring),
-    );
-    setPin(hit);
-    setLocationFilter((f) => ({ ...f, active: true }));
-    fitTo(covering.length ? covering.flatMap((z) => z.ring) : [hit.at]);
-  }, [geocodeToPin, locationFilter.query, fitTo, zones]);
+    commitLocation(hit);
+  }, [geocodeToPin, locationFilter.query, commitLocation]);
+
+  // Google suggestions for BOTH address boxes. Picking one is the same commit as
+  // typing the address and pressing Search/Go, so the two paths cannot drift.
+  usePlacesAutocomplete(
+    searchInputEl,
+    placesReady,
+    useCallback(
+      ({ at, label }) => {
+        setPlaceQuery(label);
+        setPin({ at, label });
+        fitTo([at]);
+      },
+      [fitTo],
+    ),
+  );
+  usePlacesAutocomplete(
+    locationInputEl,
+    placesReady,
+    useCallback(
+      (hit) => {
+        setLocationFilter((f) => ({ ...f, query: hit.label }));
+        commitLocation(hit);
+      },
+      [commitLocation],
+    ),
+  );
 
   /**
    * Stop filtering by location, and take the pin with it.
@@ -2141,6 +2168,51 @@ export default function InstructorZoneMap() {
   // on them would be a jarring jump.
   onSelectRef.current = (id) => selectZone(id, false);
 
+  /**
+   * Start measuring from this instructor's HOME (their registered address,
+   * `Instructor.latitude/longitude`). Always the real home, never the polygon
+   * centre the dot falls back to when no home is on file: a distance from the
+   * middle of someone's service area would be a plausible-looking wrong number.
+   */
+  const startMeasure = useCallback(
+    (id: string) => {
+      const home = rosterPointById.get(id);
+      const name =
+        instructors.find((i) => i.id === id)?.name ??
+        zoneByInstructor.get(id)?.name ??
+        "Instructor";
+      if (!home) {
+        toast({
+          title: "No home location on file",
+          description: `${name} has no registered home coordinates, so there is nothing to measure from. Add them in Instructor Management.`,
+          variant: "destructive",
+        });
+        return;
+      }
+      setMeasureFrom({ id, name, at: home });
+      setMeasureOn(true);
+    },
+    [rosterPointById, instructors, zoneByInstructor, toast],
+  );
+  measureOnRef.current = measureOn;
+  startMeasureRef.current = startMeasure;
+
+  const closeMeasure = useCallback(() => {
+    setMeasureOn(false);
+    setMeasureFrom(null);
+  }, []);
+
+  // One map tool at a time: starting an instructor edit or the service-area
+  // editor turns measuring off (their clicks must reach the map).
+  useEffect(() => {
+    if (editingId || serviceEditorOpen) closeMeasure();
+  }, [editingId, serviceEditorOpen, closeMeasure]);
+
+  const measureTo = useMemo(
+    () => (pin ? { at: pin.at, label: pin.label } : null),
+    [pin],
+  );
+
   // A map click selects a layer the sidebar may be scrolled far away from, so
   // bring that row into view. Scrolling runs for sidebar-originated selections
   // too, but they are already visible, making it a no-op.
@@ -2187,7 +2259,7 @@ export default function InstructorZoneMap() {
         <div className="relative ml-1 flex min-w-0 max-w-xl flex-1 items-center">
           <Search className="pointer-events-none absolute left-2 h-4 w-4 shrink-0 text-muted-foreground" />
           <Input
-            ref={searchInputRef}
+            ref={setSearchInputEl}
             value={placeQuery}
             onFocus={() => setSearchEngaged(true)}
             onChange={(e) => {
@@ -2341,7 +2413,7 @@ export default function InstructorZoneMap() {
                         className="space-y-1.5 rounded-md border p-2"
                       >
                         <Input
-                          ref={locationInputRef}
+                          ref={setLocationInputEl}
                           value={locationFilter.query}
                           onFocus={() => setLocationFilterEngaged(true)}
                           onChange={(e) => {
@@ -2437,37 +2509,144 @@ export default function InstructorZoneMap() {
               <button>, and a `<label for>` pointing at a button is not a
               reliable accessible-name association, so the control would be
               announced as an unlabelled switch. */}
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-normal">Service areas</span>
+                    {/* ---- Instructors ---- */}
+                    <p className="pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                      Instructors
+                    </p>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="text-xs font-normal">
+                          Coverage areas
+                        </span>
+                        <p className="text-[11px] text-muted-foreground">
+                          Each instructor&apos;s own area, in their colour.
+                        </p>
+                      </div>
                       <Switch
-                        aria-label="Service areas"
+                        aria-label="Instructor areas"
                         checked={showPolygons}
                         onCheckedChange={setShowPolygons}
+                        className="mt-0.5 shrink-0"
                       />
                     </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-normal">
-                        Instructor markers
-                      </span>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="text-xs font-normal">
+                          Home markers
+                        </span>
+                        <p className="text-[11px] text-muted-foreground">
+                          A dot where each instructor lives.
+                        </p>
+                      </div>
                       <Switch
                         aria-label="Instructor markers"
                         checked={showMarkers}
                         onCheckedChange={setShowMarkers}
+                        className="mt-0.5 shrink-0"
                       />
                     </div>
                     {/* Rough polygons are provisional onboarding boundaries, not
                 serviceability zones, so they are opt-in. They are stored in the
                 same table as real areas and are only ever excluded from sales
                 matching, never deleted. */}
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-normal">
-                        Rough polygons
-                      </span>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="text-xs font-normal">
+                          Rough areas ({roughCount})
+                        </span>
+                        <p className="text-[11px] text-muted-foreground">
+                          Unverified outlines. Never used for matching.
+                        </p>
+                      </div>
                       <Switch
                         aria-label="Show Rough Polygons"
                         checked={showRoughPolygons}
                         onCheckedChange={setShowRoughPolygons}
+                        className="mt-0.5 shrink-0"
                       />
+                    </div>
+
+                    {/* ---- Company service area (white / grey) ----
+                Where Lane offers service at all, independent of any one
+                instructor. Stored in service_area_zones; edited with its own
+                button so it is never confused with an instructor's polygon. */}
+                    <div
+                      className="mt-1 space-y-1.5 border-t pt-2"
+                      data-testid="service-area-group"
+                    >
+                      <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                        Our service area
+                      </p>
+                      <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+                        <span className="flex items-center gap-1">
+                          <span className="inline-block h-3 w-3 rounded-sm border bg-white" />
+                          We serve
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <span className="inline-block h-3 w-3 rounded-sm bg-gray-500/60" />
+                          We don&apos;t serve
+                        </span>
+                      </div>
+                      {hasServiceLayer ? (
+                        <>
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <span className="text-xs font-normal">
+                                Shade areas we don&apos;t serve
+                              </span>
+                              <p
+                                className="text-[11px] text-muted-foreground"
+                                data-testid="non-service-note"
+                              >
+                                {serviceLayer?.serviceable.length} serviceable
+                                area
+                                {serviceLayer?.serviceable.length === 1
+                                  ? ""
+                                  : "s"}
+                                {serviceLayer &&
+                                serviceLayer.excluded.length > 0
+                                  ? `, ${serviceLayer.excluded.length} excluded pocket${serviceLayer.excluded.length === 1 ? "" : "s"}`
+                                  : ""}
+                                .
+                              </p>
+                            </div>
+                            <Switch
+                              aria-label="Shade non-service areas"
+                              checked={showNonService}
+                              onCheckedChange={setShowNonService}
+                              className="mt-0.5 shrink-0"
+                            />
+                          </div>
+                        </>
+                      ) : (
+                        <p
+                          className="text-[11px] text-muted-foreground"
+                          data-testid="service-area-empty"
+                        >
+                          No service area has been drawn yet.
+                        </p>
+                      )}
+                      <Button
+                        size="sm"
+                        variant={serviceEditorOpen ? "secondary" : "outline"}
+                        className="w-full"
+                        data-testid="service-area-edit-open"
+                        aria-pressed={serviceEditorOpen}
+                        disabled={Boolean(editingId)}
+                        title={
+                          editingId
+                            ? "Finish or cancel the instructor edit first"
+                            : undefined
+                        }
+                        onClick={() => setServiceEditorOpen((v) => !v)}
+                      >
+                        <Pencil className="mr-1.5 h-3.5 w-3.5" />
+                        {serviceEditorOpen
+                          ? "Close service-area editor"
+                          : hasServiceLayer
+                            ? "Edit service area"
+                            : "Draw service area"}
+                      </Button>
                     </div>
                     {showRoughPolygons ? (
                       <p className="text-[11px] text-muted-foreground">
@@ -2489,7 +2668,7 @@ export default function InstructorZoneMap() {
                 `allRosterZones`. */}
                     <div className="mt-1 space-y-1 border-t pt-2">
                       <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                        Show instructors
+                        Show instructors by status
                       </p>
                       {INSTRUCTOR_STATUSES.map(({ value: status }) => {
                         const count = instructors.filter(
@@ -2773,6 +2952,32 @@ export default function InstructorZoneMap() {
 
           <div ref={mapDivRef} className="absolute inset-0" />
 
+          {measureOn ? (
+            <DistanceMeasure
+              map={mapInstance}
+              mapsLib={mapsLib}
+              from={measureFrom}
+              to={measureTo}
+              onSetTo={(to) => setPin(to)}
+              onClear={() => {
+                setMeasureFrom(null);
+                // The pin is shared with the location filter: only drop it when
+                // that filter is not using it.
+                if (!locationFilter.active) setPin(null);
+              }}
+              onClose={closeMeasure}
+            />
+          ) : null}
+
+          <ServiceAreaEditor
+            map={mapInstance}
+            mapsLib={mapsLib}
+            layer={serviceLayer}
+            open={serviceEditorOpen}
+            onClose={() => setServiceEditorOpen(false)}
+            onChanged={refreshServiceLayer}
+          />
+
           {editingId ? (
             <div
               className="absolute left-1/2 top-3 z-20 w-[min(30rem,calc(100%-1.5rem))] -translate-x-1/2 rounded-md border bg-background p-2 shadow-md"
@@ -3020,6 +3225,20 @@ export default function InstructorZoneMap() {
                   {selectedCard.hasZone ? "Edit points" : "Draw area"}
                 </Button>
               </div>
+              {/* Works for an instructor with no drawn area too (the card opens
+                  from the sidebar's "Not mapped" list), where there is no home
+                  dot to click. */}
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-2 w-full"
+                data-testid="info-card-measure"
+                disabled={Boolean(editingId) || serviceEditorOpen}
+                onClick={() => startMeasure(selectedCard.instructorId)}
+              >
+                <Ruler className="mr-1.5 h-3.5 w-3.5" />
+                Measure distance from home
+              </Button>
               {/* Promote, only for a rough boundary. The one irreversible-feeling
                   action on the card, so it is not tucked into the edit flow: Ops
                   review a rough polygon, decide it is right, and promote it here

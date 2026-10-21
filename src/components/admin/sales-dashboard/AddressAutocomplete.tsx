@@ -30,6 +30,14 @@ export const AddressAutocomplete = memo(
       null,
     );
     const [internalValue, setInternalValue] = useState(value);
+    // The parent usually passes a fresh `onChange` every render. Reading it
+    // through a ref keeps the Autocomplete effect from re-running (and
+    // stacking a new Google widget on the same <input>) on every keystroke.
+    // Stacked widgets made the real selection land on an instance with no
+    // listener, so the picked suggestion was dropped and React restored the
+    // typed text.
+    const onChangeRef = useRef(onChange);
+    onChangeRef.current = onChange;
     // The Maps bootstrap no longer requests `places` (see LIBRARIES in
     // utils/googleMaps.ts), so `google.maps.places` is undefined until this
     // sub-library is imported. Constructing Autocomplete without it threw
@@ -76,23 +84,32 @@ export const AddressAutocomplete = memo(
       }
       autocompleteRef.current = autocomplete;
 
-      const listener = autocomplete.addListener("place_changed", () => {
+      autocomplete.addListener("place_changed", () => {
         const place = autocompleteRef.current?.getPlace();
+        // Google writes the suggestion the user clicked (name + full address,
+        // exactly what the dropdown showed) into the input before this event.
+        // Prefer that over formatted_address, which omits the place name.
+        const shown = inputRef.current?.value.trim() ?? "";
+        const addr =
+          shown.includes(",") || !place?.formatted_address
+            ? shown
+            : place.formatted_address;
+        if (!addr) return;
 
-        if (place?.geometry?.location) {
-          const addr = place.formatted_address || "";
-          const lat = place.geometry.location.lat();
-          const lng = place.geometry.location.lng();
-
-          setInternalValue(addr);
-          onChange(addr, lat, lng);
-        }
+        const loc = place?.geometry?.location;
+        setInternalValue(addr);
+        onChangeRef.current(
+          addr,
+          loc ? loc.lat() : null,
+          loc ? loc.lng() : null,
+        );
       });
 
       return () => {
-        if (listener) google.maps.event.removeListener(listener);
+        google.maps.event.clearInstanceListeners(autocomplete);
+        autocompleteRef.current = null;
       };
-    }, [places, onChange]);
+    }, [places]);
 
     const handleManualTyping = (e: React.ChangeEvent<HTMLInputElement>) => {
       const val = e.target.value;
