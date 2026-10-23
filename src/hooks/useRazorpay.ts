@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 
 import { supabase } from "@/lib/supabaseClient";
+import { functionErrorReason } from "@/utils/functionError";
 
 declare global {
   interface Window {
@@ -112,7 +113,10 @@ export function useRazorpay() {
         );
 
         if (invokeError) {
-          throw new Error(invokeError.message);
+          // supabase-js only says "non-2xx"; the real reason is in the body.
+          throw new Error(
+            (await functionErrorReason(invokeError)) || invokeError.message,
+          );
         }
 
         if (!data.success) {
@@ -146,7 +150,10 @@ export function useRazorpay() {
         );
 
         if (invokeError) {
-          throw new Error(invokeError.message);
+          // supabase-js only says "non-2xx"; the real reason is in the body.
+          throw new Error(
+            (await functionErrorReason(invokeError)) || invokeError.message,
+          );
         }
 
         if (!data.success) {
