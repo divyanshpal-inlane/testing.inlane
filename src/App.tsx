@@ -261,12 +261,6 @@ export default function App() {
                 <Route
                   path="learner-ll-details"
                   element={<LearnerLLDetails />}
-                  path="/instructor/earnings"
-                  element={
-                    <ProtectedInstructorRoute>
-                      <EarningsHome />
-                    </ProtectedInstructorRoute>
-                  }
                 />
                 <Route
                   path="/instructor/earnings/more"
