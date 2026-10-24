@@ -2956,6 +2956,7 @@ export default function InstructorZoneMap() {
             <DistanceMeasure
               map={mapInstance}
               mapsLib={mapsLib}
+              placesReady={placesReady}
               from={measureFrom}
               to={measureTo}
               onSetTo={(to) => setPin(to)}

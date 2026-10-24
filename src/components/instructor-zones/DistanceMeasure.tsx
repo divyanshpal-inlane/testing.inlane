@@ -1,5 +1,5 @@
-import { Car, Home, Loader2, MapPin, Ruler, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Car, Home, Loader2, MapPin, Ruler, Search, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,9 +9,10 @@ import {
   formatKm,
   haversineKm,
   type LatLng,
-  parseCoordinates,
   type RoadRoute,
 } from "@/lib/map-distance";
+
+import { usePlacesAutocomplete } from "./usePlacesAutocomplete";
 
 export interface MeasureFrom {
   id: string;
@@ -28,9 +29,11 @@ export interface MeasureTo {
 interface DistanceMeasureProps {
   map: google.maps.Map | null;
   mapsLib: typeof google.maps | null;
+  /** True once the Places library is loaded (address suggestions). */
+  placesReady: boolean;
   from: MeasureFrom | null;
   to: MeasureTo | null;
-  /** The other end: a map click, pasted coordinates (search/drag live upstream). */
+  /** The other end: a searched address or a map click (the pin's drag lives upstream). */
   onSetTo: (to: MeasureTo) => void;
   /** Forget both ends. */
   onClear: () => void;
@@ -62,17 +65,22 @@ type RoadState =
 export function DistanceMeasure({
   map,
   mapsLib,
+  placesReady,
   from,
   to,
   onSetTo,
   onClear,
   onClose,
 }: DistanceMeasureProps) {
-  const [coordText, setCoordText] = useState("");
-  const [coordNote, setCoordNote] = useState<{
-    kind: "error" | "info";
-    text: string;
-  } | null>(null);
+  // Address box (Google suggestions). The widget is attached to the input
+  // ELEMENT, so it follows it if React re-creates it.
+  const [inputEl, setInputEl] = useState<HTMLInputElement | null>(null);
+  const [addressText, setAddressText] = useState("");
+  const [addressNote, setAddressNote] = useState<string | null>(null);
+  const [searching, setSearching] = useState(false);
+  // Readable address for a pin that was dropped or dragged (its own label is
+  // just "Dropped pin" / coordinates).
+  const [resolvedLabel, setResolvedLabel] = useState<string | null>(null);
   const [road, setRoad] = useState<RoadState>({ status: "idle" });
 
   const straightKm = from && to ? haversineKm(from.at, to.at) : null;
@@ -254,27 +262,78 @@ export function DistanceMeasure({
     [],
   );
 
-  // ---- coordinate input ---------------------------------------------------------
-  const applyCoordinates = () => {
-    const parsed = parseCoordinates(coordText);
-    if (!parsed.ok) {
-      setCoordNote({ kind: "error", text: parsed.error });
+  // ---- address search ------------------------------------------------------------
+  // Picking a Google suggestion drops the pin there. The pin is the page's own
+  // marker, which is draggable, so it can be fine-tuned by hand afterwards.
+  usePlacesAutocomplete(
+    inputEl,
+    placesReady,
+    useCallback(({ at, label }) => {
+      setAddressText(label);
+      setAddressNote(null);
+      onSetToRef.current({ at, label });
+    }, []),
+  );
+
+  // Enter without picking a suggestion: geocode the typed text instead.
+  const searchTypedAddress = async () => {
+    const text = addressText.trim();
+    if (!text || !mapsLib?.Geocoder) return;
+    setSearching(true);
+    setAddressNote(null);
+    try {
+      const res = await new mapsLib.Geocoder().geocode({
+        address: text,
+        componentRestrictions: { country: "IN" },
+      });
+      const hit = res.results?.[0];
+      if (!hit?.geometry?.location) {
+        setAddressNote("Couldn't find that address. Pick a suggestion.");
+        return;
+      }
+      const at = {
+        lat: hit.geometry.location.lat(),
+        lng: hit.geometry.location.lng(),
+      };
+      setAddressText(hit.formatted_address);
+      onSetToRef.current({ at, label: hit.formatted_address });
+    } catch {
+      setAddressNote("Couldn't find that address. Pick a suggestion.");
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  // A pin set by a map click or a drag only carries generic text; look up its
+  // address so the card (and the search box) say where it is.
+  const GENERIC_LABEL = /^(Dropped pin|Pin |-?\d+\.\d+,\s*-?\d+\.\d+)/;
+  useEffect(() => {
+    setResolvedLabel(null);
+    if (!to) {
+      setAddressText("");
       return;
     }
-    onSetTo({
-      at: parsed.at,
-      label: `${parsed.at.lat.toFixed(5)}, ${parsed.at.lng.toFixed(5)}`,
-    });
-    setCoordNote(
-      parsed.swapped
-        ? {
-            kind: "info",
-            text: "That looked like longitude, latitude — it was flipped for you.",
-          }
-        : null,
-    );
-    setCoordText("");
-  };
+    if (!GENERIC_LABEL.test(to.label)) {
+      setAddressText(to.label);
+      return;
+    }
+    if (!mapsLib?.Geocoder) return;
+    let live = true;
+    void new mapsLib.Geocoder()
+      .geocode({ location: to.at })
+      .then((res) => {
+        const addr = res.results?.[0]?.formatted_address;
+        if (!live || !addr) return;
+        setResolvedLabel(addr);
+        setAddressText(addr);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+    // re-run only when the pin moves
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapsLib, toKey]);
 
   return (
     <div
@@ -324,11 +383,12 @@ export function DistanceMeasure({
             <dt className="text-muted-foreground">To</dt>
             <dd className="font-medium">
               {to ? (
-                <span title={to.label}>{to.label}</span>
+                <span title={resolvedLabel ?? to.label}>
+                  {resolvedLabel ?? to.label}
+                </span>
               ) : (
                 <span className="font-normal text-muted-foreground">
-                  Search an address in the top bar, click the map, or paste
-                  coordinates below.
+                  Search an address below or click the map to drop a pin.
                 </span>
               )}
             </dd>
@@ -337,46 +397,58 @@ export function DistanceMeasure({
       </dl>
 
       <div className="mt-2 flex gap-2">
-        <Input
-          value={coordText}
-          onChange={(e) => {
-            setCoordText(e.target.value);
-            setCoordNote(null);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              applyCoordinates();
-            }
-          }}
-          placeholder="Paste coordinates: 12.9716, 77.5946"
-          aria-label="Paste coordinates"
-          data-testid="measure-coords-input"
-          className="h-8 text-xs"
-        />
+        <div className="relative flex-1">
+          <Search className="pointer-events-none absolute left-2 top-2 h-3.5 w-3.5 text-muted-foreground" />
+          <Input
+            ref={setInputEl}
+            value={addressText}
+            onChange={(e) => {
+              setAddressText(e.target.value);
+              setAddressNote(null);
+            }}
+            onKeyDown={(e) => {
+              // The editor can sit inside a <form>: Enter must never submit it.
+              if (e.key === "Enter") {
+                e.preventDefault();
+                // A highlighted suggestion is handled by Google; this is the
+                // fallback for typed text with nothing picked.
+                if (!document.querySelector(".pac-item-selected")) {
+                  void searchTypedAddress();
+                }
+              }
+            }}
+            placeholder="Search an address (Google suggestions)"
+            aria-label="Search an address"
+            autoComplete="off"
+            data-testid="measure-address-input"
+            className="h-8 pl-7 text-xs"
+          />
+        </div>
         <Button
           size="sm"
           variant="secondary"
-          onClick={applyCoordinates}
-          disabled={!coordText.trim()}
-          data-testid="measure-coords-set"
+          onClick={() => void searchTypedAddress()}
+          disabled={!addressText.trim() || searching}
+          data-testid="measure-address-search"
         >
-          Set
+          {searching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Go"}
         </Button>
       </div>
-      {coordNote ? (
+      {addressNote ? (
         <p
-          role={coordNote.kind === "error" ? "alert" : "status"}
-          className={
-            coordNote.kind === "error"
-              ? "mt-1 text-[11px] font-medium text-destructive"
-              : "mt-1 text-[11px] text-muted-foreground"
-          }
-          data-testid="measure-coords-note"
+          role="alert"
+          className="mt-1 text-[11px] font-medium text-destructive"
+          data-testid="measure-address-note"
         >
-          {coordNote.text}
+          {addressNote}
         </p>
-      ) : null}
+      ) : (
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          {to
+            ? "Drag the pin on the map to fine-tune the spot."
+            : "Pick a suggestion to drop a pin you can drag."}
+        </p>
+      )}
 
       {straightKm !== null ? (
         <div
@@ -430,8 +502,9 @@ export function DistanceMeasure({
           size="sm"
           variant="ghost"
           onClick={() => {
-            setCoordText("");
-            setCoordNote(null);
+            setAddressText("");
+            setAddressNote(null);
+            setResolvedLabel(null);
             onClear();
           }}
           disabled={!from && !to}
