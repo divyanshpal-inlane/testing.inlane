@@ -48,7 +48,6 @@ import DLTestDates from "@/routes/admin/DLTestDates";
 import DLTestSlots from "@/routes/admin/DLTestSlots";
 import GameAnalytics from "@/routes/admin/GameAnalytics";
 import InstructorOnboardingPage from "@/routes/admin/instructor-onboarding";
-import InstructorApprovalPage from "@/routes/admin/instructor-approval";
 import InstructorEarnings from "@/routes/admin/InstructorEarnings";
 import InstructorMatrix from "@/routes/admin/InstructorMatrix";
 import InstructorsManagement, {
@@ -250,17 +249,12 @@ export default function App() {
                   }
                 />
                 <Route
-                  path="instructors/:id"
-                  element={<InstructorSchedulePage />}
-                />
-                <Route
-                  path="instructor-approval/:id"
-                  element={<InstructorApprovalPage />}
-                />
-
-                <Route
-                  path="learner-ll-details"
-                  element={<LearnerLLDetails />}
+                  path="/instructor/earnings"
+                  element={
+                    <ProtectedInstructorRoute>
+                      <EarningsHome />
+                    </ProtectedInstructorRoute>
+                  }
                 />
                 <Route
                   path="/instructor/earnings/more"
