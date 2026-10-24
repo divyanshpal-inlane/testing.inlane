@@ -228,6 +228,13 @@ export const ADMIN_PERMISSIONS = {
     description: "View and edit instructor service-area polygons on a map",
     route: "/admin/instructor-zone-map",
   },
+  sales_issue_tickets: {
+    key: "sales_issue_tickets",
+    label: "Escalate Issue Tracker",
+    description:
+      "View, search and update escalated issue tickets, with analytics",
+    route: "/admin/sales-issue-tickets",
+  },
 } as const;
 
 export type PermissionKey = keyof typeof ADMIN_PERMISSIONS;

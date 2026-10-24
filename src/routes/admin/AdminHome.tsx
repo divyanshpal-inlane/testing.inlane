@@ -31,8 +31,9 @@ import {
   UserX,
   Wallet,
   Wrench,
+  X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -323,6 +324,14 @@ const featureConfig: Record<
     link: "/admin/instructor-zone-map",
     color: "text-indigo-500",
   },
+  sales_issue_tickets: {
+    title: "Escalate Issue Tracker",
+    description:
+      "View, search and update escalated issue tickets, with analytics",
+    icon: LifeBuoy,
+    link: "/admin/sales-issue-tickets",
+    color: "text-amber-500",
+  },
 } as const;
 
 // Note: view_unmasked_phone_numbers controls visibility of sensitive data but doesn't have a dashboard feature card
@@ -343,7 +352,21 @@ export default function AdminHome() {
     newPassword: "",
     confirmPassword: "",
   });
+  const [moduleQuery, setModuleQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  // Ctrl/Cmd+K jumps to the module search.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const handlePasswordChange = async (e: React.FormEvent) => {
@@ -491,6 +514,39 @@ export default function AdminHome() {
     })
     .filter((feature) => feature !== undefined);
 
+  // Module search: matches title or description, case-insensitive.
+  const normalizedQuery = moduleQuery.trim().toLowerCase();
+  const matchesQuery = (...texts: string[]) =>
+    !normalizedQuery ||
+    texts.some((t) => t.toLowerCase().includes(normalizedQuery));
+  const visibleFeatures = allowedFeatures.filter((f) =>
+    matchesQuery(f.title, f.description),
+  );
+  const showAdminMgmt = matchesQuery(
+    "Admin Management",
+    "Create and manage admin accounts and permissions",
+  );
+  const showUserMgmt = matchesQuery(
+    "User Management",
+    "Create and manage users with specific permissions",
+  );
+  // "Escalate an Issue" is for every logged-in user, no permission needed.
+  const showReportIssue = matchesQuery(
+    "Escalate an Issue",
+    "Raise an issue ticket for the Support team",
+  );
+  const showChangePassword = matchesQuery(
+    "Change Password",
+    "Update your account password for enhanced security",
+  );
+  const noModuleMatches =
+    !!normalizedQuery &&
+    visibleFeatures.length === 0 &&
+    !(currentAdmin?.is_super_admin && showAdminMgmt) &&
+    !(currentAdmin?.is_admin && showUserMgmt) &&
+    !showReportIssue &&
+    !showChangePassword;
+
   console.log(
     "[AdminHome] Final allowedFeatures count:",
     allowedFeatures.length,
@@ -541,9 +597,66 @@ export default function AdminHome() {
           </Button>
         </div>
 
+        {/* Module search */}
+        <form
+          role="search"
+          className="relative mb-6"
+          onSubmit={(e) => {
+            e.preventDefault();
+            // Enter opens the first matching module.
+            if (normalizedQuery && visibleFeatures[0]) {
+              navigate(visibleFeatures[0].link);
+            }
+          }}
+        >
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            ref={searchRef}
+            type="search"
+            value={moduleQuery}
+            onChange={(e) => setModuleQuery(e.target.value)}
+            placeholder="Search modules…  (Ctrl+K)"
+            aria-label="Search modules"
+            className="bg-white pl-9 pr-20"
+          />
+          {moduleQuery && (
+            <button
+              type="button"
+              aria-label="Clear search"
+              onClick={() => {
+                setModuleQuery("");
+                searchRef.current?.focus();
+              }}
+              className="absolute right-12 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
+          <Button
+            type="submit"
+            size="sm"
+            variant="ghost"
+            aria-label="Search"
+            className="absolute right-1 top-1/2 h-7 -translate-y-1/2 px-2"
+          >
+            <Search className="h-4 w-4" />
+          </Button>
+        </form>
+
         <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-2">
+          {noModuleMatches && (
+            <Card className="col-span-2">
+              <CardHeader>
+                <CardTitle>No modules found</CardTitle>
+                <CardDescription>
+                  Nothing matches &ldquo;{moduleQuery.trim()}&rdquo;. Try a
+                  different word.
+                </CardDescription>
+              </CardHeader>
+            </Card>
+          )}
           {/* Super Admin Management - only for super admins */}
-          {currentAdmin?.is_super_admin && (
+          {currentAdmin?.is_super_admin && showAdminMgmt && (
             <Card className="border-purple-200 transition-all hover:shadow-lg">
               <Link to="/admin/admin-management">
                 <CardHeader>
@@ -571,7 +684,7 @@ export default function AdminHome() {
           )}
 
           {/* User Management - for admins and super admins */}
-          {currentAdmin?.is_admin && (
+          {currentAdmin?.is_admin && showUserMgmt && (
             <Card className="border-blue-200 transition-all hover:shadow-lg">
               <Link to="/admin/user-management">
                 <CardHeader>
@@ -597,7 +710,7 @@ export default function AdminHome() {
           )}
 
           {/* Feature cards based on permissions */}
-          {allowedFeatures.map((feature) => (
+          {visibleFeatures.map((feature) => (
             <Card
               key={feature.title}
               className="transition-all hover:shadow-lg"
@@ -653,34 +766,64 @@ export default function AdminHome() {
             </Card>
           )}
 
+          {/* Escalate an Issue - visible to every logged-in user */}
+          {showReportIssue && (
+            <Card className="border-rose-200 transition-all hover:shadow-lg">
+              <Link to="/admin/report-sales-issue">
+                <CardHeader>
+                  <div className="flex items-center gap-4">
+                    <div className="rounded-lg bg-rose-100 p-2 text-rose-600">
+                      <Bug size={24} />
+                    </div>
+                    <div>
+                      <CardTitle className="text-xl">
+                        Escalate an Issue
+                      </CardTitle>
+                      <CardDescription className="mt-1">
+                        Raise an issue ticket for the Support team
+                      </CardDescription>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <Button className="w-full" variant="ghost">
+                    Escalate an Issue
+                  </Button>
+                </CardContent>
+              </Link>
+            </Card>
+          )}
+
           {/* Change Password - visible to everyone (at the end) */}
           <Dialog
             open={openPasswordDialog}
             onOpenChange={setOpenPasswordDialog}
           >
-            <Card
-              className="cursor-pointer border-blue-200 transition-all hover:shadow-lg"
-              onClick={() => setOpenPasswordDialog(true)}
-            >
-              <CardHeader>
-                <div className="flex items-center gap-4">
-                  <div className="rounded-lg bg-blue-100 p-2 text-blue-600">
-                    <Lock size={24} />
+            {showChangePassword && (
+              <Card
+                className="cursor-pointer border-blue-200 transition-all hover:shadow-lg"
+                onClick={() => setOpenPasswordDialog(true)}
+              >
+                <CardHeader>
+                  <div className="flex items-center gap-4">
+                    <div className="rounded-lg bg-blue-100 p-2 text-blue-600">
+                      <Lock size={24} />
+                    </div>
+                    <div>
+                      <CardTitle className="text-xl">Change Password</CardTitle>
+                      <CardDescription className="mt-1">
+                        Update your account password for enhanced security
+                      </CardDescription>
+                    </div>
                   </div>
-                  <div>
-                    <CardTitle className="text-xl">Change Password</CardTitle>
-                    <CardDescription className="mt-1">
-                      Update your account password for enhanced security
-                    </CardDescription>
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent>
-                <Button className="w-full" variant="ghost">
-                  Change Password
-                </Button>
-              </CardContent>
-            </Card>
+                </CardHeader>
+                <CardContent>
+                  <Button className="w-full" variant="ghost">
+                    Change Password
+                  </Button>
+                </CardContent>
+              </Card>
+            )}
 
             {/* Change Password Dialog */}
             <DialogContent className="sm:max-w-[425px]">

@@ -95,7 +95,9 @@ import LeaveManagement from "./routes/admin/LeaveManagement";
 import NoShowManagement from "./routes/admin/NoShowManagement";
 import NotificationManagement from "./routes/admin/NotificationManagement";
 import PaymentTracker from "./routes/admin/PaymentTracker";
+import ReportSalesIssue from "./routes/admin/ReportSalesIssue";
 import SafetyMonitoring from "./routes/admin/SafetyMonitoring";
+import SalesIssueTickets from "./routes/admin/SalesIssueTickets";
 import SupportTickets from "./routes/admin/SupportTickets";
 import TentativeSchedules2 from "./routes/admin/TentativeManagement";
 import OnboardingQuestions from "./routes/createSchedule/onboardingQuestions";
@@ -437,6 +439,14 @@ export default function App() {
                   />
                   <Route path="no-shows" element={<NoShowManagement />} />
                   <Route path="support-tickets" element={<SupportTickets />} />
+                  <Route
+                    path="report-sales-issue"
+                    element={<ReportSalesIssue />}
+                  />
+                  <Route
+                    path="sales-issue-tickets"
+                    element={<SalesIssueTickets />}
+                  />
                   <Route
                     path="safety-monitoring"
                     element={<SafetyMonitoring />}
