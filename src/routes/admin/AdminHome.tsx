@@ -514,31 +514,17 @@ export default function AdminHome() {
     })
     .filter((feature) => feature !== undefined);
 
-  // Module search: matches title or description, case-insensitive.
+  // Module search: matches the module's main heading (title) only,
+  // case-insensitive. Descriptions are deliberately not searched.
   const normalizedQuery = moduleQuery.trim().toLowerCase();
-  const matchesQuery = (...texts: string[]) =>
-    !normalizedQuery ||
-    texts.some((t) => t.toLowerCase().includes(normalizedQuery));
-  const visibleFeatures = allowedFeatures.filter((f) =>
-    matchesQuery(f.title, f.description),
-  );
-  const showAdminMgmt = matchesQuery(
-    "Admin Management",
-    "Create and manage admin accounts and permissions",
-  );
-  const showUserMgmt = matchesQuery(
-    "User Management",
-    "Create and manage users with specific permissions",
-  );
+  const matchesQuery = (title: string) =>
+    !normalizedQuery || title.toLowerCase().includes(normalizedQuery);
+  const visibleFeatures = allowedFeatures.filter((f) => matchesQuery(f.title));
+  const showAdminMgmt = matchesQuery("Admin Management");
+  const showUserMgmt = matchesQuery("User Management");
   // "Escalate an Issue" is for every logged-in user, no permission needed.
-  const showReportIssue = matchesQuery(
-    "Escalate an Issue",
-    "Raise an issue ticket for the Support team",
-  );
-  const showChangePassword = matchesQuery(
-    "Change Password",
-    "Update your account password for enhanced security",
-  );
+  const showReportIssue = matchesQuery("Escalate an Issue");
+  const showChangePassword = matchesQuery("Change Password");
   const noModuleMatches =
     !!normalizedQuery &&
     visibleFeatures.length === 0 &&
