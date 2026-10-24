@@ -1,8 +1,10 @@
 import { format } from "date-fns";
 import {
   CheckCircle2,
+  Download,
   ExternalLink,
   FileText,
+  Loader2,
   Upload,
   XCircle,
 } from "lucide-react";
@@ -17,6 +19,7 @@ import {
   LL_FORM_FIELDS,
   llDocSlotLabel,
 } from "@/constants/llPipeline";
+import { supabase } from "@/lib/supabaseClient";
 import {
   LLApplication,
   LLDocument,
@@ -46,6 +49,7 @@ export default function LLDocumentsReview({
   const review = useReviewLLDocument();
   const replace = useAdminReplaceLLDocument();
   const [rejectingId, setRejectingId] = useState<string | null>(null);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [reason, setReason] = useState("");
 
   const formData = application.form_data;
@@ -93,6 +97,34 @@ export default function LLDocumentsReview({
           }),
       },
     );
+
+  const downloadDocument = async (doc: LLDocument) => {
+    setDownloadingId(doc.id);
+    try {
+      const { data, error } = await supabase.storage
+        .from("ll-documents")
+        .download(doc.storage_path);
+      if (error) throw error;
+
+      const url = URL.createObjectURL(data);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = doc.file_name || `${doc.doc_type}-${doc.id}`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      toast({
+        title: "Download failed",
+        description:
+          error instanceof Error ? error.message : "Could not download file.",
+        variant: "destructive",
+      });
+    } finally {
+      setDownloadingId(null);
+    }
+  };
 
   const knownKeys = new Set(LL_FORM_FIELDS.map((f) => f.key));
 
@@ -182,6 +214,20 @@ export default function LLDocumentsReview({
                 </a>
                 <div className="flex items-center gap-2">
                   <DocStatusBadge doc={d} />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7"
+                    disabled={downloadingId === d.id}
+                    onClick={() => void downloadDocument(d)}
+                  >
+                    {downloadingId === d.id ? (
+                      <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Download className="mr-1 h-3.5 w-3.5" />
+                    )}
+                    Download
+                  </Button>
                   {d.status !== "approved" && (
                     <Button
                       size="sm"
