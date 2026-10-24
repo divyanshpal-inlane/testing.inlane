@@ -65,6 +65,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   useLocation,
   useNavigate,
@@ -106,6 +107,12 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useToast } from "@/components/ui/use-toast";
+import { useAdminImportedCalendar } from "@/hooks/useAdminImportedCalendar";
+import { supabase } from "@/lib/supabaseClient";
+import { cn } from "@/lib/utils";
+import { useReviewInstructors } from "@/queries/instructorReview";
+
+import { checkInstructorAvailability } from "@/queries/instructor";
 import {
   INSTRUCTOR_STATUSES,
   InstructorStatus,
@@ -126,8 +133,6 @@ import {
 import { supabase } from "@/lib/supabaseClient";
 import { cn } from "@/lib/utils";
 import { useCurrentAdmin } from "@/queries/adminPermissions";
-import { checkInstructorAvailability } from "@/queries/instructor";
-import { useReviewInstructors } from "@/queries/instructorReview";
 import { useCurrentUser } from "@/queries/userManagement";
 import { SlotConfig } from "@/types/schedule";
 import { googleMapsLoader } from "@/utils/googleMaps";
@@ -827,53 +832,34 @@ const AddressAutocomplete = memo(
 
 export default function InstructorsManagement() {
   const navigate = useNavigate();
-
+  
   // Review stage filter state - must be defined before useMemo
-  const [reviewStageFilter, setReviewStageFilter] = useState<
-    "all" | "stage1_documents" | "stage2_pedal_video"
-  >("all");
+  const [reviewStageFilter, setReviewStageFilter] = useState<"all" | "stage1_documents" | "stage2_pedal_video">("all");
 
   // Map frontend stage filter to backend API parameter
-  const apiStageParam =
-    reviewStageFilter === "all"
-      ? "all"
-      : reviewStageFilter === "stage1_documents"
-        ? "documents"
-        : "pedal_videos";
+  const apiStageParam = reviewStageFilter === "all" 
+    ? "all" 
+    : reviewStageFilter === "stage1_documents" 
+    ? "documents" 
+    : "pedal_videos";
 
   // DEBUG: Check token before calling hook
   useEffect(() => {
     const token = localStorage.getItem("go_access_token");
-    console.log(
-      "[INSTRUCTORS] DEBUG - go_access_token in localStorage:",
-      !!token,
-    );
+    console.log("[INSTRUCTORS] DEBUG - go_access_token in localStorage:", !!token);
     if (token) {
       console.log("[INSTRUCTORS] DEBUG - Token length:", token.length);
     } else {
-      console.log(
-        "[INSTRUCTORS] DEBUG - ALL localStorage keys:",
-        Object.keys(localStorage),
-      );
+      console.log("[INSTRUCTORS] DEBUG - ALL localStorage keys:", Object.keys(localStorage));
     }
   }, []);
 
   // Fetch review instructors from backend API
-  const {
-    data: reviewResponse,
-    isLoading: reviewLoading,
-    error: reviewError,
-  } = useReviewInstructors(
-    apiStageParam as "all" | "documents" | "pedal_videos",
-  );
+  const { data: reviewResponse, isLoading: reviewLoading, error: reviewError } = useReviewInstructors(apiStageParam as "all" | "documents" | "pedal_videos");
 
   // Extract instructors and counts from API response
   const reviewInstructors = reviewResponse?.instructors || [];
-  const reviewCounts = reviewResponse?.counts || {
-    all: 0,
-    documents: 0,
-    pedal_videos: 0,
-  };
+  const reviewCounts = reviewResponse?.counts || { all: 0, documents: 0, pedal_videos: 0 };
 
   // Use counts directly from API response
   const reviewCount = reviewCounts.all;
@@ -1018,19 +1004,19 @@ export default function InstructorsManagement() {
   // selection = no filter = full list. Selections combine with OR logic.
   // State is per-visit: it survives interactions on this tab but resets on
   // navigation away, per the PRD.
-  const [selectedStatuses, setSelectedStatuses] = useState<InstructorStatus[]>([]);
+  const [statusFilter, setStatusFilter] = useState<InstructorStatus[]>([]);
 
   // Handle status filter selection - multi-select allowed, but mutually exclusive with Review
   const handleStatusFilterClick = (status: InstructorStatus) => {
     // If Review is ON and user clicks any status filter, turn OFF Review and show that filter
     if (showReviewFilter) {
       setShowReviewFilter(false);
-      setSelectedStatuses([status]);
+      setStatusFilter([status]);
       return;
     }
-
+    
     // Multi-select logic for status filters
-    setSelectedStatuses((prev) => {
+    setStatusFilter((prev) => {
       if (prev.includes(status)) {
         // Toggle off if already selected
         return prev.filter((s) => s !== status);
@@ -1043,13 +1029,14 @@ export default function InstructorsManagement() {
 
   // Review filter toggle
   const [showReviewFilter, setShowReviewFilter] = useState(false);
+  const [searchParams] = useSearchParams();
 
   // Check URL for tab=review parameter on component mount
   useEffect(() => {
     const tabParam = searchParams.get("tab");
     if (tabParam === "review") {
       setShowReviewFilter(true);
-      setSelectedStatuses([]);
+      setStatusFilter([]);
       setReviewStageFilter("all");
     }
   }, [searchParams]);
@@ -1062,7 +1049,7 @@ export default function InstructorsManagement() {
     } else {
       // If not on Review tab, turn it on and clear status filters
       setShowReviewFilter(true);
-      setSelectedStatuses([]);
+      setStatusFilter([]);
       setReviewStageFilter("all");
     }
   };
@@ -1738,32 +1725,20 @@ export default function InstructorsManagement() {
           className={cn(
             "flex items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors",
             showReviewFilter
-              ? "border-purple-500 bg-purple-50 font-semibold text-purple-700"
-              : "border-input bg-white text-muted-foreground hover:bg-muted",
+              ? "border-purple-500 bg-purple-50 text-purple-700 font-semibold"
+              : "border-input bg-white text-muted-foreground hover:bg-muted"
           )}
         >
-          <span
-            className={cn(
-              "h-2 w-2 rounded-full",
-              showReviewFilter ? "bg-purple-500" : "bg-purple-500",
-            )}
-          />
+          <span className={cn("h-2 w-2 rounded-full", showReviewFilter ? "bg-purple-500" : "bg-purple-500")} />
           Review
-          <span
-            className={cn(
-              "rounded-full px-1.5 text-xs font-semibold",
-              showReviewFilter
-                ? "bg-white text-purple-700"
-                : "bg-muted text-muted-foreground",
-            )}
-          >
+          <span className={cn("rounded-full px-1.5 text-xs font-semibold", showReviewFilter ? "bg-white text-purple-700" : "bg-muted text-muted-foreground")}>
             {reviewCount}
           </span>
         </button>
-        {selectedStatuses.length > 0 && (
+        {statusFilter.length > 0 && (
           <button
             type="button"
-            onClick={() => setSelectedStatuses([])}
+            onClick={() => setStatusFilter([])}
             className="flex items-center gap-1 text-sm text-muted-foreground underline-offset-2 hover:underline"
           >
             <X className="h-3.5 w-3.5" />
@@ -1774,26 +1749,19 @@ export default function InstructorsManagement() {
 
       {/* Review stage filter tabs - Show when Review tab is selected */}
       {showReviewFilter && (
-        <div className="flex flex-wrap gap-2 border-t bg-white px-6 py-4">
+        <div className="flex flex-wrap gap-2 px-6 py-4 border-t bg-white">
           <button
             type="button"
             onClick={() => setReviewStageFilter("all")}
             className={cn(
-              "flex items-center gap-2 rounded-full border px-3 py-1 text-sm font-medium transition-colors",
+              "flex items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors font-medium",
               reviewStageFilter === "all"
                 ? "border-purple-500 bg-white text-gray-900"
-                : "hover:bg-gray-150 border-gray-300 bg-gray-100 text-gray-600",
+                : "border-gray-300 bg-gray-100 text-gray-600 hover:bg-gray-150"
             )}
           >
             All
-            <span
-              className={cn(
-                "rounded-full px-1.5 text-xs font-semibold",
-                reviewStageFilter === "all"
-                  ? "bg-gray-200 text-gray-700"
-                  : "bg-gray-200 text-gray-700",
-              )}
-            >
+            <span className={cn("rounded-full px-1.5 text-xs font-semibold", reviewStageFilter === "all" ? "bg-gray-200 text-gray-700" : "bg-gray-200 text-gray-700")}>
               {reviewCount}
             </span>
           </button>
@@ -1802,21 +1770,14 @@ export default function InstructorsManagement() {
             type="button"
             onClick={() => setReviewStageFilter("stage1_documents")}
             className={cn(
-              "flex items-center gap-2 rounded-full border px-3 py-1 text-sm font-medium transition-colors",
+              "flex items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors font-medium",
               reviewStageFilter === "stage1_documents"
                 ? "border-purple-500 bg-white text-gray-900"
-                : "hover:bg-gray-150 border-gray-300 bg-gray-100 text-gray-600",
+                : "border-gray-300 bg-gray-100 text-gray-600 hover:bg-gray-150"
             )}
           >
             Stage 1 · Documents
-            <span
-              className={cn(
-                "rounded-full px-1.5 text-xs font-semibold",
-                reviewStageFilter === "stage1_documents"
-                  ? "bg-gray-200 text-gray-700"
-                  : "bg-gray-200 text-gray-700",
-              )}
-            >
+            <span className={cn("rounded-full px-1.5 text-xs font-semibold", reviewStageFilter === "stage1_documents" ? "bg-gray-200 text-gray-700" : "bg-gray-200 text-gray-700")}>
               {stage1Count}
             </span>
           </button>
@@ -1825,21 +1786,14 @@ export default function InstructorsManagement() {
             type="button"
             onClick={() => setReviewStageFilter("stage2_pedal_video")}
             className={cn(
-              "flex items-center gap-2 rounded-full border px-3 py-1 text-sm font-medium transition-colors",
+              "flex items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors font-medium",
               reviewStageFilter === "stage2_pedal_video"
                 ? "border-purple-500 bg-white text-gray-900"
-                : "hover:bg-gray-150 border-gray-300 bg-gray-100 text-gray-600",
+                : "border-gray-300 bg-gray-100 text-gray-600 hover:bg-gray-150"
             )}
           >
             Stage 2 · Pedal video
-            <span
-              className={cn(
-                "rounded-full px-1.5 text-xs font-semibold",
-                reviewStageFilter === "stage2_pedal_video"
-                  ? "bg-gray-200 text-gray-700"
-                  : "bg-gray-200 text-gray-700",
-              )}
-            >
+            <span className={cn("rounded-full px-1.5 text-xs font-semibold", reviewStageFilter === "stage2_pedal_video" ? "bg-gray-200 text-gray-700" : "bg-gray-200 text-gray-700")}>
               {stage2Count}
             </span>
           </button>
@@ -1852,30 +1806,22 @@ export default function InstructorsManagement() {
         reviewLoading ? (
           <div className="flex h-64 items-center justify-center">
             <div className="text-center">
-              <div className="mx-auto mb-2 h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent"></div>
+              <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent mx-auto mb-2"></div>
               <p className="text-gray-500">Loading review data...</p>
             </div>
           </div>
         ) : reviewError ? (
           <div className="flex h-64 items-center justify-center">
             <div className="text-center">
-              <AlertCircle className="mx-auto mb-2 h-8 w-8 text-red-500" />
-              <p className="font-semibold text-red-600">
-                Error loading review data
-              </p>
-              <p className="text-sm text-gray-500">
-                {(reviewError as Error).message}
-              </p>
+              <AlertCircle className="h-8 w-8 text-red-500 mx-auto mb-2" />
+              <p className="text-red-600 font-semibold">Error loading review data</p>
+              <p className="text-gray-500 text-sm">{(reviewError as Error).message}</p>
             </div>
           </div>
-        ) : filteredReviewInstructors &&
-          filteredReviewInstructors.length > 0 ? (
-          <div className="grid grid-cols-1 gap-6 px-6 py-4 md:grid-cols-2 lg:grid-cols-3">
+        ) : filteredReviewInstructors && filteredReviewInstructors.length > 0 ? (
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3 px-6 py-4">
             {filteredReviewInstructors.map((reviewInstructor) => (
-              <ReviewInstructorCard
-                key={reviewInstructor.id}
-                instructor={reviewInstructor}
-              />
+              <ReviewInstructorCard key={reviewInstructor.id} instructor={reviewInstructor} />
             ))}
           </div>
         ) : (
@@ -1883,7 +1829,15 @@ export default function InstructorsManagement() {
             <p className="text-gray-500">No instructors in review</p>
           </div>
         )
-      ) : isInstructorListLoading ? (
+      ) : isLoading ? (
+          onClick={clearStatusFilter}
+          className="flex items-center gap-1 text-sm text-muted-foreground underline-offset-2 hover:underline"
+        >
+          <X className="h-3.5 w-3.5" />
+          Clear filter
+        </button>
+      </div>
+      {isInstructorListLoading ? (
         <div className="flex h-64 items-center justify-center">
           <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent">
             <ChevronsUpDown> </ChevronsUpDown>
@@ -7861,3 +7815,6 @@ export const InstructorSchedulePage = () => {
     </div>
   );
 };
+
+
+
