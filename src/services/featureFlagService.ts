@@ -35,7 +35,6 @@ const INTERNAL_API_KEY =
   import.meta.env.VITE_INTERNAL_API_KEY || "local-internal-secret-key";
 
 // Default flags when Go service is unavailable — falls back to Supabase
-const DEFAULT_FLAGS: FeatureFlags = { shadow_auth_enabled: false, use_go_auth: true };
 const DEFAULT_FLAGS: FeatureFlags = {
   shadow_auth_enabled: false,
   use_go_auth: false,
