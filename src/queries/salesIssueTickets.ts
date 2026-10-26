@@ -106,6 +106,14 @@ async function callTickets(
       const res = (error as { context?: Response }).context;
       const parsed = res ? await res.json() : null;
       if (parsed?.error) message = String(parsed.error);
+      // 401: the browser sent no usable login (an expired session is the usual
+      // cause), not a problem with the ticket itself.
+      if (res?.status === 401) {
+        message =
+          parsed?.reason === "not_staff"
+            ? "This account isn't set up as admin/team staff, so it can't raise tickets."
+            : "Your login session has expired. Please log out, log in again, and submit once more.";
+      }
     } catch {
       /* keep generic message */
     }

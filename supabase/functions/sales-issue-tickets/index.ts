@@ -50,14 +50,21 @@ interface Caller {
 
 // Staff = an "Admin" row or a "User" (team member) row, matched by phone in
 // every stored format (same approach as instructor-slot-booking).
-async function getCaller(authHeader: string | null): Promise<Caller | null> {
-  if (!authHeader?.startsWith("Bearer ")) return null;
+type CallerResult =
+  | { caller: Caller }
+  | { caller: null; reason: "no_token" | "invalid_session" | "not_staff" };
+
+async function getCaller(authHeader: string | null): Promise<CallerResult> {
+  if (!authHeader?.startsWith("Bearer ")) {
+    return { caller: null, reason: "no_token" };
+  }
   const token = authHeader.replace("Bearer ", "");
   const {
     data: { user },
     error,
   } = await supabase.auth.getUser(token);
-  if (error || !user?.phone) return null;
+  // The anonymous key, an expired token or a session with no phone all land here.
+  if (error || !user?.phone) return { caller: null, reason: "invalid_session" };
 
   const digits = user.phone.replace(/\D/g, "");
   const last10 = digits.slice(-10);
@@ -103,14 +110,15 @@ async function getCaller(authHeader: string | null): Promise<Caller | null> {
     (perms ?? []).forEach((p) => permissions.add(p.permission));
   }
 
-  if (!found) return null;
-  return {
+  if (!found) return { caller: null, reason: "not_staff" };
+  const caller: Caller = {
     userId: user.id,
     email: user.email ?? null,
     name,
     permissions,
     isSuperAdmin,
   };
+  return { caller };
 }
 
 const can = (c: Caller, permission: string) =>
@@ -336,8 +344,11 @@ serve(async (req) => {
   }
   if (req.method !== "POST") return json(405, { error: "Method Not Allowed" });
   try {
-    const caller = await getCaller(req.headers.get("Authorization"));
-    if (!caller) return json(401, { error: "Unauthorized" });
+    const result = await getCaller(req.headers.get("Authorization"));
+    if (!result.caller) {
+      return json(401, { error: "Unauthorized", reason: result.reason });
+    }
+    const caller = result.caller;
 
     let body: Record<string, any>;
     try {
