@@ -62,6 +62,8 @@ export interface SlotCustomer {
    * selling, so "Delete" (which wipes the learner and every order) is not shown.
    */
   confirmedClass?: boolean;
+  /** The payment label was set by hand: do not re-sync it from the service. */
+  paymentManual?: boolean;
   /** The service (enrollment) the slot is already linked to, if any. */
   enrollmentId?: string;
   serviceLabel?: string;
@@ -337,6 +339,7 @@ export function SlotLearnerActions({
               linkedLabel={customer.serviceLabel}
               linkedEnrollmentId={customer.enrollmentId}
               storedPaymentStatus={customer.paymentStatus}
+              paymentManual={customer.paymentManual}
               canEdit={Boolean(customer.canEdit)}
               onLink={(choice) => onLinkService(customer, choice)}
             />

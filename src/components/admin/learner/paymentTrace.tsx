@@ -6,7 +6,8 @@ import { supabase } from "@/lib/supabaseClient";
 // Payment traceability helpers (see supabase/migrations/
 // 20261022_100000_payment_traceability.sql). Shared by the "Services & payments"
 // hub, the learner History and the Learner Management payment list. Customers
-// pay only through payment links; nobody records a payment by hand.
+// pay through payment links; money taken outside the link is recorded per
+// order with an image proof (ManualPaymentDialog + record-manual-payment).
 
 /** Message shown when the traceability migration has not been applied yet. */
 export const MISSING_TRACE_MIGRATION_MESSAGE =

@@ -142,6 +142,18 @@ Status" on the Sales booking form, and the CRM lead could set it too). That is m
 - Limit: a slot's stored label is refreshed when the slot is opened (and by an editor), not the instant the customer pays; a slot
   nobody opens keeps its last value.
 
+## 16. Manual payment with proof (2026-10-26)
+
+Reverses the earlier "payment links only" rule at the user's request: money taken outside the link (cash / UPI / bank transfer) can be recorded, with an image proof.
+
+- **Where:** per order in History & orders (`OrderPayLink`), next to Send payment link / Copy, only while money is due.
+- **Flow:** `ManualPaymentDialog` -> upload to private bucket `payment-proofs` (`<learner>/<order>/<time>.<ext>`) -> edge function `record-manual-payment`.
+- **Function:** staff check (Admin / User row by phone); input checks (method, UTR for UPI/bank, date not future, proof path under this order); `planManualPayment` (shared pure rules, amount must equal the due amount); proof file existence check; insert `payment` (`source='manual'`, `method`, `utr`, `paid_on`, `proof_path`, `recorded_by`, `recorded_by_id`, `manual_note`, pending); `enrollment.payment_id` -> new payment; `completePayment()` (same as a gateway payment: status, lessons, message). Any failure rolls the payment row, the pointer and the proof file back.
+- **DB:** `20261026_100000_manual_payment_proof.sql` (columns, CHECK that a manual row has proof + method, private bucket with 5 MB / image-only limits, staff INSERT/SELECT policies, deliberately no UPDATE/DELETE). Manual apply, not applied.
+- **Reads:** Payments list shows a Manual tag, method, UTR, received date, who entered it, note and **View proof** (5-minute signed URL). Reads fall back column set by column set until the migrations are applied.
+- **Rules not covered:** part payments (amount must equal due), editing/removing a recorded payment or proof, a super-admin-only restriction (any staff account can record).
+- **Test:** `node --test tests/manual-payment.test.mjs` (plan rules + form validation). The edge function, storage policies and the real completion were NOT run (no Deno / DB access here): test once in staging with a cash and a UPI order, a half-paid second instalment, a top-up and a licence service.
+
 ## 14. Slots are linked to a service by default (no manual link box)
 The amber "Not linked to a service yet" box (a manual drop-down + Link button) was removed. A slot with no link is now rare
 because linking happens automatically:

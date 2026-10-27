@@ -14,6 +14,7 @@ import {
 } from "@/lib/sales-dashboard/orderSlots";
 import {
   defaultServiceFor,
+  paidInfoLabel,
   paymentStatusOf,
 } from "@/lib/sales-dashboard/serviceBooking";
 import { getTentativePermissions } from "@/lib/sales-dashboard/tentativePermissions";
@@ -51,6 +52,9 @@ export interface CustomerFormValues {
   phoneFromCrm?: boolean;
   salesAgent: string;
   paymentStatus: "unpaid" | "half_paid" | "full_paid";
+  // True once the agent chose the payment status by hand. It is saved on the
+  // booking so the automatic "follow the linked service" re-sync leaves it be.
+  paymentManual?: boolean;
   customerAddress: string;
   course: string;
   // From the CRM autofill, when it had one. Not shown in the form; saved with
@@ -300,6 +304,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
       enrollmentId: pick.enrollment.id,
       serviceLabel: pick.label,
       paymentStatus: paymentStatusOf(pick.enrollment.payment_status),
+      paymentManual: false,
     });
     // formData / onFormDataChange are intentionally not dependencies: this runs
     // when the services or the chosen course change, and the guard above stops
@@ -528,6 +533,8 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
             }
           : {}),
         payment_status: formData.paymentStatus,
+        payment_manual: formData.paymentManual ? true : null,
+        paid_info: paidInfoLabel(formData.paymentStatus),
         address: formData.customerAddress,
         course: formData.course,
         course_name: formData.enrollmentId
@@ -565,6 +572,8 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
           ...(normalizedPhone ? { phone: normalizedPhone } : {}),
           sales_agent: formData.salesAgent,
           payment_status: formData.paymentStatus,
+          payment_manual: formData.paymentManual ? true : null,
+          paid_info: paidInfoLabel(formData.paymentStatus),
           address: formData.customerAddress,
           course: formData.course,
           course_name: formData.enrollmentId
@@ -1175,6 +1184,9 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                         formData.customerAddress || fill.address || "",
                       paymentStatus:
                         fill.service?.paymentStatus ?? formData.paymentStatus,
+                      paymentManual: fill.service
+                        ? false
+                        : formData.paymentManual,
                       enrollmentId: fill.service?.enrollmentId,
                       serviceLabel: fill.service?.serviceLabel,
                     })
@@ -1211,6 +1223,7 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
                       paymentStatus: pick
                         ? paymentStatusOf(pick.enrollment.payment_status)
                         : formData.paymentStatus,
+                      paymentManual: pick ? false : formData.paymentManual,
                     });
                   }}
                   className={`mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
@@ -1374,25 +1387,41 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
               )}
             </div>
 
-            {/* Payment status: never typed in. It is the payment status of the
-              service this booking is linked to (Unpaid until it is linked, or
-              until the customer pays through the payment link). */}
+            {/* Payment status. Starts from the linked service's status, and
+              the agent can change it by hand. A hand-set value is flagged
+              (payment_manual) so the automatic re-sync does not undo it. */}
             <div>
-              <span className="block text-sm font-medium text-foreground">
+              <label
+                htmlFor="paymentStatus"
+                className="block text-sm font-medium text-foreground"
+              >
                 Payment
-              </span>
-              <p className="mt-1 rounded-lg border border-input bg-muted px-3 py-2 text-sm text-muted-foreground">
-                {formData.paymentStatus === "full_paid"
-                  ? "Paid"
-                  : formData.paymentStatus === "half_paid"
-                    ? "Half paid"
-                    : "Unpaid"}
-                {formData.serviceLabel
-                  ? ` (from ${formData.serviceLabel})`
-                  : ""}
-              </p>
+              </label>
+              <select
+                id="paymentStatus"
+                value={formData.paymentStatus}
+                onChange={(ev) =>
+                  onFormDataChange({
+                    ...formData,
+                    paymentStatus: ev.target
+                      .value as CustomerFormValues["paymentStatus"],
+                    paymentManual: true,
+                  })
+                }
+                className="mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
+              >
+                <option value="unpaid">Unpaid</option>
+                <option value="half_paid">Half paid</option>
+                <option value="full_paid">Paid</option>
+              </select>
               <p className="mt-1 text-xs text-muted-foreground">
-                Set automatically. The customer pays through a payment link.
+                {formData.paymentManual
+                  ? "Set by hand."
+                  : formData.serviceLabel
+                    ? `From ${formData.serviceLabel}.`
+                    : "Unpaid until a service is linked."}{" "}
+                This label is only a note: the customer still pays through a
+                payment link.
               </p>
             </div>
 

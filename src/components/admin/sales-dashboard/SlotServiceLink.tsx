@@ -47,6 +47,7 @@ export function SlotServiceLink({
   linkedLabel,
   linkedEnrollmentId,
   storedPaymentStatus,
+  paymentManual = false,
   canEdit,
   onLink,
 }: {
@@ -57,6 +58,8 @@ export function SlotServiceLink({
   linkedEnrollmentId?: string;
   /** The payment label currently stored on the slot. */
   storedPaymentStatus: PaymentStatusValue;
+  /** Set by hand: the automatic re-sync must not overwrite it. */
+  paymentManual?: boolean;
   canEdit: boolean;
   onLink: (choice: ServiceChoice) => Promise<void>;
 }) {
@@ -80,6 +83,7 @@ export function SlotServiceLink({
   useEffect(() => {
     if (
       !canEdit ||
+      paymentManual ||
       !linkedService ||
       !liveStatus ||
       liveStatus === storedPaymentStatus
@@ -95,7 +99,14 @@ export function SlotServiceLink({
       paymentStatus: liveStatus,
       silent: true,
     });
-  }, [canEdit, linkedService, liveStatus, storedPaymentStatus, onLink]);
+  }, [
+    canEdit,
+    paymentManual,
+    linkedService,
+    liveStatus,
+    storedPaymentStatus,
+    onLink,
+  ]);
 
   // Not linked yet: link it ourselves when the match is unambiguous.
   const autoLinked = useRef(false);

@@ -163,6 +163,24 @@ No. They get a normal payment link that opens straight to the service you chose.
 
 ---
 
+## 9a. The customer paid cash / UPI / bank transfer (manual payment)
+
+Sometimes the customer pays outside the link. Do **not** just mark it paid: record it with proof.
+
+1. Find the customer, open **History & orders**, and go to the order they paid for.
+2. Click **Record manual payment**.
+3. Choose **how** it was received (Cash / UPI / Bank transfer / Card / Other).
+4. For UPI or bank transfer, type the **UTR / transaction number** (required). For cash, a receipt number is optional.
+5. Check the **date received**.
+6. Click **Choose image** and attach a screenshot or photo of the receipt / UPI confirmation (JPG, PNG or WebP, up to 5 MB). It is required.
+7. Click **Record**. The amount is fixed to what is due on that order, so it cannot be mistyped.
+
+The order then turns **Paid** (or **Half paid** for a first instalment) exactly as if the customer had used the link, and the customer gets the usual confirmation. In **Payments** the entry is tagged **Manual** with the method, UTR, who entered it and a **View proof** link.
+
+Good to know: the amount must be exactly what is due (no part payments here). A proof cannot be changed or deleted afterwards. If it says the setup is not finished, tell the tech team.
+
+---
+
 ## 10. One-page cheat sheet
 
 | I want to... | Do this |
@@ -173,6 +191,7 @@ No. They get a normal payment link that opens straight to the service you chose.
 | Resend or copy an old link | **Services & payments** tab > **Resend** / **Copy link** |
 | Find a customer | Existing customer card > type a name / e-mail and pick |
 | Find a payment | Existing customer card > type its **PAY-...** / **LNK-...** |
+| Customer paid cash / UPI / bank | **History & orders** > the order > **Record manual payment** > attach the proof image |
 | Fix a service added by mistake | **Remove** (only if nothing is paid) |
 
-**Remember:** one customer, one profile. Customers pay only through the link. The service turns Paid by itself.
+**Remember:** one customer, one profile. Use the link to collect; if they paid outside it, record it with a proof image. The service turns Paid by itself.

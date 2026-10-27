@@ -2930,6 +2930,7 @@ export default function SalesDashboard() {
           td.payment_status === "half_paid" || td.payment_status === "full_paid"
             ? td.payment_status
             : "unpaid",
+        paymentManual: td.payment_manual === true,
         customerAddress: typeof td.address === "string" ? td.address : "",
         course:
           typeof td.course === "string" && td.course ? td.course : NO_COURSE,
@@ -3763,6 +3764,7 @@ export default function SalesDashboard() {
                 paymentStatus === "half_paid" || paymentStatus === "full_paid"
                   ? paymentStatus
                   : "unpaid",
+              paymentManual: cover.rawTentativeDetails?.payment_manual === true,
             },
           };
         }

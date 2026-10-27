@@ -3,9 +3,9 @@
 -- MANUAL APPLY (SQL editor / psql). Apply BEFORE deploying the frontend that
 -- uses it.
 --
--- Customers pay ONLY through payment links; the team does not record payments
--- by hand, so this migration adds no manual-entry columns (no UTR, proof,
--- recorded-by or verification fields, no proof storage bucket).
+-- This migration adds no manual-entry columns. Payments taken outside the link
+-- (cash / UPI / bank transfer, with an image proof) are added by the separate
+-- 20261026_100000_manual_payment_proof.sql.
 --
 -- Fully additive and revertable (see the ROLLBACK block at the bottom). No
 -- existing column or row is modified, and no UPDATE is run on `payment`, so

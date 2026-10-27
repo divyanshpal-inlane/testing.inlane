@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Banknote,
   CalendarPlus,
   Copy,
   Pencil,
@@ -36,6 +37,7 @@ import {
   useLearnerLinks,
   useLearnerPayments,
 } from "./LearnerPaymentsPanel";
+import { ManualPaymentDialog } from "./ManualPaymentDialog";
 import { OrderSchedule } from "./OrderSchedule";
 import { CopyableId, timeAgo } from "./paymentTrace";
 import { useInstructorNames, useOrderSlots } from "./useOrderSlots";
@@ -90,6 +92,7 @@ function OrderPayLink({
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState<"send" | "copy" | null>(null);
+  const [manualOpen, setManualOpen] = useState(false);
   const phone = (learner.phone ?? "").replace(/\D/g, "").slice(-10);
   const link = phone ? buildEnrollmentLink(order, phone) : null;
   if (!link || link.amount <= 0) return null;
@@ -188,9 +191,30 @@ function OrderPayLink({
         <Copy size={12} className="mr-1" />
         Copy
       </Button>
+      <Button
+        size="sm"
+        variant="outline"
+        className="h-7 px-2 text-xs"
+        disabled={busy !== null}
+        onClick={() => setManualOpen(true)}
+        title="The customer paid cash / UPI / bank transfer outside the link"
+        data-testid={`order-manual-payment-${order.id}`}
+      >
+        <Banknote size={12} className="mr-1" />
+        Record manual payment
+      </Button>
       <span className="text-[10px] text-muted-foreground">
         {second ? "2nd instalment due" : "Due"}
       </span>
+      <ManualPaymentDialog
+        open={manualOpen}
+        onOpenChange={setManualOpen}
+        learnerId={learner.id}
+        enrollmentId={order.id}
+        orderLabel={label}
+        amountDue={link.amount}
+        onRecorded={refresh}
+      />
     </div>
   );
 }
