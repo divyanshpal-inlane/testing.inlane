@@ -32,9 +32,16 @@ $$;
 
 -- 1. payment columns -------------------------------------------------------
 
+-- NO foreign key on purpose. enrollment.payment_id already references payment,
+-- so a second FK in the other direction makes PostgREST refuse every
+-- `enrollment ... payment (...)` embed (PGRST201 "more than one relationship"),
+-- which broke Learner Management, Half-paid tracker etc. on 2026-10-26. Keep it
+-- a plain column.
 ALTER TABLE public.payment
-  ADD COLUMN IF NOT EXISTS enrollment_id uuid
-    REFERENCES public.enrollment (id) ON DELETE SET NULL;
+  ADD COLUMN IF NOT EXISTS enrollment_id uuid;
+
+-- If an earlier version of this migration created the FK, remove it.
+ALTER TABLE public.payment DROP CONSTRAINT IF EXISTS payment_enrollment_id_fkey;
 
 -- Generated columns do not fire triggers and do not touch updated_at.
 -- 12 hex chars (~2.8e14 values) keeps collision odds negligible at this volume.
