@@ -432,7 +432,18 @@ export function useCreateAdmin() {
         });
 
       if (authError) {
-        throw new Error(authError.message || "Failed to create admin");
+        // supabase-js hides the JSON body behind "non-2xx"; surface the real reason.
+        let serverMessage: string | null = null;
+        try {
+          const res = (authError as { context?: Response }).context;
+          const body = res ? await res.json() : null;
+          if (body?.error) serverMessage = String(body.error);
+        } catch {
+          /* body was not JSON: fall back to the generic message */
+        }
+        throw new Error(
+          serverMessage || authError.message || "Failed to create admin",
+        );
       }
 
       // Check if the function returned an error in the response
