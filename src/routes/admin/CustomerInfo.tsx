@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { ArrowLeft, Filter, Search } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -17,15 +17,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -33,7 +25,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useToast } from "@/components/ui/use-toast";
 import { supabase } from "@/lib/supabaseClient";
 import { formatDate, generateRandomOTP } from "@/lib/utils";
 
@@ -47,20 +38,6 @@ export default function CustomerInfo() {
   const maxNumLessonsOnHalfInstallment = 1;
 
   const [activeTopup, setActiveTopup] = useState(null);
-
-  const [updatingPaidInfo, setUpdatingPaidInfo] = useState({});
-  const [paidInfoDialogOpen, setPaidInfoDialogOpen] = useState(false);
-  const [paidInfoDialogData, setPaidInfoDialogData] = useState(null);
-  const [manualAmount, setManualAmount] = useState<number>(0);
-  const [manualInstallment1, setManualInstallment1] = useState<number | null>(
-    null,
-  );
-  const [manualInstallment2, setManualInstallment2] = useState<number | null>(
-    null,
-  );
-
-  const { toast } = useToast();
-  const queryClient = useQueryClient();
 
   // Fetch all learners whose payment status is completed
   // in descending order of signup time
@@ -436,242 +413,6 @@ export default function CustomerInfo() {
     return String(dueAmount);
   };
 
-  const handleUpdatePaidInfoClose = () => {
-    if (!paidInfoDialogData) {
-      console.log("No enrollment data available");
-      return;
-    }
-    console.log("Closing paid info dialog for enrollment:", paidInfoDialogData);
-    setUpdatingPaidInfo((prev) => ({
-      ...prev,
-      [paidInfoDialogData?.id]: false,
-    }));
-    setPaidInfoDialogOpen(false);
-    // setPaidInfoDialogData(null);
-    // setManualAmount(0);
-    console.log("updatingPaidInfo", updatingPaidInfo);
-  };
-
-  const useUpdateEnrollmentMutation = useMutation({
-    mutationFn: async ({
-      enrollmentId,
-      updates,
-    }: {
-      enrollmentId: string;
-      updates: Partial<any>;
-    }) => {
-      const { data, error } = await supabase
-        .from("enrollment")
-        .update(updates)
-        .eq("id", enrollmentId);
-      if (error) throw error;
-      console.log("Updated installment info");
-    },
-
-    // Invalidate relevant queries upon successful completion
-    onSuccess: (data, variables) => {
-      // Invalidate the specific enrollment query to force a fresh fetch
-      queryClient.invalidateQueries({
-        queryKey: ["enrollment", variables.enrollmentId],
-      });
-
-      // Invalidate the generic list of enrollments if necessary
-      queryClient.invalidateQueries({ queryKey: ["enrollments"] });
-    },
-
-    onError: (error) => {
-      // Optional: Log or handle global mutation errors here
-      console.error("Mutation failed:", error);
-    },
-  });
-
-  useEffect(() => {
-    setManualInstallment1(
-      paidInfoDialogData?.enrollement?.installment1_amount || 0,
-    );
-    setManualInstallment2(
-      paidInfoDialogData?.enrollement?.installment2_amount || 0,
-    );
-    setManualAmount(
-      paidInfoDialogData?.enrollement?.amount ||
-        paidInfoDialogData?.enrollement?.installment1_amount +
-          paidInfoDialogData?.enrollement?.installment2_amount,
-    );
-
-    console.log(
-      "T2_1 installment amount changed:",
-      paidInfoDialogData?.enrollment,
-      manualInstallment1,
-      manualInstallment2,
-      manualAmount,
-    );
-  }, [paidInfoDialogData]);
-
-  const handleUpdatePaidInfoSave = async () => {
-    if (!paidInfoDialogData) return;
-
-    try {
-      let paymentStatus = "unpaid";
-      let finalAmount = 0,
-        val1 = 0,
-        val2 = 0;
-      console.log("T2_2 finalAmount", finalAmount);
-
-      if (paidInfoDialogData?.enrollment?.installment_mode === "full") {
-        // 1. FULL MODE logic
-        // If manualAmount is truthy/greater than 0, it's completed
-        finalAmount = Number(manualAmount ?? 0) || finalAmount;
-        paymentStatus = "completed";
-      } else {
-        val1 =
-          manualInstallment1 != null && manualInstallment1 != undefined
-            ? Number(manualInstallment1)
-            : 0;
-        val2 =
-          manualInstallment2 != null && manualInstallment2 != undefined
-            ? Number(manualInstallment2)
-            : 0;
-
-        // Use "completed" for payment.status to match automatic payment flow
-        // The enrollment.payment_status tracks full_paid vs half_paid for installments
-        if (val1 > 0 && val2 > 0) {
-          paymentStatus = "completed";
-        } else if (val1 > 0) {
-          paymentStatus = "completed"; // Changed from "half_paid" - enrollment.payment_status tracks installments
-        }
-      }
-
-      console.log("T2_2 finalAmount", finalAmount);
-
-      // 1. Generate the unlocked_lessons array
-      // We get the count from the nested Courses data or from progress for demo/custom
-      let totalLessonsCount =
-        paidInfoDialogData?.enrollment?.Courses?.total_lessons || 0;
-
-      // Handle demo/custom enrollments without a course
-      const progressType = paidInfoDialogData?.enrollment?.progress?.type;
-      if (progressType === "demo") {
-        totalLessonsCount = 1; // Demo only has 1 lesson
-      } else if (progressType === "custom") {
-        // Custom courses use total_hours to determine lessons
-        const totalHours =
-          paidInfoDialogData?.enrollment?.progress?.total_hours || 0;
-        totalLessonsCount = Math.min(Math.ceil(totalHours), 10);
-      }
-
-      // Create array: e.g., if totalLessonsCount is 2, returns ["1", "2"]
-      const unlockedLessons = Array.from(
-        { length: totalLessonsCount },
-        (_, i) => (i + 1).toString(),
-      );
-
-      let isSecondInstallment = false;
-      if (paidInfoDialogData?.enrollment?.payment_status === "half_paid") {
-        // Check if there's a completed first installment payment
-        const { data: firstPayments, error: paymentsError } = await supabase
-          .from("payment")
-          .select("id, status")
-          .eq("learner_id", learner.id)
-          .eq("installment_type", "first_half")
-          .eq("status", "completed")
-          .order("created_at", { ascending: false })
-          .limit(1);
-
-        // console.log("First installment payments:", firstPayments, paymentsError);
-        if (!paymentsError && firstPayments && firstPayments.length > 0) {
-          // If there's a completed first installment payment, this is a second installment
-          isSecondInstallment = true;
-          // parentPaymentId = firstPayments[0].id;
-        }
-      }
-
-      const installmentMode =
-        paidInfoDialogData?.enrollment?.installment_mode || "full";
-      let paymentOption = "full";
-
-      // If it's a second installment, force the payment option
-      if (isSecondInstallment) {
-        paymentOption = "installment";
-      } else if (
-        // possible values "full" | "installment" | "second_half" | "first_half"
-        installmentMode != "full"
-      ) {
-        // If enrollment was created with installment mode, default to that
-        paymentOption = "installment";
-      }
-      const installmentType = isSecondInstallment
-        ? "second_half"
-        : paymentOption === "full"
-          ? "full"
-          : "first_half";
-      const pStatus = paymentStatus;
-      // finalAmount === val1
-      //                   ? "completed"
-      //                   : val1 === 0
-      //                     ? "unpaid"
-      //                     : "half_paid";
-
-      // 2. Insert Payment Record
-      // Determine payment_type based on enrollment progress type
-      let paymentType = "course";
-      if (progressType === "demo") {
-        paymentType = "demo";
-      } else if (progressType === "custom") {
-        paymentType = "custom";
-      }
-
-      const { data: paymentRecord, error: dbError } = await supabase
-        .from("payment")
-        .insert([
-          {
-            learner_id:
-              paidInfoDialogData?.learner_id || paidInfoDialogData?.id,
-            amount: finalAmount,
-            total_amount: finalAmount,
-            installment1_amount: val1,
-            installment2_amount: val2,
-            installment_type: installmentType,
-            email: paidInfoDialogData?.email,
-            phone: paidInfoDialogData?.phone,
-            payment_type: paymentType,
-            status: pStatus,
-            name: paidInfoDialogData?.name,
-          },
-        ])
-        .select()
-        .single();
-
-      if (dbError) throw dbError;
-
-      // 3. Update Enrollment
-      await useUpdateEnrollmentMutation.mutateAsync({
-        enrollmentId: paidInfoDialogData?.enrollment?.id,
-        updates: {
-          // amount: finalAmount,
-          payment_id: paymentRecord.id,
-          status: "active",
-          payment_status: paymentStatus,
-          //installment1_amount: val1,
-          //installment2_amount: val2,
-          //installment_mode: "full",
-          unlocked_lessons: unlockedLessons,
-        },
-      });
-
-      toast({
-        title: "Success",
-        description: `Payment recorded and ${unlockedLessons.length} lessons unlocked.`,
-      });
-    } catch (error) {
-      console.error("Save Error:", error);
-      toast({
-        title: "Save Failed",
-        description: error.message,
-        variant: "destructive",
-      });
-    }
-  };
-
   return (
     <div
       className="h-flex flex min-h-screen flex-col bg-white p-8"
@@ -867,21 +608,6 @@ export default function CustomerInfo() {
                             >
                               Add topup
                             </Button>
-
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => {
-                                setPaidInfoDialogData(learner);
-                                setPaidInfoDialogOpen(true);
-                              }}
-                              disabled={
-                                updatingPaidInfo[learner.enrollment?.id]
-                              }
-                              className="mt-4 w-fit bg-primary px-6 text-primary-foreground hover:opacity-90"
-                            >
-                              Add paid info
-                            </Button>
                           </div>
                           {/* Column 4: Status and Time Ago (FIXED HERE) */}
                           <div className="text-right">
@@ -961,99 +687,6 @@ export default function CustomerInfo() {
           onClose={() => setDialogOpen(false)}
         />
       )}
-      <Dialog open={paidInfoDialogOpen} onOpenChange={setPaidInfoDialogOpen}>
-        <DialogContent className="sm:max-w-[425px]">
-          <DialogHeader>
-            <DialogTitle>Enter Paid Installments</DialogTitle>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            {/* Check if mode is 'full' via paidInfoDialogData */}
-            {paidInfoDialogData?.enrollment?.installment_mode === "full" ? (
-              /* Single Checkbox View */
-              <div className="flex items-center space-x-2">
-                <input
-                  type="checkbox"
-                  id="full-payment-paid"
-                  checked={
-                    manualInstallment1 !== null &&
-                    manualInstallment1 !== undefined
-                  }
-                  onChange={(e) => {
-                    const checked = e.target.checked;
-                    // Use .amount for full payment mode
-                    const amount = paidInfoDialogData?.enrollment?.amount ?? 0;
-                    setManualInstallment1(checked ? amount : null);
-                    // Clear second installment state if it exists
-                    setManualInstallment2(null);
-                  }}
-                />
-                <Label htmlFor="full-payment-paid">
-                  Full Payment (Amount:{" "}
-                  {paidInfoDialogData?.enrollment?.amount ?? 0})
-                </Label>
-              </div>
-            ) : (
-              /* Dual Installment View */
-              <>
-                <div className="flex items-center space-x-2">
-                  <input
-                    type="checkbox"
-                    id="installment1-paid"
-                    checked={
-                      manualInstallment1 !== null &&
-                      manualInstallment1 !== undefined
-                    }
-                    onChange={(e) => {
-                      const checked = e.target.checked;
-                      const amount =
-                        paidInfoDialogData?.installment1_amount ?? 0;
-                      setManualInstallment1(checked ? amount : null);
-                    }}
-                  />
-                  <Label htmlFor="installment1-paid">
-                    Installment 1 (Amount:{" "}
-                    {paidInfoDialogData?.installment1_amount ?? 0})
-                  </Label>
-                </div>
-
-                <div className="flex items-center space-x-2">
-                  <input
-                    type="checkbox"
-                    id="installment2-paid"
-                    disabled={
-                      manualInstallment1 === null ||
-                      manualInstallment1 === undefined
-                    }
-                    checked={
-                      manualInstallment2 !== null &&
-                      manualInstallment2 !== undefined
-                    }
-                    onChange={(e) => {
-                      const checked = e.target.checked;
-                      const amount =
-                        paidInfoDialogData?.installment2_amount ?? 0;
-                      setManualInstallment2(checked ? amount : null);
-                    }}
-                  />
-                  <Label
-                    htmlFor="installment2-paid"
-                    className={manualInstallment1 === null ? "opacity-50" : ""}
-                  >
-                    Installment 2 (Amount:{" "}
-                    {paidInfoDialogData?.installment2_amount ?? 0})
-                  </Label>
-                </div>
-              </>
-            )}
-          </div>
-          <DialogFooter>
-            <Button onClick={handleUpdatePaidInfoClose} variant="secondary">
-              Cancel
-            </Button>
-            <Button onClick={handleUpdatePaidInfoSave}>Save</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

@@ -7,6 +7,7 @@ import {
   CreatedLearnerInfo,
   CreateLearnerDialog,
 } from "@/components/admin/learner/CreateLearnerDialog";
+import { ExistingCustomerCard } from "@/components/admin/learner/ExistingCustomerCard";
 import { sendPaymentLink } from "@/components/admin/learner/sendPaymentLink";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -118,6 +119,9 @@ export default function LearnerManagement() {
               </Button>
             </CardContent>
           </Card>
+
+          {/* Existing customers: another course / top-up / Payment IDs */}
+          <ExistingCustomerCard />
 
           {/* Incomplete Payments Card */}
           <IncompletePaymentsCard />

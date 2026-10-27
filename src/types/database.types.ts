@@ -799,6 +799,7 @@ export type Database = {
           two_hour_days?: string | null;
           signed_up: string | null;
           start_date: string | null;
+          terms_policy_accepted: boolean;
           unavailability: Json | null;
         };
         Insert: {
@@ -857,6 +858,7 @@ export type Database = {
           two_hour_days?: string | null;
           signed_up?: string | null;
           start_date?: string | null;
+          terms_policy_accepted?: boolean;
           unavailability?: Json | null;
         };
         Update: {
@@ -915,6 +917,7 @@ export type Database = {
           two_hour_days?: string | null;
           signed_up?: string | null;
           start_date?: string | null;
+          terms_policy_accepted?: boolean;
           unavailability?: Json | null;
           has_lesson10_booked: boolean | null;
         };
@@ -1293,6 +1296,39 @@ export type Database = {
           is_rough?: boolean;
           kind?: string;
           raw_name?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      service_area_zones: {
+        Row: {
+          coordinates: Json;
+          created_at: string;
+          id: string;
+          kind: string;
+          name: string;
+          notes: string | null;
+          source: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          coordinates: Json;
+          created_at?: string;
+          id?: string;
+          kind: string;
+          name: string;
+          notes?: string | null;
+          source?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          coordinates?: Json;
+          created_at?: string;
+          id?: string;
+          kind?: string;
+          name?: string;
+          notes?: string | null;
+          source?: string | null;
           updated_at?: string;
         };
         Relationships: [];

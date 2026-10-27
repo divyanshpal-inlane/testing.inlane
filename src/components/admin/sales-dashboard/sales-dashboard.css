@@ -136,6 +136,33 @@
   border-radius: 12px;
 }
 
+/* The right-hand column: the Find learner card and, under it, the slot / booking
+   panel. They are two separate cards with a gap, so Find learner never looks
+   like part of the booking window. The column is the sticky, fixed-width,
+   height-limited element; the slot panel just fills what the card leaves. */
+.slot-side {
+  position: sticky;
+  top: 96px;
+  z-index: 31;
+  flex: none;
+  width: 400px;
+  max-width: 400px;
+  max-height: calc(100vh - 120px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.slot-side > .slot-panel {
+  position: static;
+  width: 100%;
+  max-width: none;
+  flex: 1 1 auto;
+  /* Less than the standalone 340px: the Find learner card shares the column. */
+  min-height: 240px;
+  max-height: none;
+}
+
 /* Empty state, mirroring InstructorSchedulePage's
    "Select a slot to view schedules" panel. */
 .slot-panel-empty {
@@ -177,6 +204,10 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* Reserve the scrollbar lane always, so content does not narrow (and
+     re-wrap) the moment the panel becomes long enough to scroll. */
+  scrollbar-gutter: stable;
+  overflow-x: hidden;
   padding: 18px 20px 22px;
 }
 
@@ -345,18 +376,64 @@
   padding: 0;
 }
 
+/* The booking form is a flex child of .slot-panel (which is a fixed-height
+   column with overflow hidden). It must take only the space left UNDER whatever
+   sits above it (the Find learner bar) and scroll inside that. With its own
+   max-height equal to the whole panel it overflowed by the bar's height and the
+   bottom of the form, Cancel / Save included, was clipped and unreachable. */
+.slot-panel > .modal-backdrop.modal-panel-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .modal.modal-panel {
   width: 100%;
-  max-height: calc(100vh - 120px);
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  /* A flex column: header and messages on top, .modal-panel-body in the middle
+     (the only part that scrolls), .modal-panel-footer at the bottom. */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   border: 0;
   border-radius: 0;
   box-shadow: none;
   background: transparent;
-  padding: 18px 20px 22px;
+  padding: 18px 20px 0;
+}
+
+.modal-panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  /* Room for the scrollbar and a little air above the footer. */
+  padding: 0 6px 14px 0;
+  margin-right: -6px;
+}
+
+/* The action row: its own row, never over the fields. Same-height buttons, a
+   fixed gap, and room below it where the panel's padding used to be. */
+.modal-panel-footer {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  padding: 12px 0 18px;
+  border-top: 1px solid var(--gc-border);
+  background: var(--gc-bg);
 }
 
 @media (max-width: 1200px) {
   .slot-panel {
+    width: 340px;
+    max-width: 340px;
+  }
+
+  .slot-side {
     width: 340px;
     max-width: 340px;
   }
@@ -368,9 +445,24 @@
 @media (max-width: 900px) {
   .shell-body {
     flex-direction: column;
+    /* Stacked: the default `flex-start` made each block as wide as its
+       content (the wide timetable), so the page scrolled sideways. Stretch
+       them to the container instead. */
+    align-items: stretch;
+  }
+
+  .shell-main {
+    width: 100%;
   }
 
   .slot-panel {
+    position: static;
+    width: 100%;
+    max-width: none;
+    max-height: none;
+  }
+
+  .slot-side {
     position: static;
     width: 100%;
     max-width: none;
@@ -762,20 +854,26 @@
   animation: grid-wrap-picking-pulse 1.6s ease-in-out infinite;
 }
 
-/* Grid table layout — ported as-is from the standalone reference dashboard
+/* NOTE: these rules are scoped to `table.grid` on purpose. They used to be a
+   bare `.grid`, which is ALSO Tailwind's `display: grid` utility, so every
+   Tailwind `grid` element anywhere got `min-width: 100%` (e.g. the icon chip in
+   the Find learner card stretched across the whole card and pushed its title
+   out over the map panel). Do not make them unscoped again.
+
+   Grid table layout — ported as-is from the standalone reference dashboard
    (Lane-sales-requirement/src/App.css). Deliberately auto layout (no
    table-layout: fixed, no <colgroup>) with min-width per column class:
    the browser sizes each column to the max of its cells' min-widths, which
    is what keeps the header and every row's columns in lockstep without
    needing to force exact widths. This is the reference's proven approach —
    don't reintroduce fixed-layout/colgroup here. */
-.grid {
+table.grid {
   border-collapse: collapse;
   min-width: 100%;
 }
 
-.grid th,
-.grid td {
+table.grid th,
+table.grid td {
   border-right: 1px solid var(--gc-grid-line);
   border-bottom: 1px solid var(--gc-grid-line);
   padding: 6px 8px;
@@ -790,7 +888,7 @@
    each hour starts, without every 30-minute line competing for attention.
    :not(...) excludes the sticky instructor column, which is also an
    (odd) nth-child but isn't a time boundary. */
-.grid tr.row td:nth-child(odd):not(.instructor-cell) {
+table.grid tr.row td:nth-child(odd):not(.instructor-cell) {
   border-right: 1px solid var(--gc-grid-line-strong);
 }
 
@@ -798,12 +896,12 @@
    that already sandwich the blank .row-gap spacer, rather than adding a
    new border element, so consecutive instructors read as clearly distinct
    rows without extra visual weight. */
-.grid tr.row td {
+table.grid tr.row td {
   border-top: 1px solid var(--gc-grid-line-strong);
   border-bottom: 1px solid var(--gc-grid-line-strong);
 }
 
-.grid thead th {
+table.grid thead th {
   position: sticky;
   top: 0;
   z-index: 2;
@@ -897,7 +995,7 @@
 /* One <td> per instructor holds the nameplate and its timetable, so the
    sticky nameplate is bounded by its own group: it stays pinned while this
    instructor's timetable scrolls and is pushed out by the next nameplate. */
-.grid tr.instr-group > td {
+table.grid tr.instr-group > td {
   padding: 0 !important;
   text-align: left;
 }
@@ -1640,7 +1738,7 @@
 .loc-map {
   margin-top: 12px;
   width: 100%;
-  height: 320px;
+  height: 360px;
   border: 1px solid var(--gc-border);
   border-radius: 12px;
   overflow: hidden;
@@ -1888,14 +1986,175 @@
 /* Map toolbar (polygon toggle + expand) and the full-screen state. */
 .loc-map-tools {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 6px 14px;
   margin-top: 12px;
 }
 
 .loc-map-tools .loc-toggle {
   margin: 0;
+}
+
+/* Pill toggles in the map toolbar: a real checkbox under the hood (keyboard and
+   screen-reader friendly), shown as a chip that fills when on. */
+.loc-pill {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px 0 10px;
+  border: 1px solid var(--gc-border);
+  border-radius: 999px;
+  background: var(--gc-bg);
+  color: var(--gc-text-2);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    color 0.15s;
+}
+
+.loc-pill:hover {
+  border-color: var(--gc-blue);
+  color: var(--gc-text);
+}
+
+.loc-pill.on {
+  border-color: var(--gc-blue);
+  background: var(--gc-blue-bg);
+  color: var(--gc-text);
+}
+
+/* The input stays focusable but invisible; focus is drawn on the pill. */
+.loc-pill input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.loc-pill:focus-within {
+  outline: 2px solid var(--gc-blue);
+  outline-offset: 2px;
+}
+
+.loc-pill-dots {
+  display: inline-flex;
+}
+
+.loc-pill-dots i {
+  width: 9px;
+  height: 9px;
+  margin-left: -3px;
+  border-radius: 50%;
+  border: 1.5px solid var(--gc-bg);
+}
+
+.loc-pill-dots i:first-child {
+  margin-left: 0;
+}
+
+.loc-pill-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--gc-border);
+  color: var(--gc-text);
+  font-size: 10.5px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.loc-pill.on .loc-pill-count {
+  background: var(--gc-blue);
+  color: var(--gc-blue-contrast);
+}
+
+/* "From map" tag on a results chip for an instructor added from the map. */
+.loc-chip-origin {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--gc-blue-bg);
+  color: var(--gc-blue);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.loc-pill-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex: none;
+  vertical-align: -2px;
+}
+
+.loc-pill-swatch.grey {
+  background: rgba(75, 85, 99, 0.55);
+}
+
+.loc-pill-swatch.white {
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.3);
+}
+
+.loc-pill-swatch.area {
+  background: rgba(37, 99, 235, 0.25);
+  box-shadow: inset 0 0 0 2px #2563eb;
+}
+
+/* Legend floated over the map (bottom-left, clear of Google's logo). */
+.loc-legend {
+  position: absolute;
+  left: 10px;
+  bottom: 30px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #374151;
+  font-size: 11.5px;
+  box-shadow: 0 1px 4px -1px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+}
+
+.loc-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* Name tag that follows the pointer over an instructor area. */
+.loc-map-tip {
+  position: absolute;
+  z-index: 3;
+  max-width: 220px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: #111827;
+  color: #ffffff;
+  font-size: 11.5px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.loc-map-tip[hidden] {
+  display: none;
 }
 
 .loc-map-tools + .loc-map {

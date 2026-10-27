@@ -1,7 +1,10 @@
+import { useQuery } from "@tanstack/react-query";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 
+import { drawServiceAreaMask } from "@/components/instructor-zones/serviceAreaMask";
 import type { GeoPoint, KmlZone } from "@/lib/sales-dashboard/kml";
 import { geocodeText, loadMapsApi } from "@/lib/sales-dashboard/maps";
+import { fetchServiceAreaLayer } from "@/lib/sales-dashboard/zones-db";
 import { googleMapsLoader } from "@/utils/googleMaps";
 
 export type LocateStatus = "idle" | "loading" | "found" | "none";
@@ -25,6 +28,11 @@ interface LocationSearchProps {
   onRetryZones?: () => void;
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
+  /**
+   * Zones that must stay drawn whatever the "Show all polygons" switch says:
+   * instructors added from a polygon popup. Independent of the location search.
+   */
+  pinnedZones?: { name: string; color: string }[];
   /** Adds this instructor's timetable to the dashboard (polygon popup). */
   onAddInstructor?: (instructorId: string) => void;
   /** Instructors already on the dashboard, so the popup can say so. */
@@ -44,6 +52,29 @@ const EMPTY_OVERLAYS: OverlaySet = {
   polygons: [],
   points: [],
 };
+// "Show all instructor areas": every instructor gets their own vivid colour so
+// the areas are easy to tell apart (the old neutral grey, 1px, 8 % fill was
+// nearly invisible). Stable per instructor, so a colour never changes between
+// redraws.
+const AREA_PALETTE = [
+  "#2563eb",
+  "#dc2626",
+  "#16a34a",
+  "#d97706",
+  "#7c3aed",
+  "#0891b2",
+  "#db2777",
+  "#65a30d",
+  "#ea580c",
+  "#4f46e5",
+  "#0d9488",
+  "#c026d3",
+];
+function areaColor(key: string): string {
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0;
+  return AREA_PALETTE[Math.abs(h) % AREA_PALETTE.length];
+}
 const DEFAULT_MAP_CENTER = { lat: 12.9716, lng: 77.5946 };
 const DEFAULT_MAP_ZOOM = 11;
 
@@ -56,6 +87,7 @@ function LocationSearch({
   matchedNames,
   via,
   zoneInfo,
+  pinnedZones,
   onLocate,
   onClear,
   onRetryZones,
@@ -70,6 +102,10 @@ function LocationSearch({
   const mapObjRef = useRef<google.maps.Map | null>(null);
   const overlaysRef = useRef<OverlaySet>(EMPTY_OVERLAYS);
   const infoWindowRef = useRef<google.maps.InfoWindow | null>(null);
+  // Small name tag that follows the pointer over an area (the click popup still
+  // carries the "Add to dashboard" button; this just answers "whose is this?").
+  const tipRef = useRef<HTMLDivElement>(null);
+  const mapWrapRef = useRef<HTMLDivElement>(null);
   // The polygon the user clicked (highlighted while its popup is open). Kept in
   // a ref, not state, so selecting never re-runs the overlay effect.
   const selectedRef = useRef<{
@@ -88,6 +124,16 @@ function LocationSearch({
   // Off: the map shows only the matched (Area + Nearby) polygons. On: every
   // instructor polygon is drawn too, in neutral grey.
   const [showAllZones, setShowAllZones] = useState(false);
+  // Grey = areas we do not serve. Read from `service_area_zones` (the same rows
+  // the admin Zone Map edits), so a change there shows up here on its own.
+  const [showNonService, setShowNonService] = useState(true);
+  const { data: serviceLayer } = useQuery({
+    queryKey: ["service-area-layer"],
+    queryFn: fetchServiceAreaLayer,
+    staleTime: 60 * 1000,
+  });
+  const hasServiceLayer = (serviceLayer?.serviceable.length ?? 0) > 0;
+  const polygonCount = (zones ?? []).filter((z) => z.kind === "polygon").length;
   // Full-screen map, for focusing on the polygons alone.
   const [expanded, setExpanded] = useState(false);
 
@@ -356,26 +402,87 @@ function LocationSearch({
       });
     };
 
-    // Every other instructor polygon, grey and underneath the matched ones.
-    // Not added to `bounds`, so the map still frames the matches.
+    // Brighten an area on hover and show whose it is next to the pointer.
+    const attachHover = (
+      polygon: google.maps.Polygon,
+      name: string,
+      style: google.maps.PolygonOptions,
+    ): void => {
+      const showTip = (e: google.maps.PolyMouseEvent): void => {
+        const tip = tipRef.current;
+        const wrap = mapWrapRef.current;
+        const dom = e.domEvent as MouseEvent | undefined;
+        if (!tip || !wrap || !dom) return;
+        const r = wrap.getBoundingClientRect();
+        tip.textContent = name;
+        tip.style.left = `${dom.clientX - r.left + 14}px`;
+        tip.style.top = `${dom.clientY - r.top + 14}px`;
+        tip.hidden = false;
+      };
+      polygon.addListener("mouseover", (e: google.maps.PolyMouseEvent) => {
+        if (selectedRef.current?.polygon !== polygon) {
+          polygon.setOptions({ fillOpacity: 0.38, strokeWeight: 3 });
+        }
+        showTip(e);
+      });
+      polygon.addListener("mousemove", showTip);
+      polygon.addListener("mouseout", () => {
+        if (selectedRef.current?.polygon !== polygon) polygon.setOptions(style);
+        if (tipRef.current) tipRef.current.hidden = true;
+      });
+    };
+
+    // Pinned areas: instructors added from the map. Always drawn, with or
+    // without a location search and whether or not "Show all polygons" is on.
+    // An instructor who is also a match is skipped here and drawn as a match
+    // below, so nothing is drawn twice.
+    const pinned = new Map((pinnedZones ?? []).map((p) => [p.name, p.color]));
+    for (const z of zones ?? []) {
+      const color = pinned.get(z.name);
+      if (!color || z.kind !== "polygon") continue;
+      if (point && via === "polygon" && matchedSet.has(z.name)) continue;
+      const pinnedStyle: google.maps.PolygonOptions = {
+        strokeColor: color,
+        strokeOpacity: 1,
+        strokeWeight: 2.5,
+        fillColor: color,
+        fillOpacity: 0.22,
+        zIndex: 4,
+      };
+      const polygon = new maps.Polygon({
+        map,
+        paths: z.coords.map((c) => ({ lat: c.lat, lng: c.lng })),
+        ...pinnedStyle,
+      });
+      makeClickable(polygon, z, pinnedStyle);
+      attachHover(polygon, z.name, pinnedStyle);
+      overlaysRef.current.polygons.push(polygon);
+    }
+
+    // Every other instructor polygon, each in its own colour and underneath the
+    // matched ones. Not added to `bounds`, so the map still frames the matches.
     if (showAllZones) {
       for (const z of zones ?? []) {
         if (z.kind !== "polygon") continue;
         if (point && via === "polygon" && matchedSet.has(z.name)) continue;
-        const greyStyle: google.maps.PolygonOptions = {
-          strokeColor: "#6b7280",
-          strokeWeight: 1,
-          strokeOpacity: 0.7,
-          fillColor: "#9ca3af",
-          fillOpacity: 0.08,
-          zIndex: 1,
+        if (pinned.has(z.name)) continue; // already drawn above
+        const color = areaColor(z.instructorId ?? z.name);
+        const areaStyle: google.maps.PolygonOptions = {
+          strokeColor: color,
+          strokeWeight: 2,
+          strokeOpacity: 0.95,
+          fillColor: color,
+          fillOpacity: 0.2,
+          // above the grey service-area shading (zIndex 0)
+          zIndex: 3,
         };
         const polygon = new maps.Polygon({
           map,
           paths: z.coords.map((c) => ({ lat: c.lat, lng: c.lng })),
-          ...greyStyle,
+          ...areaStyle,
         });
-        makeClickable(polygon, z, greyStyle);
+        makeClickable(polygon, z, areaStyle);
+        attachHover(polygon, z.name, areaStyle);
         overlaysRef.current.polygons.push(polygon);
       }
     }
@@ -456,8 +563,19 @@ function LocationSearch({
     zoneInfo,
     collapsed,
     showAllZones,
+    pinnedZones,
     expanded,
   ]);
+
+  // Grey shading for areas we do not serve. Separate from the overlay effect
+  // above so a search or a "show all polygons" toggle never redraws it. It runs
+  // after that effect (which creates the map), and re-runs whenever the map is
+  // rebuilt (collapse / expand) or the layer changes.
+  useEffect(() => {
+    const map = mapObjRef.current;
+    if (!maps || collapsed || !map || !serviceLayer || !showNonService) return;
+    return drawServiceAreaMask(maps, map, serviceLayer);
+  }, [maps, collapsed, serviceLayer, showNonService, expanded]);
 
   const clearLocal = (): void => {
     selectedPlaceRef.current = null;
@@ -577,23 +695,70 @@ function LocationSearch({
           )}
           {maps && (
             <div
+              ref={mapWrapRef}
               className={expanded ? "loc-map-wrap expanded" : "loc-map-wrap"}
             >
               <div className="loc-map-tools">
-                <label className="loc-toggle">
+                <label
+                  className={showAllZones ? "loc-pill on" : "loc-pill"}
+                  title="Draw every instructor's area on the map, each in its own colour"
+                >
                   <input
                     type="checkbox"
                     checked={showAllZones}
                     onChange={(e) => setShowAllZones(e.target.checked)}
                   />
+                  <span className="loc-pill-dots" aria-hidden="true">
+                    <i style={{ background: AREA_PALETTE[0] }} />
+                    <i style={{ background: AREA_PALETTE[1] }} />
+                    <i style={{ background: AREA_PALETTE[2] }} />
+                  </span>
                   Show all polygons
+                  {polygonCount > 0 && (
+                    <span className="loc-pill-count">{polygonCount}</span>
+                  )}
                 </label>
+                {hasServiceLayer && (
+                  <label
+                    className={showNonService ? "loc-pill on" : "loc-pill"}
+                    title="Grey = areas where we do not offer service"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={showNonService}
+                      onChange={(e) => setShowNonService(e.target.checked)}
+                    />
+                    <span className="loc-pill-swatch grey" aria-hidden="true" />
+                    Grey out areas we don&apos;t serve
+                  </label>
+                )}
               </div>
               <div
                 className="loc-map"
                 ref={mapElRef}
                 aria-label="Map of matched instructor areas"
               />
+              {(hasServiceLayer && showNonService) || showAllZones ? (
+                <div className="loc-legend" data-testid="loc-legend">
+                  {hasServiceLayer && showNonService && (
+                    <>
+                      <span>
+                        <i className="loc-pill-swatch white" /> We serve
+                      </span>
+                      <span>
+                        <i className="loc-pill-swatch grey" /> We don&apos;t
+                        serve
+                      </span>
+                    </>
+                  )}
+                  {showAllZones && (
+                    <span>
+                      <i className="loc-pill-swatch area" /> Instructor area
+                    </span>
+                  )}
+                </div>
+              ) : null}
+              <div className="loc-map-tip" ref={tipRef} hidden />
               {expandButton}
             </div>
           )}

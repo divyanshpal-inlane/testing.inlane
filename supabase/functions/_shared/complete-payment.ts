@@ -1,5 +1,7 @@
 import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.47.10";
 
+import { isLicenceEnrollment } from "./licence.ts";
+
 function getHalfPaymentLessons(totalHours: number): number[] {
   if (totalHours <= 1) return [1];
   if (totalHours === 2) return [1];
@@ -103,7 +105,34 @@ export async function completePayment(
   const installmentType = payment.installment_type || "full";
   const paymentType = payment.payment_type || "course";
 
+  // A licence service (rto_only) has no course and no lessons: mark it paid
+  // and stop. The course branch below would unlock phantom lessons, rewrite
+  // `progress` and open an LL journey.
+  let licenceHandled = false;
   if (paymentType === "course") {
+    const { data: licenceRow, error: licenceQueryError } = await supabaseClient
+      .from("enrollment")
+      .select("id, case_type")
+      .eq("payment_id", paymentId)
+      .maybeSingle();
+    // Never let this lookup break an ordinary course payment: on any error
+    // fall through to the unchanged course branch below.
+    if (licenceQueryError) {
+      console.error("Licence enrollment lookup failed:", licenceQueryError);
+    }
+    if (!licenceQueryError && isLicenceEnrollment(licenceRow)) {
+      const { error: licenceUpdateError } = await supabaseClient
+        .from("enrollment")
+        .update({ payment_status: "full_paid", status: "active" })
+        .eq("id", licenceRow.id);
+      if (licenceUpdateError) throw licenceUpdateError;
+      licenceHandled = true;
+    }
+  }
+
+  if (licenceHandled) {
+    // Handled above.
+  } else if (paymentType === "course") {
     const { data: enrollment, error: enrollmentQueryError } =
       await supabaseClient
         .from("enrollment")
@@ -457,7 +486,7 @@ export async function completePayment(
   // homepage shows the Fill-LL-Form state and the day-1/day-2 form reminders
   // (ll-flow-reminders) anchor to the payment date. Skipped for learners who
   // already hold an LL/DL or already have an active application.
-  if (paymentType === "course" || paymentType === "custom") {
+  if (!licenceHandled && (paymentType === "course" || paymentType === "custom")) {
     try {
       const { data: learnerFlags } = await supabaseClient
         .from("Learner")

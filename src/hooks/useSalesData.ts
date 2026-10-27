@@ -14,6 +14,7 @@ import {
   type BookingFlowConfig,
   readBookingFlowConfig,
 } from "@/lib/sales-dashboard/config";
+import { isActiveInstructor } from "@/lib/sales-dashboard/instructorStatus";
 import {
   cacheRead,
   cacheWrite,
@@ -242,13 +243,23 @@ function parseInstructors(
   });
 }
 
+// Only ACTIVE instructors exist as far as the dashboard is concerned (see
+// instructorStatus.ts): on-break / inactive rows are dropped here, so they can
+// never reach the grid, the search suggestions, the roster or the map.
 function parseLight(rows: Record<string, unknown>[]): LightInstructor[] {
-  return rows.map((r) => ({
-    id: String(r.id_instructor),
-    name: String(r.name ?? ""),
-    status: r.status == null ? null : String(r.status),
-    enabled: r.enabled == null ? null : Boolean(r.enabled),
-  }));
+  return rows
+    .filter((r) =>
+      isActiveInstructor({
+        status: r.status == null ? null : String(r.status),
+        enabled: r.enabled == null ? null : Boolean(r.enabled),
+      }),
+    )
+    .map((r) => ({
+      id: String(r.id_instructor),
+      name: String(r.name ?? ""),
+      status: r.status == null ? null : String(r.status),
+      enabled: r.enabled == null ? null : Boolean(r.enabled),
+    }));
 }
 
 function toInstructorLike(i: InstructorRow): InstructorLike {
@@ -346,9 +357,19 @@ export function useSalesData() {
     // realtime refresh and post-booking refresh). `force` is what lets a silent
     // refresh target an instructor that is still present -- otherwise the
     // `!s.instructors.has(id)` filter would skip every one of them.
-    async (ids: string[], opts: { silent?: boolean; force?: boolean } = {}) => {
+    //
+    // `range` widens the fetched Schedule dates beyond the dashboard's window
+    // (which starts tomorrow). Used to open an EARLIER-dated booking for editing.
+    async (
+      ids: string[],
+      opts: {
+        silent?: boolean;
+        force?: boolean;
+        range?: { from: string; to: string };
+      } = {},
+    ) => {
       if (ids.length === 0) return;
-      const { silent = false, force = false } = opts;
+      const { silent = false, force = false, range } = opts;
       const s = storeRef.current;
       const wanted = [...new Set(ids)].filter(
         (id) => !s.loading.has(id) && (force || !s.instructors.has(id)),
@@ -371,8 +392,10 @@ export function useSalesData() {
         commit();
         return;
       }
-      const from = datesRef.current[0];
-      const to = datesRef.current[datesRef.current.length - 1];
+      const windowFrom = datesRef.current[0];
+      const windowTo = datesRef.current[datesRef.current.length - 1];
+      const from = range && range.from < windowFrom ? range.from : windowFrom;
+      const to = range && range.to > windowTo ? range.to : windowTo;
       const excluded = cfg.excluded_schedule_statuses ?? [
         "cancelled",
         "rejected",
@@ -458,8 +481,13 @@ export function useSalesData() {
 
         const infos = new Map<string, InstructorRow>();
         for (const part of rawChunks) {
-          for (const r of parseInstructors(part, companyIds))
+          for (const r of parseInstructors(part, companyIds)) {
+            // On-break / inactive instructors are not part of the dashboard,
+            // even when their id was restored from a saved roster or arrived
+            // from a stale location match.
+            if (!isActiveInstructor(r)) continue;
             infos.set(r.id, r);
+          }
         }
 
         const learnerIds = [
@@ -693,6 +721,24 @@ export function useSalesData() {
   const loadInstructors = useCallback(
     (ids: string[]) => {
       void doLoad(ids);
+    },
+    [doLoad],
+  );
+
+  // Load instructors with a wider Schedule range than the dashboard window, so
+  // a booking on an earlier date can be opened for editing. Instructors already
+  // on the grid are re-fetched in place (no loading skeleton). A later refresh
+  // goes back to the normal window, which is fine: an edit already opened keeps
+  // its own state.
+  const loadInstructorRange = useCallback(
+    (ids: string[], range: { from: string; to: string }) => {
+      const s = storeRef.current;
+      const present = ids.filter((id) => s.instructors.has(id));
+      const absent = ids.filter((id) => !s.instructors.has(id));
+      if (absent.length > 0) void doLoad(absent, { range });
+      if (present.length > 0) {
+        void doLoad(present, { silent: true, force: true, range });
+      }
     },
     [doLoad],
   );
@@ -1026,6 +1072,7 @@ export function useSalesData() {
     data,
     reload,
     loadInstructors,
+    loadInstructorRange,
     removeInstructor,
     loadInstructorIndex,
     refreshInstructors,
