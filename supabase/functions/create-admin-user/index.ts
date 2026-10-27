@@ -35,14 +35,35 @@ serve(async (req) => {
       throw new Error("Unauthorized");
     }
 
-    // Check if requesting user is super admin
-    const { data: requestingAdmin, error: adminError } = await supabaseClient
-      .from("Admin")
-      .select("is_super_admin")
-      .eq("phone", requestingUser.phone)
-      .single();
-
-    if (adminError || !requestingAdmin?.is_super_admin) {
+    // Check if requesting user is super admin. Match the requester by id OR by
+    // their phone in every stored format: an exact-text match on the login phone
+    // rejected real super admins whose login is "91..." / "+91..." while the Admin
+    // row stores the bare 10 digits (a 400 the app showed as "non-2xx").
+    const requesterDigits = (requestingUser.phone ?? "").replace(/D/g, "");
+    const requesterLast10 = requesterDigits.slice(-10);
+    const requesterVariants = [
+      ...new Set([
+        requestingUser.phone ?? "",
+        requesterDigits,
+        requesterLast10,
+        `91${requesterLast10}`,
+        `+91${requesterLast10}`,
+      ]),
+    ].filter(Boolean);
+    const [{ data: byId }, { data: byPhone }] = await Promise.all([
+      supabaseClient
+        .from("Admin")
+        .select("is_super_admin")
+        .eq("id", requestingUser.id),
+      supabaseClient
+        .from("Admin")
+        .select("is_super_admin")
+        .in("phone", requesterVariants),
+    ]);
+    const isSuperAdmin = [...(byId ?? []), ...(byPhone ?? [])].some(
+      (a) => a.is_super_admin === true,
+    );
+    if (!isSuperAdmin) {
       throw new Error("Only super admin can create admin users");
     }
 
@@ -54,24 +75,30 @@ serve(async (req) => {
 
     console.log("Creating admin user:", { phone, name });
 
-    // Check if phone already exists in Admin table
-    const { data: existingAdmin } = await supabaseClient
+    // Check if phone already exists in the Admin table (any stored format)
+    const newDigits = String(phone).replace(/D/g, "");
+    const newLast10 = newDigits.slice(-10);
+    const { data: existingAdmins } = await supabaseClient
       .from("Admin")
       .select("id")
-      .eq("phone", phone)
-      .maybeSingle();
+      .in("phone", [
+        ...new Set([
+          String(phone),
+          newDigits,
+          newLast10,
+          `91${newLast10}`,
+          `+91${newLast10}`,
+        ]),
+      ])
+      .limit(1);
 
-    if (existingAdmin) {
+    if (existingAdmins && existingAdmins.length > 0) {
       throw new Error("This phone number already exists in the system");
     }
 
-    // Check if phone already exists in auth.users
-    const { data: existingUsers } = await supabaseClient.auth.admin.listUsers();
-    const phoneExists = existingUsers?.users?.some((u) => u.phone === phone);
-
-    if (phoneExists) {
-      throw new Error("This phone number already has an auth account");
-    }
+    // An existing auth account is detected by createUser below. (The old
+    // listUsers() pre-check only ever saw the first page of 50 of ~4,000 accounts,
+    // so it could not detect anything.)
 
     // Step 1: Create Admin record FIRST
     const { data: newAdmin, error: createAdminError } = await supabaseClient
@@ -111,7 +138,11 @@ serve(async (req) => {
       console.error("Error creating auth user:", authCreateError);
       // Rollback Admin record
       await supabaseClient.from("Admin").delete().eq("id", newAdmin.id);
-      throw new Error(authCreateError.message);
+      throw new Error(
+        /already|registered|exists/i.test(authCreateError.message)
+          ? "This phone number already has a login account"
+          : authCreateError.message,
+      );
     }
 
     console.log("Auth user created:", authUser.user.id);
