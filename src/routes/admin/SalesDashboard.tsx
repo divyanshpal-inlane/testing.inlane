@@ -23,12 +23,19 @@ import {
   useTransition,
 } from "react";
 
+import {
+  FindLearnerResult,
+  FindLearnerSearch,
+  type LookupTarget,
+} from "@/components/admin/sales-dashboard/FindLearnerPanel";
 import type { LocateStatus } from "@/components/admin/sales-dashboard/LocationSearch";
+import { useOrderBudget } from "@/components/admin/sales-dashboard/orderBudget";
 import { SendSlotsWhatsApp } from "@/components/admin/sales-dashboard/SendSlotsWhatsApp";
 import {
   SlotCustomer,
   SlotLearnerActions,
 } from "@/components/admin/sales-dashboard/SlotLearnerActions";
+import type { ServiceChoice } from "@/components/admin/sales-dashboard/SlotServiceLink";
 import type {
   CustomerFormValues,
   SlotPick,
@@ -58,6 +65,7 @@ import {
   bufferWaivedForCustomer,
   classifySlotConflict,
 } from "@/lib/sales-dashboard/conflict";
+import { isActiveInstructor } from "@/lib/sales-dashboard/instructorStatus";
 import { pointInPolygon } from "@/lib/sales-dashboard/kml";
 import { deriveMapAdded, locationRank } from "@/lib/sales-dashboard/mapAdded";
 import {
@@ -65,6 +73,27 @@ import {
   DEFAULT_NEARBY_RADIUS_KM,
   distanceToPolygonKm,
 } from "@/lib/sales-dashboard/nearby";
+import {
+  dateRangeOf,
+  moreAllowed,
+  type OrderSlot,
+  slotPaymentStatus,
+} from "@/lib/sales-dashboard/orderSlots";
+import {
+  type BookingIntent,
+  describeIntent,
+  intentToFormFields,
+  serviceLinkPatch,
+} from "@/lib/sales-dashboard/serviceBooking";
+import {
+  fmtStamp,
+  pauseRows,
+  sentenceCase,
+} from "@/lib/sales-dashboard/slotCardRows";
+import {
+  getTentativePermissions,
+  type TentativeActor,
+} from "@/lib/sales-dashboard/tentativePermissions";
 import {
   addDaysISO,
   dateToWeekdayLower,
@@ -209,28 +238,23 @@ const LOCATION_COLORS = [
 function isBookable(
   instructor: Pick<InstructorRow, "status" | "enabled">,
 ): boolean {
-  return (
-    !isDisabled(instructor) && (instructor.status ?? "active") === "active"
-  );
+  return isActiveInstructor(instructor);
 }
 
-// Distinct from isBookable: a disabled instructor has been
-// deactivated/removed and must never appear anywhere — not in the roster, not
-// in the grid, not in a name search, and never as a location match. status !==
-// "active" with `enabled !== false` (e.g. "on_break") is a *temporary* state —
-// that instructor still exists and a sales rep searching for them by name
-// should be able to find them, same as the existing behavior for
-// location-matched on-break instructors (see workingOnMap below).
+// The dashboard shows ACTIVE instructors only. "On break" and "inactive"
+// instructors must not appear anywhere on it: not in the roster, the grid,
+// name search, location matches, the map polygons or the "near" chips (see
+// instructorStatus.ts, which the data loaders also use so such rows never
+// enter state at all). This guard keeps every check below consistent with
+// that rule.
 //
 // Both columns are checked because they are only kept in sync by the admin UI
-// (`instructors.tsx` writes status and enabled together). A row carrying
-// status='inactive' with enabled=true — reachable via a direct write, an older
-// script, or a partially-applied migration — would otherwise be picked up by
-// workingOnMap and shown in the grid, which is exactly what must never happen.
+// (`instructors.tsx` writes status and enabled together), so a direct write,
+// an older script or a partially-applied migration can leave them disagreeing.
 function isDisabled(
   instructor: Pick<InstructorRow, "status" | "enabled">,
 ): boolean {
-  return instructor.enabled === false || instructor.status === "inactive";
+  return !isActiveInstructor(instructor);
 }
 
 // Short label shown next to an instructor's name wherever they can appear
@@ -499,6 +523,12 @@ function buildSlotCard(row: {
   description: string;
   lead: string;
   payment: string;
+  /** Tentative holds only: the service (order) the class belongs to. */
+  service?: string;
+  /** The class's state in words: Booked, Completed, Paused, Tentative... */
+  status?: string;
+  /** Anything else worth showing: pause reason, notes, start / end times. */
+  extra?: SlotCardRow[];
 }): SlotCardRow[] {
   const learnerWithClass =
     row.learner && row.lessonNumber != null
@@ -517,7 +547,29 @@ function buildSlotCard(row: {
     { label: "Description", value: row.description || "N/A" },
     { label: "Lead", value: row.lead || "N/A" },
     { label: "Payment", value: row.payment || "N/A" },
+    ...(row.service ? [{ label: "Service", value: row.service }] : []),
+    ...(row.status ? [{ label: "Status", value: row.status }] : []),
+    ...(row.extra ?? []),
   ];
+}
+
+/**
+ * The learner of a CONFIRMED class (booked, completed, paused, any other
+ * status), shaped for the slot panel's Learner + History & orders section, so
+ * every kind of slot with a learner shows the same lookups a tentative hold
+ * does. `confirmedClass` hides "Delete" there (it wipes the learner and every
+ * order). There is no `scheduleId`, so no service link row is shown either:
+ * linking is for tentative holds. Undefined when the class has no learner.
+ */
+function realClassCustomer(block: BlockDetail): SlotCustomer | undefined {
+  if (!block.learnerName && !block.learnerPhone) return undefined;
+  return {
+    name: block.learnerName,
+    phone: block.learnerPhone,
+    course: block.courseName,
+    paymentStatus: "unpaid",
+    confirmedClass: true,
+  };
 }
 
 interface WeekTimetableProps {
@@ -1097,6 +1149,7 @@ export default function SalesDashboard() {
     data,
     reload,
     loadInstructors,
+    loadInstructorRange,
     removeInstructor,
     loadInstructorIndex,
     refreshInstructors,
@@ -1125,6 +1178,17 @@ export default function SalesDashboard() {
     : currentUser?.id
       ? `user:${currentUser.id}`
       : null;
+  // Who is acting, for the edit / delete rules on tentative holds. The id
+  // (admin:<id> / user:<id>) is also stamped on new bookings as created_by_id
+  // so ownership no longer depends on a display name being unique.
+  const tentativeActor = useMemo<TentativeActor>(
+    () => ({
+      name: currentUserName,
+      id: rosterOwner,
+      isSuperAdmin: Boolean(currentAdmin?.is_super_admin),
+    }),
+    [currentUserName, rosterOwner, currentAdmin?.is_super_admin],
+  );
   const rosterStorageKey =
     rosterIdentityReady && rosterOwner
       ? `${ROSTER_STORAGE_PREFIX}:${rosterOwner}`
@@ -1152,7 +1216,9 @@ export default function SalesDashboard() {
   const [panelAnchorInput, setPanelAnchorInput] = useState<string>("");
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
   const [helpOpen, setHelpOpen] = useState(false);
-  const [dbZones, setDbZones] = useState<DbZone[] | null>(null);
+  // Every zone from the DB. The dashboard uses `dbZones` below, which keeps
+  // only ACTIVE instructors' polygons.
+  const [rawDbZones, setDbZones] = useState<DbZone[] | null>(null);
   const [companyIds, setCompanyIds] = useState<Set<string> | null>(null);
   const [zoneError, setZoneError] = useState<string | null>(null);
   const [locSearch, setLocSearch] = useState<{
@@ -1397,6 +1463,7 @@ export default function SalesDashboard() {
       setCustomerFormData(DEFAULT_CUSTOMER_FORM(currentUserName));
       setEditContext(null);
       setAddingSlotMode(false);
+      setBookingIntent(null);
       refreshInstructors(affectedIds);
     },
     [
@@ -1732,6 +1799,36 @@ export default function SalesDashboard() {
     setTentativeModalOpen(true);
   }, []);
 
+  // "Book classes" on a learner's service: the learner and service are known,
+  // the slot is not. The intent prefills the booking form; the next free slot
+  // the user clicks opens that form (see startFreshBooking). It stays armed
+  // until the booking is saved or the banner is dismissed.
+  const [bookingIntent, setBookingIntent] = useState<BookingIntent | null>(
+    null,
+  );
+  // A learner opened from the panel's "Find learner" search. While set, the
+  // panel shows that learner (and their History & orders) instead of the slot
+  // or booking view; any calendar click, or the close button, clears it.
+  const [lookupTarget, setLookupTarget] = useState<LookupTarget | null>(null);
+  // "Edit slots" on an order in History & orders: the class to open once its
+  // instructor's schedule has loaded into the grid.
+  const [pendingEdit, setPendingEdit] = useState<{
+    blockId: number;
+    instrId: string;
+    details: Record<string, unknown> | null;
+  } | null>(null);
+  const intentForm = useCallback(
+    (intent: BookingIntent, address = "") => ({
+      ...DEFAULT_CUSTOMER_FORM(currentUserName, address),
+      ...intentToFormFields(intent),
+    }),
+    [currentUserName],
+  );
+  const cancelBookingIntent = useCallback(() => {
+    setBookingIntent(null);
+    setCustomerFormData(DEFAULT_CUSTOMER_FORM(currentUserName));
+  }, [currentUserName]);
+
   // Roster persistence is keyed by the account-scoped storage key, which only
   // exists once useCurrentAdmin()/useCurrentUser() have resolved (that
   // requires a network round trip to the get-current-user edge function).
@@ -1837,6 +1934,17 @@ export default function SalesDashboard() {
   }, []);
 
   const allInstructors = data?.allInstructors ?? EMPTY_LIGHT;
+
+  // Polygons of active instructors only: an on-break / inactive instructor's
+  // area must not be drawn on the map, matched by a location search, or added
+  // from a polygon popup. allInstructors (the light index) already holds only
+  // active instructors; until it has loaded the zones stay "loading" rather
+  // than flashing unfiltered.
+  const dbZones = useMemo<DbZone[] | null>(() => {
+    if (rawDbZones === null || allInstructors.length === 0) return null;
+    const activeIds = new Set(allInstructors.map((i) => i.id));
+    return rawDbZones.filter((z) => activeIds.has(z.instructorId));
+  }, [rawDbZones, allInstructors]);
 
   const instructorsById = useMemo(() => {
     const map = new Map<string, InstructorRow>();
@@ -2097,16 +2205,15 @@ export default function SalesDashboard() {
     setMapAddedIds(new Set());
     setSort("distance");
     setSelectedRows(new Set());
+    setBookingIntent(null);
     clearLocation();
   };
 
-  // Any on-break/paused-but-enabled instructor that's either matched by
-  // location OR already explicitly loaded (via name search + Add) is
-  // treated as "working" for display purposes — real free counts still show
-  // (their schedule/unavailability data is unaffected by this status), with
-  // a "break-badge" note next to their name (see statusNote()) so it's clear
-  // they're temporarily unavailable. Fully disabled instructors are never
-  // included here.
+  // Historically on-break instructors that were matched by location or added by
+  // name were shown with a break badge. They are no longer shown at all (the
+  // data loaders and the zone list drop everything that is not active), so
+  // this set is always empty. It is kept only so the many "bookable OR
+  // working" checks below keep reading the same way.
   const workingOnMap = useMemo(() => {
     const set = new Set<string>();
     if (locSearch) {
@@ -2297,6 +2404,15 @@ export default function SalesDashboard() {
   // needs both in its dependency array, and referencing a const before its
   // own declaration executes throws a ReferenceError (temporal dead zone),
   // not just a lint nit.
+  // How many classes the order this booking is linked to still has. While a
+  // booking is open this gates how many classes can be picked: an order of 10
+  // with 5 booked elsewhere lets this booking hold 5, no more. The classes of
+  // the booking being edited do not count against themselves.
+  const { budget: classBudgetNow } = useOrderBudget(
+    customerFormData.enrollmentId,
+    editContext?.rowIds ?? [],
+  );
+
   const handleSlotSelect = useCallback(
     (
       instrId: string,
@@ -2310,6 +2426,7 @@ export default function SalesDashboard() {
       // to book, so it just displays its details -- no validation, no notice,
       // and it must not disturb an in-progress booking.
       setSelectedSlot({ instrId, date, minute, free, info });
+      setLookupTarget(null);
       // The "Booking saved" card outranks slot details in the panel, so any
       // new selection has to retire it or the click would appear to do nothing.
       setJustBooked(null);
@@ -2443,6 +2560,19 @@ export default function SalesDashboard() {
       };
 
       if (addingSlotMode) {
+        // The order only has so many classes: do not take one more than it has
+        // left (a replacement swaps a class, so it is always allowed).
+        if (
+          replacingSlotIndex === null &&
+          moreAllowed(classBudgetNow, pendingSlots.length) === 0
+        ) {
+          showSlotNotice(
+            `This order has no classes left to add (${classBudgetNow?.total} in total, ${classBudgetNow?.bookedElsewhere} already booked elsewhere).`,
+          );
+          setAddingSlotMode(false);
+          setTentativeModalOpen(true);
+          return;
+        }
         // Task 19: adding another class to the SAME in-progress batch.
         // customerFormData is untouched — it's owned here, not by the
         // modal, so it survived the modal being hidden while this slot
@@ -2496,12 +2626,24 @@ export default function SalesDashboard() {
       // instructor and its schedule expands in the same commit below, and the
       // layout effect keyed on `preserveScrollRef` restores this offset before
       // paint so the page doesn't jump.
+      if (
+        bookingIntent &&
+        customerFormData.enrollmentId === bookingIntent.enrollmentId &&
+        moreAllowed(classBudgetNow, 0) === 0
+      ) {
+        showSlotNotice(
+          `All ${classBudgetNow?.total} classes on this order are already booked. Open them with "Edit slots" in History & orders instead.`,
+        );
+        return;
+      }
       const startFreshBooking = () => {
         preserveScrollRef.current = window.scrollY;
         setEditContext(null);
         setPendingSlots([newSlot]);
         setCustomerFormData(
-          DEFAULT_CUSTOMER_FORM(currentUserName, locSearch?.label ?? ""),
+          bookingIntent
+            ? intentForm(bookingIntent, locSearch?.label ?? "")
+            : DEFAULT_CUSTOMER_FORM(currentUserName, locSearch?.label ?? ""),
         );
         setTentativeModalOpen(true);
       };
@@ -2535,6 +2677,10 @@ export default function SalesDashboard() {
       editContext,
       needsDiscardConfirm,
       currentUserName,
+      bookingIntent,
+      intentForm,
+      classBudgetNow,
+      customerFormData.enrollmentId,
       customerFormData.customerPhone,
       data?.freeGrid,
       locSearch,
@@ -2665,17 +2811,28 @@ export default function SalesDashboard() {
         accepted.push(slot);
       }
 
-      if (accepted.length > 0) {
-        setPendingSlots((prev) => [...prev, ...accepted]);
+      // An order of N classes takes at most N: keep what fits, say what was left out.
+      const room = moreAllowed(classBudgetNow, pendingSlots.length);
+      let toAdd = accepted;
+      if (room !== null && accepted.length > room) {
+        toAdd = accepted.slice(0, room);
+        skipped.push(
+          `Only ${room} more class${room === 1 ? "" : "es"} can be booked on this order (${classBudgetNow?.total} in total, ${(classBudgetNow?.bookedElsewhere ?? 0) + pendingSlots.length} used). ${accepted.length - room} not added.`,
+        );
+      }
+      if (toAdd.length > 0) {
+        setPendingSlots((prev) => [...prev, ...toAdd]);
       }
 
-      return { added: accepted.length, skipped };
+      return { added: toAdd.length, skipped };
     },
     [
       lockedInstructorId,
       config?.instructor_gap_minutes,
       data?.freeGrid,
       blocksIndex,
+      classBudgetNow,
+      pendingSlots.length,
     ],
   );
 
@@ -2705,10 +2862,26 @@ export default function SalesDashboard() {
         // A request that carries a batch id only accepts rows with that same
         // id. Only when NEITHER side has one (legacy rows) fall back to the
         // customer identity.
-        if (batchId || bBatch) return bBatch === batchId;
-        const bPhone = typeof bd.phone === "string" ? bd.phone : "";
-        const bName = typeof bd.name === "string" ? bd.name : "";
-        return phone !== "" && bPhone === phone && bName === name;
+        const sameBooking =
+          batchId || bBatch
+            ? bBatch === batchId
+            : phone !== "" &&
+              (typeof bd.phone === "string" ? bd.phone : "") === phone &&
+              (typeof bd.name === "string" ? bd.name : "") === name;
+        if (!sameBooking) return false;
+        // The legacy phone+name fallback can pull in ANOTHER agent's class for
+        // the same customer. Editing saves every row it loaded, so a row this
+        // user may not edit must never be loaded (the clicked row was already
+        // permission-checked).
+        if (b.id === action.blockId) return true;
+        return getTentativePermissions(
+          {
+            details: b.rawTentativeDetails,
+            paymentStatus: b.paymentStatus,
+            isTentative: b.isTentative,
+          },
+          tentativeActor,
+        ).canEdit;
       };
 
       const siblings = (data?.blocks ?? [])
@@ -2761,11 +2934,15 @@ export default function SalesDashboard() {
         course:
           typeof td.course === "string" && td.course ? td.course : NO_COURSE,
         customerEmail: typeof td.email === "string" ? td.email : undefined,
+        enrollmentId:
+          typeof td.enrollment_id === "string" ? td.enrollment_id : undefined,
+        serviceLabel:
+          typeof td.service_label === "string" ? td.service_label : undefined,
       });
       setSelectedSlot(null);
       setTentativeModalOpen(true);
     },
-    [currentUserName, data?.blocks, instructorsById],
+    [currentUserName, data?.blocks, instructorsById, tentativeActor],
   );
 
   // Opening a different booking to edit replaces the in-progress batch, so
@@ -2789,6 +2966,65 @@ export default function SalesDashboard() {
     [needsDiscardConfirm, pendingSlots.length, editContext, startEditBooking],
   );
 
+  // "Edit slots" on an order: check the user may edit it, load the
+  // instructor's schedule INCLUDING the classes' dates (the grid normally
+  // starts tomorrow, so an earlier-dated class would not be there), then open
+  // the normal edit flow for that booking (see the effect below).
+  const editOrderSlots = useCallback(
+    (slots: OrderSlot[]) => {
+      const first = slots[0];
+      if (!first) return;
+      const perms = getTentativePermissions(
+        {
+          details: first.details,
+          // Sales bookings write payment_status, Instructor Management
+          // paid_info: read either.
+          paymentStatus: slotPaymentStatus(first.details),
+          isTentative: true,
+        },
+        tentativeActor,
+      );
+      if (!perms.canEdit) {
+        showSlotNotice(perms.reason ?? "You can't edit this booking.");
+        return;
+      }
+      setLookupTarget(null);
+      setPendingEdit({
+        blockId: first.id,
+        instrId: first.instructorId,
+        details: first.details,
+      });
+      const range = dateRangeOf(slots);
+      const ids = [...new Set(slots.map((s) => s.instructorId))];
+      if (range) loadInstructorRange(ids, range);
+      else loadInstructors(ids);
+    },
+    [tentativeActor, showSlotNotice, loadInstructors, loadInstructorRange],
+  );
+  useEffect(() => {
+    if (!pendingEdit) return;
+    const loaded = (data?.blocks ?? []).some(
+      (b) => b.id === pendingEdit.blockId,
+    );
+    if (loaded) {
+      const req = pendingEdit;
+      setPendingEdit(null);
+      handleEditBooking({
+        blockId: req.blockId,
+        instrId: req.instrId,
+        tentativeDetails: req.details,
+      });
+      return;
+    }
+    const t = window.setTimeout(() => {
+      setPendingEdit(null);
+      showSlotNotice(
+        "Couldn't open that booking. Add the instructor to the dashboard and click the slot.",
+      );
+    }, 20000);
+    return () => window.clearTimeout(t);
+  }, [pendingEdit, data?.blocks, handleEditBooking, showSlotNotice]);
+
   // Lets Sales fix a wrong entry (e.g. a typo'd name/phone or a slot picked
   // by mistake) without needing Operations or Instructor Management —
   // this works regardless of payment status, since it's just removing a
@@ -2797,34 +3033,279 @@ export default function SalesDashboard() {
   // window.confirm() -- unstyled, doesn't match the app, and (unlike this
   // dialog) can't be dismissed by clicking outside or be given a real
   // destructive-action button.
-  const [pendingDelete, setPendingDelete] = useState<NonNullable<
-    SlotInfo["deleteAction"]
-  > | null>(null);
+  // pendingDelete also carries the OTHER classes booked together with this one
+  // (same batch, same instructor, and only those this user may delete), so a
+  // multi-class booking can be removed in one go instead of one click each.
+  const [pendingDelete, setPendingDelete] = useState<{
+    action: NonNullable<SlotInfo["deleteAction"]>;
+    siblingIds: number[];
+  } | null>(null);
 
   const handleDeleteTentative = useCallback(
     (action: NonNullable<SlotInfo["deleteAction"]>) => {
-      setPendingDelete(action);
+      const blocks = data?.blocks ?? [];
+      const target = blocks.find((b) => b.id === action.blockId);
+      const batchId =
+        typeof target?.rawTentativeDetails?.batch_id === "string"
+          ? target.rawTentativeDetails.batch_id
+          : "";
+      const siblingIds = batchId
+        ? blocks
+            .filter(
+              (b) =>
+                b.id !== action.blockId &&
+                b.instructorId === action.instrId &&
+                b.isTentative &&
+                b.rawTentativeDetails?.batch_id === batchId &&
+                getTentativePermissions(
+                  {
+                    details: b.rawTentativeDetails,
+                    paymentStatus: b.paymentStatus,
+                    isTentative: b.isTentative,
+                  },
+                  tentativeActor,
+                ).canDelete,
+            )
+            .map((b) => b.id)
+        : [];
+      setPendingDelete({ action, siblingIds });
     },
-    [],
+    [data?.blocks, tentativeActor],
   );
 
-  const confirmDeleteTentative = useCallback(() => {
-    const action = pendingDelete;
-    if (!action) return;
-    setPendingDelete(null);
-    void supabase
-      .from("Schedule")
-      .delete()
-      .eq("id", action.blockId)
-      .then(({ error }) => {
+  const confirmDeleteTentative = useCallback(
+    async (scope: "one" | "all") => {
+      const pending = pendingDelete;
+      if (!pending) return;
+      setPendingDelete(null);
+      const ids =
+        scope === "all"
+          ? [pending.action.blockId, ...pending.siblingIds]
+          : [pending.action.blockId];
+
+      // Re-check against the database right now. The grid can be minutes old:
+      // Operations may have confirmed the class, someone may have deleted it,
+      // or it may have been handed over since this dialog was opened.
+      // (The generated DB types predate tentative_details, hence the cast.)
+      const { data: fresh, error: freshError } = (await supabase
+        .from("Schedule")
+        .select("id, isTentative, tentative_details")
+        .in("id", ids)) as unknown as {
+        data:
+          | {
+              id: number;
+              isTentative: boolean | null;
+              tentative_details: Record<string, unknown> | null;
+            }[]
+          | null;
+        error: { message: string } | null;
+      };
+      if (freshError) {
+        showSlotNotice(`Couldn't delete slot: ${freshError.message}`);
+        return;
+      }
+      const deletable = (fresh ?? [])
+        .filter(
+          (r) =>
+            r.isTentative === true &&
+            getTentativePermissions(
+              {
+                details: r.tentative_details,
+                isTentative: true,
+              },
+              tentativeActor,
+            ).canDelete,
+        )
+        .map((r) => r.id);
+      if (deletable.length === 0) {
+        showSlotNotice(
+          "This slot has changed since you opened it (confirmed, already deleted, or no longer yours). Refreshed.",
+        );
+        refreshInstructors([pending.action.instrId]);
+        return;
+      }
+
+      // isTentative = true again on the delete itself, so a class confirmed
+      // in the instant between the check and the delete is still protected.
+      const { data: deleted, error } = await supabase
+        .from("Schedule")
+        .delete()
+        .in("id", deletable)
+        .eq("isTentative", true)
+        .select("id");
+      if (error) {
+        showSlotNotice(`Couldn't delete slot: ${error.message}`);
+        return;
+      }
+      const count = deleted?.length ?? 0;
+      const skipped = ids.length - count;
+      showSuccessNotice(
+        count === 1
+          ? "Tentative slot deleted."
+          : `${count} tentative classes deleted.`,
+      );
+      if (skipped > 0) {
+        showSlotNotice(
+          `${skipped} class${skipped === 1 ? " was" : "es were"} not deleted (already changed or not yours).`,
+        );
+      }
+      refreshInstructors([pending.action.instrId]);
+    },
+    [
+      pendingDelete,
+      refreshInstructors,
+      showSlotNotice,
+      showSuccessNotice,
+      tentativeActor,
+    ],
+  );
+
+  // Start booking classes for one of a learner's services. Replaces any
+  // in-progress booking, so confirm first when 2+ classes are picked.
+  const startBookingForService = useCallback(
+    (intent: BookingIntent) => {
+      const begin = () => {
+        setBookingIntent(intent);
+        setEditContext(null);
+        setPendingSlots([]);
+        setAddingSlotMode(false);
+        setTentativeModalOpen(false);
+        setSelectedSlot(null);
+        setJustBooked(null);
+        setCustomerFormData(intentForm(intent));
+      };
+      if (needsDiscardConfirm) {
+        setDiscardPrompt({
+          count: pendingSlots.length,
+          title: "Start booking for this service?",
+          message: editContext
+            ? "You have unsaved changes to the booking you are editing. Starting a new booking will throw them away."
+            : `You have ${pendingSlots.length} classes selected for another booking. Starting this one will remove all of them.`,
+          confirmLabel: "Discard & continue",
+          run: begin,
+        });
+        return;
+      }
+      begin();
+    },
+    [needsDiscardConfirm, pendingSlots.length, editContext, intentForm],
+  );
+
+  // Link a saved tentative slot, and every class booked together with it, to
+  // one of the learner's services. Re-checks the database first (the grid can
+  // be stale) and only touches rows that are still tentative and editable.
+  const linkSlotToService = useCallback(
+    async (customer: SlotCustomer, choice: ServiceChoice) => {
+      const blocks = data?.blocks ?? [];
+      const target = blocks.find((b) => b.id === customer.scheduleId);
+      if (!target) {
+        showSlotNotice("Couldn't find that slot. Refresh and try again.");
+        return;
+      }
+      const batchId =
+        typeof target.rawTentativeDetails?.batch_id === "string"
+          ? target.rawTentativeDetails.batch_id
+          : "";
+      const ids = batchId
+        ? blocks
+            .filter(
+              (b) =>
+                b.instructorId === target.instructorId &&
+                b.isTentative &&
+                b.rawTentativeDetails?.batch_id === batchId,
+            )
+            .map((b) => b.id)
+        : [target.id];
+
+      const { data: fresh, error: freshError } = (await supabase
+        .from("Schedule")
+        .select("id, isTentative, tentative_details")
+        .in("id", ids)) as unknown as {
+        data:
+          | {
+              id: number;
+              isTentative: boolean | null;
+              tentative_details: Record<string, unknown> | null;
+            }[]
+          | null;
+        error: { message: string } | null;
+      };
+      if (freshError) {
+        showSlotNotice(`Couldn't link the service: ${freshError.message}`);
+        return;
+      }
+      const editable = (fresh ?? []).filter(
+        (r) =>
+          r.isTentative === true &&
+          getTentativePermissions(
+            { details: r.tentative_details, isTentative: true },
+            tentativeActor,
+          ).canEdit,
+      );
+      if (editable.length === 0) {
+        showSlotNotice(
+          "This slot has changed since you opened it, so it can't be linked. Refreshed.",
+        );
+        refreshInstructors([target.instructorId]);
+        return;
+      }
+
+      const patch = serviceLinkPatch(choice);
+      let linked = 0;
+      for (const r of editable) {
+        const { data: updated, error } = (await supabase
+          .from("Schedule")
+          .update({
+            tentative_details: { ...(r.tentative_details ?? {}), ...patch },
+          } as never)
+          .eq("id", r.id)
+          .eq("isTentative", true)
+          .select("id")) as unknown as {
+          data: { id: number }[] | null;
+          error: { message: string } | null;
+        };
         if (error) {
-          showSlotNotice(`Couldn't delete slot: ${error.message}`);
-          return;
+          showSlotNotice(`Couldn't link the service: ${error.message}`);
+          break;
         }
-        showSuccessNotice("Tentative slot deleted.");
-        refreshInstructors([action.instrId]);
-      });
-  }, [pendingDelete, refreshInstructors, showSlotNotice, showSuccessNotice]);
+        linked += updated?.length ?? 0;
+      }
+      if (linked > 0) {
+        if (!choice.silent) {
+          showSuccessNotice(
+            linked === 1
+              ? `Slot linked to ${choice.serviceLabel}.`
+              : `${linked} classes linked to ${choice.serviceLabel}.`,
+          );
+        }
+        // Update the open panel at once; the grid refresh follows.
+        setSelectedSlot((prev) =>
+          prev && prev.info.customer
+            ? {
+                ...prev,
+                info: {
+                  ...prev.info,
+                  customer: {
+                    ...prev.info.customer,
+                    enrollmentId: choice.enrollmentId,
+                    serviceLabel: choice.serviceLabel,
+                    paymentStatus: choice.paymentStatus,
+                  },
+                },
+              }
+            : prev,
+        );
+        refreshInstructors([target.instructorId]);
+      }
+    },
+    [
+      data?.blocks,
+      refreshInstructors,
+      showSlotNotice,
+      showSuccessNotice,
+      tentativeActor,
+    ],
+  );
 
   const resolveInfo = useMemo(() => {
     const gap = config?.instructor_gap_minutes ?? 0;
@@ -3040,7 +3521,30 @@ export default function SalesDashboard() {
                   description: "",
                   lead: "",
                   payment: "",
+                  status: cover.status === "booked" ? "Booked" : "Completed",
+                  extra:
+                    cover.status === "completed"
+                      ? [
+                          ...(cover.startedAt
+                            ? [
+                                {
+                                  label: "Started",
+                                  value: fmtStamp(cover.startedAt),
+                                },
+                              ]
+                            : []),
+                          ...(cover.endedAt
+                            ? [
+                                {
+                                  label: "Ended",
+                                  value: fmtStamp(cover.endedAt),
+                                },
+                              ]
+                            : []),
+                        ]
+                      : undefined,
                 }),
+            customer: isBuffer ? undefined : realClassCustomer(cover),
             scheduleBlock: scheduleBlock(
               cover.status === "booked"
                 ? "Booked"
@@ -3088,10 +3592,12 @@ export default function SalesDashboard() {
                     description: "",
                     lead: "",
                     payment: "Payment pending",
+                    status: "On hold until payment completes",
                   }),
               panelDetail: isBuffer
                 ? undefined
                 : ["Slot is on hold until payment completes."],
+              customer: isBuffer ? undefined : realClassCustomer(cover),
               scheduleBlock: scheduleBlock("Payment pending"),
             };
           }
@@ -3127,38 +3633,31 @@ export default function SalesDashboard() {
             tentativeDetail.push(`${ADDRESS_DETAIL_PREFIX}${cover.area}`);
           if (cover.courseName)
             tentativeDetail.push(`Course: ${cover.courseName}`);
-          // Only the sales agent who created a tentative hold can delete
-          // it — matched against tentative_details.sales_agent, the same
-          // field the "Sales Agent" form field is locked to (see
-          // currentUserName above), trimmed/case-insensitive so a stray
-          // space or capitalization difference doesn't wrongly block the
-          // actual creator. Fails CLOSED, not open: a row with no recorded
-          // sales_agent (e.g. Instructor-Management-created rows never set
-          // this field) has no verifiable creator, so it must NOT be
-          // deletable from here either — the earlier version of this check
-          // treated "unknown creator" as "anyone may delete it", which is
-          // exactly backwards and let any logged-in account delete a real
-          // customer's tentative hold it never created.
-          const creatorName =
-            typeof cover.rawTentativeDetails?.sales_agent === "string"
-              ? cover.rawTentativeDetails.sales_agent.trim()
-              : "";
-          const canDelete =
-            creatorName !== "" &&
-            creatorName.toLowerCase() === currentUserName.trim().toLowerCase();
-          // The creator may edit their own tentative slot at any payment
-          // status; anyone may edit an unpaid one (e.g. to hand it to a
-          // learner who is now paying). Delete stays creator-only.
-          const canEdit = canDelete || isUnpaid;
+          // Edit / delete rules live in tentativePermissions.ts (one place, unit
+          // tested): the creator -- matched by account id when the booking
+          // recorded one, else by name -- or a super admin may delete; they
+          // or anyone, while the slot is unpaid, may edit. Fails closed when
+          // the creator is unknown or the viewer is still loading.
+          const perms = getTentativePermissions(
+            {
+              details: cover.rawTentativeDetails,
+              paymentStatus: cover.paymentStatus,
+              isTentative: true,
+            },
+            tentativeActor,
+          );
+          const canDelete = perms.canDelete;
+          const canEdit = perms.canEdit;
           if (isUnpaid) {
             tentativeDetail.push("Unpaid — anyone can edit this booking.");
           }
-          if (!canDelete) {
+          if (perms.viaSuperAdmin) {
             tentativeDetail.push(
-              creatorName
-                ? `Created by ${creatorName} — only they can delete${canEdit ? "" : " or edit"} this.`
-                : `No creator recorded for this slot — it can't be deleted${canEdit ? "" : " or edited"} from here.`,
+              "Super admin — you can edit or delete this booking.",
             );
+          }
+          if (!canDelete && perms.reason) {
+            tentativeDetail.push(perms.reason);
           }
           // Keep the panel's existing hold notes (edit/creator) alongside
           // the card, so nothing the panel showed before is lost.
@@ -3190,6 +3689,11 @@ export default function SalesDashboard() {
               lead: cover.rawTentativeDetails?.leadName
                 ? String(cover.rawTentativeDetails.leadName)
                 : "",
+              service:
+                typeof cover.rawTentativeDetails?.service_label === "string"
+                  ? cover.rawTentativeDetails.service_label
+                  : "",
+              status: "Tentative (hold)",
               payment:
                 paymentStatus === "full_paid"
                   ? "Full paid"
@@ -3234,6 +3738,17 @@ export default function SalesDashboard() {
                 cover.rawTentativeDetails.phone
                   ? cover.rawTentativeDetails.phone
                   : cover.learnerPhone,
+              scheduleId: cover.id,
+              instructorId: instrId,
+              canEdit,
+              enrollmentId:
+                typeof cover.rawTentativeDetails?.enrollment_id === "string"
+                  ? cover.rawTentativeDetails.enrollment_id
+                  : undefined,
+              serviceLabel:
+                typeof cover.rawTentativeDetails?.service_label === "string"
+                  ? cover.rawTentativeDetails.service_label
+                  : undefined,
               course: tentativeCourseLabel || cover.courseName,
               courseId:
                 typeof cover.rawTentativeDetails?.course === "string" &&
@@ -3263,6 +3778,26 @@ export default function SalesDashboard() {
                 ],
             kind: isBuffer ? "default" : "paused",
             deleteAction: null,
+            // The full class card, like a booked class: who, where, which
+            // course, plus why it is paused.
+            card: isBuffer
+              ? undefined
+              : buildSlotCard({
+                  startMinute: cover.startMinute,
+                  endMinute: cover.endMinute,
+                  instructor: name,
+                  learner: cover.learnerName,
+                  lessonNumber: cover.lessonNumber,
+                  phone: displayPhone(cover.learnerPhone),
+                  location: cover.area,
+                  course: cover.courseName,
+                  description: "",
+                  lead: "",
+                  payment: "",
+                  status: "Paused",
+                  extra: pauseRows(cover.pauseReason, cover.notes),
+                }),
+            customer: isBuffer ? undefined : realClassCustomer(cover),
             scheduleBlock: scheduleBlock(
               cover.pauseReason.toLowerCase() === "payment"
                 ? "Payment due"
@@ -3275,6 +3810,25 @@ export default function SalesDashboard() {
           detail: [blockTime, `Instructor: ${name}`],
           kind: "default",
           deleteAction: null,
+          // Whatever the status, show the class's details, not just the time.
+          card: isBuffer
+            ? undefined
+            : buildSlotCard({
+                startMinute: cover.startMinute,
+                endMinute: cover.endMinute,
+                instructor: name,
+                learner: cover.learnerName,
+                lessonNumber: cover.lessonNumber,
+                phone: displayPhone(cover.learnerPhone),
+                location: cover.area,
+                course: cover.courseName,
+                description: "",
+                lead: "",
+                payment: "",
+                status: sentenceCase(cover.status.replace(/_/g, " ")),
+                extra: pauseRows(cover.pauseReason, cover.notes),
+              }),
+          customer: isBuffer ? undefined : realClassCustomer(cover),
           scheduleBlock: scheduleBlock(cap(cover.status)),
         };
       }
@@ -3291,6 +3845,18 @@ export default function SalesDashboard() {
           ],
           kind: "unavailable",
           deleteAction: null,
+          card: [
+            {
+              label: "Time",
+              value: `${minutesTo12Hour(minute)} — ${minutesTo12Hour(minute + (config?.gridMinutes ?? 30))}`,
+            },
+            { label: "Instructor", value: name || "N/A" },
+            { label: "Status", value: "Unavailable" },
+            {
+              label: "Reason",
+              value: unavailReason() || "Marked unavailable by the instructor",
+            },
+          ],
         };
       }
 
@@ -3343,7 +3909,7 @@ export default function SalesDashboard() {
     pendingSlots,
     addingSlotMode,
     replacingSlotIndex,
-    currentUserName,
+    tentativeActor,
     displayPhone,
     timeStarts,
   ]);
@@ -3665,6 +4231,18 @@ export default function SalesDashboard() {
           </div>
         </header>
 
+        {/* Find learner: its own full-width bar just under the top bar. The
+            learner it opens is shown in the left column below. */}
+        <FindLearnerSearch
+          target={lookupTarget}
+          onTarget={(t) => {
+            setLookupTarget(t);
+            // The booking form owns the panel while open: hide it (its state
+            // lives here, so nothing is lost) for the learner view.
+            if (t && tentativeModalOpen) setTentativeModalOpen(false);
+          }}
+        />
+
         {/* Two-column body: the calendar keeps its width and the slot panel
             takes the space to its right, instead of the booking form
             covering the grid. Mirrors InstructorSchedulePage's detail column. */}
@@ -3673,241 +4251,272 @@ export default function SalesDashboard() {
               for a free slot, that slot's details for a taken one, and a
               "select a slot" prompt when nothing is picked. Every cell is a
               single click now, so both cases come through this one handler. */}
-          <aside className="slot-panel" aria-label="Slot panel">
-            {!tentativeModalOpen &&
-              (pendingSlots.length > 0 || editContext !== null) && (
-                <button
-                  type="button"
-                  className="slot-panel-back-to-form"
-                  onClick={() => setTentativeModalOpen(true)}
-                  style={{
-                    margin: "8px 12px 0",
-                    padding: "6px 10px",
-                    fontSize: 13,
-                    fontWeight: 600,
-                    border: "1px solid var(--gc-border)",
-                    borderRadius: 6,
-                    background: "transparent",
-                    cursor: "pointer",
-                  }}
-                >
-                  ← Back to booking form
-                </button>
-              )}
-            {tentativeModalOpen ? (
-              <TentativeBookingModal
-                variant="panel"
-                isOpen={tentativeModalOpen}
-                onClose={handleCloseTentativeModal}
-                onSuccess={handleTentativeSuccess}
-                slots={pendingSlots}
-                onRemoveSlot={handleRemoveSlot}
-                onAddAnotherSlot={handleAddAnotherSlot}
-                onChangeSlot={handleChangeSlot}
-                onAddBulkSlots={handleAddBulkSlots}
-                validateSlot={validateSlotFresh}
-                formData={customerFormData}
-                onFormDataChange={setCustomerFormData}
-                editContext={editContext}
+          <div className="slot-side">
+            {lookupTarget && (
+              <FindLearnerResult
+                target={lookupTarget}
+                onClose={() => setLookupTarget(null)}
+                onBookClasses={(intent) => {
+                  setLookupTarget(null);
+                  startBookingForService(intent);
+                }}
+                onEditSlots={editOrderSlots}
               />
-            ) : justBooked && justBooked.slots.length > 0 ? (
-              <div className="slot-panel-detail">
-                <div className="slot-panel-detail-top">
-                  <span className="slot-panel-badge slot-panel-badge-tentative">
-                    Booking saved
-                  </span>
-                  <button
-                    type="button"
-                    className="slot-panel-detail-close"
-                    onClick={() => setJustBooked(null)}
-                    aria-label="Dismiss"
-                  >
-                    ×
-                  </button>
-                </div>
-                <SendSlotsWhatsApp
-                  customerName={justBooked.name}
-                  slots={justBooked.slots}
-                  target={
-                    justBooked.batchId
-                      ? { batchId: justBooked.batchId }
-                      : { scheduleIds: [] }
-                  }
-                  hasPhone={Boolean(normalizePhone(justBooked.phone))}
-                />
-                <SlotLearnerActions
-                  key={`booked-${justBooked.phone}`}
-                  customer={{
-                    name: justBooked.name,
-                    phone: justBooked.phone,
-                    email: justBooked.email,
-                    courseId: justBooked.courseId,
-                    course: "",
-                    paymentStatus: justBooked.paymentStatus,
-                  }}
-                />
-              </div>
-            ) : selectedSlot ? (
-              <div className="slot-panel-detail">
-                <div className="slot-panel-detail-top">
-                  <span
-                    className={`slot-panel-badge slot-panel-badge-${selectedSlot.info.kind}`}
-                  >
-                    {SLOT_KIND_LABELS[selectedSlot.info.kind] ??
-                      selectedSlot.info.kind}
-                  </span>
-                  <button
-                    type="button"
-                    className="slot-panel-detail-close"
-                    onClick={() => setSelectedSlot(null)}
-                    aria-label="Close slot details"
-                  >
-                    &times;
-                  </button>
-                </div>
-                <h2 className="slot-panel-detail-title">
-                  {selectedSlot.info.title}
-                </h2>
-                <p className="slot-panel-detail-when">
-                  {instructorsById.get(selectedSlot.instrId)?.name ??
-                    selectedSlot.instrId}{" "}
-                  &middot; {selectedSlot.date} &middot;{" "}
-                  {minutesToTime(selectedSlot.minute)}&ndash;
-                  {minutesToTime(selectedSlot.minute + 60)}
-                </p>
-                {selectedSlot.info.card ? (
-                  <>
-                    <dl className="slot-panel-detail-list">
-                      {selectedSlot.info.card.map((row, i) => (
-                        <div className="slot-panel-detail-row" key={i}>
-                          <dt>{row.label}</dt>
-                          <dd>{row.value}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                    {(selectedSlot.info.panelDetail?.length ?? 0) > 0 && (
-                      <dl className="slot-panel-detail-list slot-panel-detail-extra">
-                        {selectedSlot.info.panelDetail!.map((line, i) => (
-                          <div className="slot-panel-detail-row" key={i}>
-                            <dd>{line}</dd>
-                          </div>
-                        ))}
-                      </dl>
-                    )}
-                  </>
-                ) : (
-                  selectedSlot.info.detail.length > 0 && (
-                    <dl className="slot-panel-detail-list">
-                      {selectedSlot.info.detail.map((line, i) => (
-                        <div className="slot-panel-detail-row" key={i}>
-                          <dd>{line}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                  )
-                )}
-                {(selectedSlot.info.editAction ||
-                  selectedSlot.info.deleteAction) && (
-                  <div className="slot-panel-detail-actions">
-                    {selectedSlot.info.editAction && (
+            )}
+            {!lookupTarget && (
+              <aside className="slot-panel" aria-label="Slot panel">
+                {!tentativeModalOpen &&
+                  (pendingSlots.length > 0 || editContext !== null) && (
+                    <button
+                      type="button"
+                      className="slot-panel-back-to-form"
+                      onClick={() => setTentativeModalOpen(true)}
+                      style={{
+                        margin: "8px 12px 0",
+                        padding: "6px 10px",
+                        fontSize: 13,
+                        fontWeight: 600,
+                        border: "1px solid var(--gc-border)",
+                        borderRadius: 6,
+                        background: "transparent",
+                        cursor: "pointer",
+                      }}
+                    >
+                      ← Back to booking form
+                    </button>
+                  )}
+                {tentativeModalOpen ? (
+                  <TentativeBookingModal
+                    variant="panel"
+                    isOpen={tentativeModalOpen}
+                    onClose={handleCloseTentativeModal}
+                    onSuccess={handleTentativeSuccess}
+                    slots={pendingSlots}
+                    onRemoveSlot={handleRemoveSlot}
+                    onAddAnotherSlot={handleAddAnotherSlot}
+                    onChangeSlot={handleChangeSlot}
+                    onAddBulkSlots={handleAddBulkSlots}
+                    validateSlot={validateSlotFresh}
+                    formData={customerFormData}
+                    onFormDataChange={setCustomerFormData}
+                    editContext={editContext}
+                    classBudget={classBudgetNow}
+                    currentUserId={tentativeActor.id}
+                    actorName={currentUserName}
+                    isSuperAdmin={Boolean(tentativeActor.isSuperAdmin)}
+                  />
+                ) : justBooked && justBooked.slots.length > 0 ? (
+                  <div className="slot-panel-detail">
+                    <div className="slot-panel-detail-top">
+                      <span className="slot-panel-badge slot-panel-badge-tentative">
+                        Booking saved
+                      </span>
                       <button
                         type="button"
-                        className="slot-pop-edit-btn"
-                        onClick={() =>
-                          handleEditBooking(selectedSlot.info.editAction!)
-                        }
+                        className="slot-panel-detail-close"
+                        onClick={() => setJustBooked(null)}
+                        aria-label="Dismiss"
                       >
-                        Edit Booking
+                        ×
                       </button>
-                    )}
-                    {selectedSlot.info.deleteAction && (
+                    </div>
+                    <SendSlotsWhatsApp
+                      customerName={justBooked.name}
+                      slots={justBooked.slots}
+                      target={
+                        justBooked.batchId
+                          ? { batchId: justBooked.batchId }
+                          : { scheduleIds: [] }
+                      }
+                      hasPhone={Boolean(normalizePhone(justBooked.phone))}
+                    />
+                    <SlotLearnerActions
+                      onBookClasses={startBookingForService}
+                      onEditSlots={editOrderSlots}
+                      key={`booked-${justBooked.phone}`}
+                      customer={{
+                        name: justBooked.name,
+                        phone: justBooked.phone,
+                        email: justBooked.email,
+                        courseId: justBooked.courseId,
+                        course: "",
+                        paymentStatus: justBooked.paymentStatus,
+                      }}
+                    />
+                  </div>
+                ) : selectedSlot ? (
+                  <div className="slot-panel-detail">
+                    <div className="slot-panel-detail-top">
+                      <span
+                        className={`slot-panel-badge slot-panel-badge-${selectedSlot.info.kind}`}
+                      >
+                        {SLOT_KIND_LABELS[selectedSlot.info.kind] ??
+                          selectedSlot.info.kind}
+                      </span>
                       <button
                         type="button"
-                        className="slot-pop-delete-btn"
-                        onClick={() =>
-                          handleDeleteTentative(selectedSlot.info.deleteAction!)
-                        }
+                        className="slot-panel-detail-close"
+                        onClick={() => setSelectedSlot(null)}
+                        aria-label="Close slot details"
                       >
-                        Delete Slot
+                        &times;
                       </button>
+                    </div>
+                    <h2 className="slot-panel-detail-title">
+                      {selectedSlot.info.title}
+                    </h2>
+                    <p className="slot-panel-detail-when">
+                      {instructorsById.get(selectedSlot.instrId)?.name ??
+                        selectedSlot.instrId}{" "}
+                      &middot; {selectedSlot.date} &middot;{" "}
+                      {minutesToTime(selectedSlot.minute)}&ndash;
+                      {minutesToTime(selectedSlot.minute + 60)}
+                    </p>
+                    {selectedSlot.info.card ? (
+                      <>
+                        <dl className="slot-panel-detail-list">
+                          {selectedSlot.info.card.map((row, i) => (
+                            <div className="slot-panel-detail-row" key={i}>
+                              <dt>{row.label}</dt>
+                              <dd>{row.value}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                        {(selectedSlot.info.panelDetail?.length ?? 0) > 0 && (
+                          <dl className="slot-panel-detail-list slot-panel-detail-extra">
+                            {selectedSlot.info.panelDetail!.map((line, i) => (
+                              <div className="slot-panel-detail-row" key={i}>
+                                <dd>{line}</dd>
+                              </div>
+                            ))}
+                          </dl>
+                        )}
+                      </>
+                    ) : (
+                      selectedSlot.info.detail.length > 0 && (
+                        <dl className="slot-panel-detail-list">
+                          {selectedSlot.info.detail.map((line, i) => (
+                            <div className="slot-panel-detail-row" key={i}>
+                              <dd>{line}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      )
+                    )}
+                    {(selectedSlot.info.editAction ||
+                      selectedSlot.info.deleteAction) && (
+                      <div className="slot-panel-detail-actions">
+                        {selectedSlot.info.editAction && (
+                          <button
+                            type="button"
+                            className="slot-pop-edit-btn"
+                            onClick={() =>
+                              handleEditBooking(selectedSlot.info.editAction!)
+                            }
+                          >
+                            Edit Booking
+                          </button>
+                        )}
+                        {selectedSlot.info.deleteAction && (
+                          <button
+                            type="button"
+                            className="slot-pop-delete-btn"
+                            onClick={() =>
+                              handleDeleteTentative(
+                                selectedSlot.info.deleteAction!,
+                              )
+                            }
+                          >
+                            Delete Slot
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {selectedSlot.info.kind === "tentative" &&
+                      selectedSlot.info.customer &&
+                      (() => {
+                        const c = selectedSlot.info.customer;
+                        const key = normalizePhone(c.phone);
+                        const picked = {
+                          date: selectedSlot.date,
+                          startTime: minutesToTime(selectedSlot.minute),
+                          endTime: minutesToTime(selectedSlot.minute + 60),
+                        };
+                        // Same phone => same customer: send every upcoming hold,
+                        // not just the one clicked. No phone => just this slot.
+                        const siblings: (typeof picked & { id: number })[] = [];
+                        if (key) {
+                          for (const perDate of blocksIndex.values())
+                            for (const list of perDate.values())
+                              for (const b of list) {
+                                const bp = normalizePhone(
+                                  typeof b.rawTentativeDetails?.phone ===
+                                    "string"
+                                    ? b.rawTentativeDetails.phone
+                                    : "",
+                                );
+                                if (
+                                  b.isTentative &&
+                                  bp === key &&
+                                  b.date >= today
+                                )
+                                  siblings.push({
+                                    id: b.id,
+                                    date: b.date,
+                                    startTime: minutesToTime(b.startMinute),
+                                    endTime: minutesToTime(b.endMinute),
+                                  });
+                              }
+                        }
+                        return (
+                          <SendSlotsWhatsApp
+                            key={`wa-${selectedSlot.instrId}-${selectedSlot.date}-${selectedSlot.minute}`}
+                            customerName={c.name}
+                            slots={siblings.length > 0 ? siblings : [picked]}
+                            target={{
+                              scheduleIds:
+                                siblings.length > 0
+                                  ? siblings.map((x) => x.id)
+                                  : selectedSlot.info.scheduleId != null
+                                    ? [selectedSlot.info.scheduleId]
+                                    : [],
+                            }}
+                            hasPhone={Boolean(key)}
+                          />
+                        );
+                      })()}
+                    {selectedSlot.info.customer && (
+                      <SlotLearnerActions
+                        key={`${selectedSlot.instrId}-${selectedSlot.date}-${selectedSlot.minute}-${selectedSlot.info.customer.phone}`}
+                        customer={selectedSlot.info.customer}
+                        onBookClasses={startBookingForService}
+                        onEditSlots={editOrderSlots}
+                        onLinkService={linkSlotToService}
+                      />
                     )}
                   </div>
+                ) : (
+                  <div className="slot-panel-empty">
+                    <div className="slot-panel-empty-icon" aria-hidden="true">
+                      &#128197;
+                    </div>
+                    <p className="slot-panel-empty-title">
+                      Select a slot to view schedules
+                    </p>
+                    <p className="slot-panel-empty-hint">
+                      {addingSlotMode
+                        ? `Click a white (free) cell on ${lockedInstructorName}'s schedule to pick ${
+                            replacingSlotIndex !== null
+                              ? "a replacement slot"
+                              : "the next class"
+                          }.`
+                        : "Click any slot on the calendar. A free one opens the booking form here; a booked or paused one shows its details."}
+                    </p>
+                  </div>
                 )}
-                {selectedSlot.info.kind === "tentative" &&
-                  selectedSlot.info.customer &&
-                  (() => {
-                    const c = selectedSlot.info.customer;
-                    const key = normalizePhone(c.phone);
-                    const picked = {
-                      date: selectedSlot.date,
-                      startTime: minutesToTime(selectedSlot.minute),
-                      endTime: minutesToTime(selectedSlot.minute + 60),
-                    };
-                    // Same phone => same customer: send every upcoming hold,
-                    // not just the one clicked. No phone => just this slot.
-                    const siblings: (typeof picked & { id: number })[] = [];
-                    if (key) {
-                      for (const perDate of blocksIndex.values())
-                        for (const list of perDate.values())
-                          for (const b of list) {
-                            const bp = normalizePhone(
-                              typeof b.rawTentativeDetails?.phone === "string"
-                                ? b.rawTentativeDetails.phone
-                                : "",
-                            );
-                            if (b.isTentative && bp === key && b.date >= today)
-                              siblings.push({
-                                id: b.id,
-                                date: b.date,
-                                startTime: minutesToTime(b.startMinute),
-                                endTime: minutesToTime(b.endMinute),
-                              });
-                          }
-                    }
-                    return (
-                      <SendSlotsWhatsApp
-                        key={`wa-${selectedSlot.instrId}-${selectedSlot.date}-${selectedSlot.minute}`}
-                        customerName={c.name}
-                        slots={siblings.length > 0 ? siblings : [picked]}
-                        target={{
-                          scheduleIds:
-                            siblings.length > 0
-                              ? siblings.map((x) => x.id)
-                              : selectedSlot.info.scheduleId != null
-                                ? [selectedSlot.info.scheduleId]
-                                : [],
-                        }}
-                        hasPhone={Boolean(key)}
-                      />
-                    );
-                  })()}
-                {selectedSlot.info.customer && (
-                  <SlotLearnerActions
-                    key={`${selectedSlot.instrId}-${selectedSlot.date}-${selectedSlot.minute}-${selectedSlot.info.customer.phone}`}
-                    customer={selectedSlot.info.customer}
-                  />
-                )}
-              </div>
-            ) : (
-              <div className="slot-panel-empty">
-                <div className="slot-panel-empty-icon" aria-hidden="true">
-                  &#128197;
-                </div>
-                <p className="slot-panel-empty-title">
-                  Select a slot to view schedules
-                </p>
-                <p className="slot-panel-empty-hint">
-                  {addingSlotMode
-                    ? `Click a white (free) cell on ${lockedInstructorName}'s schedule to pick ${
-                        replacingSlotIndex !== null
-                          ? "a replacement slot"
-                          : "the next class"
-                      }.`
-                    : "Click any slot on the calendar. A free one opens the booking form here; a booked or paused one shows its details."}
-                </p>
-              </div>
+              </aside>
             )}
-          </aside>
+          </div>
           <div className="shell-main">
             <Suspense fallback={null}>
               <LocationSearch
@@ -4467,9 +5076,19 @@ export default function SalesDashboard() {
             </div>
             <p className="confirm-message">
               Delete the tentative slot for{" "}
-              <strong>{pendingDelete.customerName}</strong>? This can&apos;t be
-              undone.
+              <strong>{pendingDelete.action.customerName}</strong>? This
+              can&apos;t be undone.
             </p>
+            {pendingDelete.siblingIds.length > 0 && (
+              <p className="confirm-message">
+                This booking has{" "}
+                <strong>
+                  {pendingDelete.siblingIds.length} more class(es)
+                </strong>{" "}
+                booked together. You can delete just this one or the whole
+                booking.
+              </p>
+            )}
             <div className="confirm-actions">
               <button
                 type="button"
@@ -4481,10 +5100,21 @@ export default function SalesDashboard() {
               <button
                 type="button"
                 className="reset-dash"
-                onClick={confirmDeleteTentative}
+                onClick={() => void confirmDeleteTentative("one")}
               >
-                Delete Slot
+                {pendingDelete.siblingIds.length > 0
+                  ? "Delete this class"
+                  : "Delete Slot"}
               </button>
+              {pendingDelete.siblingIds.length > 0 && (
+                <button
+                  type="button"
+                  className="reset-dash"
+                  onClick={() => void confirmDeleteTentative("all")}
+                >
+                  Delete all {pendingDelete.siblingIds.length + 1} classes
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -4494,6 +5124,33 @@ export default function SalesDashboard() {
           in-progress multi-class booking (Task 19) — the modal is
           hidden (not closed: pendingSlots/customerFormData are untouched)
           until a new slot is clicked or this is cancelled. */}
+      {bookingIntent &&
+        !tentativeModalOpen &&
+        !addingSlotMode &&
+        pendingSlots.length === 0 && (
+          <div className="slot-toast slot-toast-info" role="status">
+            <span className="slot-toast-icon" aria-hidden="true">
+              📅
+            </span>
+            <span className="slot-toast-msg">
+              <strong>
+                Booking classes for {bookingIntent.name || "this learner"}:{" "}
+                {describeIntent(bookingIntent)}.
+              </strong>{" "}
+              Click any white (free) cell on the calendar to pick the first
+              class. The learner and service are already filled in.
+            </span>
+            <button
+              type="button"
+              className="slot-toast-close"
+              aria-label="Cancel booking for this service"
+              onClick={cancelBookingIntent}
+            >
+              ×
+            </button>
+          </div>
+        )}
+
       {addingSlotMode && (
         <div className="slot-toast slot-toast-info" role="status">
           <span className="slot-toast-icon" aria-hidden="true">

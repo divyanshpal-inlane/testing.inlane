@@ -2932,14 +2932,6 @@ function WeeklyScheduleView({
       return false;
     }
 
-    if (formDataSchedule.tentative_details.paid_info.length === 0) {
-      toast({
-        title: "Error",
-        description: "Paid/Unpaid information is required",
-        variant: "destructive",
-      });
-      return false;
-    }
 
     if (formDataSchedule.tentative_details.pickup_location.length === 0) {
       toast({
@@ -2995,19 +2987,6 @@ function WeeklyScheduleView({
 
     copyTentativeMutation.mutate(tentativeScheduleCopy);
     // tentativeScheduleMutation.mutate(tentativeScheduleCopy);
-  };
-
-  const handlePaidInfoChange = (
-    value: "Unpaid" | "Half paid" | "Full paid" | null,
-  ) => {
-    setTentativeSchedule({
-      ...tentativeSchedule,
-      // Correctly update the nested 'tentative_details' object
-      tentative_details: {
-        ...tentativeSchedule.tentative_details,
-        paid_info: value,
-      },
-    });
   };
 
   // Handle address change with coordinates - Tentative Schedule
@@ -4210,31 +4189,14 @@ function WeeklyScheduleView({
                 />
               </div>
               <div className="grid grid-cols-4 items-center gap-4">
-                <Label
-                  htmlFor="tentative_details-paid_info"
-                  className="text-right"
-                >
-                  Paid information
-                </Label>
-                <Select
-                  value={
-                    tentativeSchedule.tentative_details.paid_info || undefined
-                  }
-                  onValueChange={(value) =>
-                    handlePaidInfoChange(
-                      value as "Unpaid" | "Half paid" | "Full paid" | null,
-                    )
-                  }
-                >
-                  <SelectTrigger className="col-span-3">
-                    <SelectValue placeholder="Select Paid info" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="Unpaid">Unpaid</SelectItem>
-                    <SelectItem value="Half paid">Half Paid</SelectItem>
-                    <SelectItem value="Full paid">Full Paid</SelectItem>
-                  </SelectContent>
-                </Select>
+                <span className="text-right text-sm font-medium">Payment</span>
+                <p className="col-span-3 text-sm text-muted-foreground">
+                  {tentativeSchedule.tentative_details.paid_info || "Unpaid"}{" "}
+                  <span className="text-xs">
+                    (set automatically; the customer pays through a payment
+                    link)
+                  </span>
+                </p>
               </div>
             </div>
             <div className="grid grid-cols-4 items-center gap-4">
@@ -4788,7 +4750,6 @@ export const AddTentativeSchedule = ({
         address: customer.address ?? prev.address,
         pickup_location: customer.address ?? prev.pickup_location,
         course_id: matchCourseId(customer.course, courses) ?? prev.course_id,
-        paid_info: customer.payment ?? prev.paid_info,
       }));
       setCrmFilled(true);
       toast({
@@ -5103,30 +5064,10 @@ export const AddTentativeSchedule = ({
                 }
               />
             </div>
-            <div className="space-y-1">
-              <Label className="text-xs">Payment Status</Label>
-              <Select
-                value={tentativeDetails.paid_info}
-                onValueChange={(v) =>
-                  setTentativeDetails({ ...tentativeDetails, paid_info: v })
-                }
-              >
-                <SelectTrigger className="h-8 text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="Unpaid" className="text-xs">
-                    Unpaid
-                  </SelectItem>
-                  <SelectItem value="Half paid" className="text-xs">
-                    Half paid
-                  </SelectItem>
-                  <SelectItem value="Full paid" className="text-xs">
-                    Full paid
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+            <p className="text-xs text-muted-foreground">
+              Payment: Unpaid. It is set automatically; the customer pays
+              through a payment link.
+            </p>
           </div>
 
           <div className="max-w-md space-y-1">
@@ -5556,7 +5497,6 @@ export const EditTentativeSchedule = ({
         address: customer.address ?? prev.address,
         pickup_location: customer.address ?? prev.pickup_location,
         course_id: matchCourseId(customer.course, courses) ?? prev.course_id,
-        paid_info: customer.payment ?? prev.paid_info,
       }));
       setCrmFilled(true);
       toast({
@@ -6447,19 +6387,6 @@ export const InstructorSchedulePage = () => {
     window.addEventListener("mouseup", handleUp);
     return () => window.removeEventListener("mouseup", handleUp);
   }, []);
-
-  const updatePaidInfoMutation = useMutation({
-    mutationFn: async ({ scheduleId, paidInfo }) => {
-      const { error } = await supabase
-        .from("Schedule")
-        .update({ paid_info: paidInfo }) // Ensure this column exists in your DB
-        .eq("id", scheduleId);
-      if (error) throw error;
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["instructor-full"] });
-    },
-  });
 
   // Calendar import functionality
   const {

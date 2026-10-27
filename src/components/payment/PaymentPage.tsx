@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { DEMO_COURSE, SKILL_MODULES } from "@/constants/courses";
+import { licenceLabel } from "@/lib/licenceLabel";
 import { supabase } from "@/lib/supabaseClient";
 import { usePaymentGatewayMode } from "@/queries/appSettings";
 import { useCourses } from "@/queries/payment";
@@ -24,7 +25,15 @@ import {
 } from "./GatewaySelectionDialog";
 import { RazorpayCheckout } from "./RazorpayCheckout";
 
-type CourseSelectionType = "predefined" | "custom" | "demo" | "test" | "topup";
+type CourseSelectionType =
+  | "predefined"
+  | "custom"
+  | "demo"
+  | "test"
+  | "topup"
+  // A licence / RTO service (enrollment.case_type = rto_only): fixed fee set by
+  // the team, opened only through a link that names that enrollment.
+  | "licence";
 
 interface PaymentDetails {
   amount: number;
@@ -52,6 +61,12 @@ function PaymentPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isPrefilled, setIsPrefilled] = useState(false);
+  // Set when the link names a licence service: its title and whether it is
+  // already paid.
+  const [licence, setLicence] = useState<{
+    label: string;
+    paid: boolean;
+  } | null>(null);
   const [termsPolicyAccepted, setTermsPolicyAccepted] = useState(false);
   const { data: courses, isLoading: coursesLoading } = useCourses();
   const { data: gatewayMode, isLoading: gatewayModeLoading } =
@@ -122,14 +137,49 @@ function PaymentPage() {
 
           // Fetch the learner's latest enrollment up front so the demo / topup /
           // course prefills can all read its admin-set amount.
-          const { data: enrollments, error: enrollmentError } = await supabase
+          // A link may name a specific enrollment (`&enrollment=<id>`) so a
+          // customer with several services (e.g. a second course) pays the
+          // right one. Without it, the latest enrollment is used as before.
+          const requestedEnrollmentId = searchParams.get("enrollment");
+          let enrollmentQuery = supabase
             .from("enrollment")
             .select(
-              "id, course_id, amount, payment_status, status, unlocked_lessons, installment_mode, installment1_amount, installment2_amount, progress",
+              "id, course_id, amount, payment_status, status, unlocked_lessons, installment_mode, installment1_amount, installment2_amount, progress, case_type, vehicle_type, two_wheeler_requirement, four_wheeler_requirement",
             )
-            .eq("learner_id", learner.id)
-            .order("created_at", { ascending: false })
-            .limit(1);
+            .eq("learner_id", learner.id);
+          if (requestedEnrollmentId) {
+            enrollmentQuery = enrollmentQuery.eq("id", requestedEnrollmentId);
+          } else {
+            // A bare link means "the latest payable enrollment". A licence
+            // (RTO-only) service is never payable here, so it must not become
+            // "the latest" and hide the course the customer is paying for.
+            enrollmentQuery = enrollmentQuery.or(
+              "case_type.is.null,case_type.neq.rto_only",
+            );
+          }
+          let { data: enrollments, error: enrollmentError } =
+            await enrollmentQuery
+              .order("created_at", { ascending: false })
+              .limit(1);
+          if (enrollmentError) {
+            // Environment without the case_type / licence columns: fall back
+            // to the original behaviour.
+            let retryQuery = supabase
+              .from("enrollment")
+              .select(
+                "id, course_id, amount, payment_status, status, unlocked_lessons, installment_mode, installment1_amount, installment2_amount, progress",
+              )
+              .eq("learner_id", learner.id);
+            if (requestedEnrollmentId) {
+              retryQuery = retryQuery.eq("id", requestedEnrollmentId);
+            }
+            const retry = await retryQuery
+              .order("created_at", { ascending: false })
+              .limit(1);
+            // Same rows without the licence columns (all optional below).
+            enrollments = retry.data as unknown as typeof enrollments;
+            enrollmentError = retry.error;
+          }
 
           if (enrollmentError)
             throw new Error("Failed to fetch enrollment details");
@@ -139,6 +189,42 @@ function PaymentPage() {
           const courseId = enrollment?.course_id || "";
           const enrollmentId = enrollment?.id || "";
           const installmentMode = enrollment?.installment_mode || "full";
+
+          // A licence service: fixed fee, one payment, no course. Only reached
+          // through a link naming this enrollment (a bare link never selects
+          // an rto_only enrollment).
+          const licenceRow = enrollment as {
+            case_type?: string | null;
+            amount?: number | null;
+            payment_status?: string | null;
+            vehicle_type?: string | null;
+            two_wheeler_requirement?: string | null;
+            four_wheeler_requirement?: string | null;
+          } | null;
+          if (licenceRow?.case_type === "rto_only") {
+            const licenceAmount = Math.round(Number(licenceRow.amount) || 0);
+            setPaymentDetails((prev) => ({
+              ...prev,
+              email: learner.email || "",
+              phone: learner.phone || "",
+              name: learner.name || "",
+              learnerId: learner.id,
+              enrollmentId,
+              paymentType: "course",
+              courseId: "",
+              amount: licenceAmount,
+              totalAmount: licenceAmount,
+              installmentType: "full",
+              selectedModules: [],
+            }));
+            setLicence({
+              label: licenceLabel(licenceRow),
+              paid: licenceRow.payment_status === "full_paid",
+            });
+            setCourseSelectionType("licence");
+            setIsPrefilled(true);
+            return;
+          }
 
           // If URL has type=demo, prefill the demo lesson. The amount comes from
           // the enrollment (admin can set any demo price), falling back to the
@@ -449,7 +535,8 @@ function PaymentPage() {
     if (
       courseSelectionType === "demo" ||
       courseSelectionType === "test" ||
-      courseSelectionType === "topup"
+      courseSelectionType === "topup" ||
+      courseSelectionType === "licence"
     )
       return;
 
@@ -631,6 +718,10 @@ function PaymentPage() {
         paymentDetails.amount && paymentDetails.amount > 0
           ? paymentDetails.amount
           : topupHours * DEMO_COURSE.price;
+      finalInstallmentType = "full";
+    } else if (courseSelectionType === "licence") {
+      // Fixed fee set on the enrollment; one full payment.
+      finalAmount = paymentDetails.amount;
       finalInstallmentType = "full";
     } else if (courseSelectionType === "test") {
       finalAmount = 10;
@@ -1091,6 +1182,27 @@ function PaymentPage() {
               </>
             )}
 
+            {/* Licence service summary: fixed fee, nothing to choose */}
+            {isPrefilled && courseSelectionType === "licence" && licence && (
+              <div className="space-y-3">
+                <Alert className="border-blue-200 bg-blue-50">
+                  <AlertDescription>
+                    <strong>{licence.label}</strong>
+                    <br />
+                    Licence service fee: ₹{paymentDetails.amount}
+                  </AlertDescription>
+                </Alert>
+                {licence.paid && (
+                  <Alert className="border-green-200 bg-green-50">
+                    <AlertDescription>
+                      This licence service is already paid for. There is nothing
+                      more to pay.
+                    </AlertDescription>
+                  </Alert>
+                )}
+              </div>
+            )}
+
             {/* Show demo info when opened via topup payment link */}
             {isPrefilled && courseSelectionType === "demo" && (
               <Alert>
@@ -1220,7 +1332,8 @@ function PaymentPage() {
             {type === "course" &&
               isPrefilled &&
               courseSelectionType !== "demo" &&
-              courseSelectionType !== "custom" && (
+              courseSelectionType !== "custom" &&
+              courseSelectionType !== "licence" && (
                 <div>
                   <label
                     htmlFor="courseId"
@@ -1326,7 +1439,8 @@ function PaymentPage() {
             {!isSecondInstallment &&
               displayAmount > 0 &&
               courseSelectionType !== "demo" &&
-              courseSelectionType !== "test" && (
+              courseSelectionType !== "test" &&
+              courseSelectionType !== "licence" && (
                 <div className="space-y-2">
                   <label
                     htmlFor="paymentOption"
@@ -1424,6 +1538,8 @@ function PaymentPage() {
                 disabled={
                   isLoading ||
                   !termsPolicyAccepted ||
+                  (courseSelectionType === "licence" &&
+                    licence?.paid === true) ||
                   // A prefilled course is locked by the admin — its course /
                   // modules / amount are already set, so never gate the button
                   // on picking them (the picker isn't even shown).
