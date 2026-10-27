@@ -11,7 +11,9 @@ import {
   type LatLng,
   type RoadRoute,
 } from "@/lib/map-distance";
+import { cn } from "@/lib/utils";
 
+import { MAP_PANEL_CLASS } from "./mapPanel";
 import { usePlacesAutocomplete } from "./usePlacesAutocomplete";
 
 export interface MeasureFrom {
@@ -200,9 +202,18 @@ export function DistanceMeasure({
       const b = new mapsLib.LatLngBounds();
       b.extend(from.at);
       b.extend(to.at);
-      // Margins keep both ends clear of the two cards over the map: this one
-      // (top, centre) and the instructor info card (bottom-left).
-      map.fitBounds(b, { top: 230, right: 100, bottom: 250, left: 340 });
+      // Margins keep both ends clear of the two cards over the map: this panel
+      // (top-right) and the instructor info card (bottom-left). Capped to a share
+      // of the map so a small screen still gets a sensible zoom.
+      const div = map.getDiv();
+      const w = div.clientWidth || 1000;
+      const hgt = div.clientHeight || 700;
+      map.fitBounds(b, {
+        top: 70,
+        right: Math.min(410, Math.round(w * 0.4)),
+        bottom: Math.min(250, Math.round(hgt * 0.3)),
+        left: Math.min(340, Math.round(w * 0.3)),
+      });
     }
     return () => {
       o.ring?.setMap(null);
@@ -337,34 +348,38 @@ export function DistanceMeasure({
 
   return (
     <div
-      className="absolute left-1/2 top-3 z-20 w-[min(27rem,calc(100%-1.5rem))] -translate-x-1/2 rounded-md border bg-background p-3 shadow-md"
+      className={cn(
+        MAP_PANEL_CLASS,
+        // Measure distance is a quick read-out, so it is more compact than the
+        // editor panels: narrower and tighter.
+        "w-[min(19rem,calc(100%-1.5rem))] p-2",
+      )}
       data-testid="measure-card"
     >
-      <div className="flex items-start justify-between gap-2">
-        <p className="flex items-center gap-1.5 text-sm font-semibold">
-          <Ruler className="h-4 w-4" />
+      <div className="flex items-center justify-between gap-2">
+        <p className="flex items-center gap-1.5 text-xs font-semibold">
+          <Ruler className="h-3.5 w-3.5" />
           Measure distance
         </p>
         <Button
           size="icon"
           variant="ghost"
-          className="h-6 w-6 shrink-0"
+          className="h-5 w-5 shrink-0"
           aria-label="Close measure distance"
           data-testid="measure-close"
           onClick={onClose}
         >
-          <X className="h-4 w-4" />
+          <X className="h-3.5 w-3.5" />
         </Button>
       </div>
 
-      <dl className="mt-2 space-y-1.5 text-xs">
-        <div className="flex items-start gap-2" data-testid="measure-from">
-          <Home
-            className="mt-0.5 h-3.5 w-3.5 shrink-0"
-            style={{ color: ACCENT }}
-          />
+      <dl className="mt-1.5 space-y-1 text-[11px] leading-snug">
+        <div className="flex items-start gap-1.5" data-testid="measure-from">
+          <Home className="mt-0.5 h-3 w-3 shrink-0" style={{ color: ACCENT }} />
           <div className="min-w-0">
-            <dt className="text-muted-foreground">From (instructor home)</dt>
+            <dt className="text-[10px] text-muted-foreground">
+              From (instructor home)
+            </dt>
             <dd className="font-medium">
               {from ? (
                 `${from.name} · ${from.at.lat.toFixed(4)}, ${from.at.lng.toFixed(4)}`
@@ -377,73 +392,74 @@ export function DistanceMeasure({
             </dd>
           </div>
         </div>
-        <div className="flex items-start gap-2" data-testid="measure-to">
-          <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-600" />
-          <div className="min-w-0">
-            <dt className="text-muted-foreground">To</dt>
-            <dd className="font-medium">
-              {to ? (
-                <span title={resolvedLabel ?? to.label}>
-                  {resolvedLabel ?? to.label}
-                </span>
-              ) : (
-                <span className="font-normal text-muted-foreground">
-                  Search an address below or click the map to drop a pin.
-                </span>
-              )}
-            </dd>
+        <div className="flex items-start gap-1.5" data-testid="measure-to">
+          <MapPin className="mt-0.5 h-3 w-3 shrink-0 text-red-600" />
+          <div className="min-w-0 flex-1">
+            <dt className="text-[10px] text-muted-foreground">To</dt>
+            {/* The address is shown once, in the search box below. This line only
+                appears for a pin whose address could not be looked up. */}
+            {to && !addressText.trim() ? (
+              <dd className="font-medium" title={to.label}>
+                {to.label}
+              </dd>
+            ) : null}
+            <div className="mt-0.5 flex gap-1.5">
+              <div className="relative flex-1">
+                <Search className="pointer-events-none absolute left-1.5 top-1.5 h-3 w-3 text-muted-foreground" />
+                <Input
+                  ref={setInputEl}
+                  value={addressText}
+                  onChange={(e) => {
+                    setAddressText(e.target.value);
+                    setAddressNote(null);
+                  }}
+                  onKeyDown={(e) => {
+                    // The editor can sit inside a <form>: Enter must never submit it.
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      // A highlighted suggestion is handled by Google; this is the
+                      // fallback for typed text with nothing picked.
+                      if (!document.querySelector(".pac-item-selected")) {
+                        void searchTypedAddress();
+                      }
+                    }
+                  }}
+                  placeholder="Search an address"
+                  aria-label="Search an address"
+                  autoComplete="off"
+                  title={resolvedLabel ?? addressText}
+                  data-testid="measure-address-input"
+                  className="h-7 pl-6 text-[11px]"
+                />
+              </div>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="h-7 px-2 text-[11px]"
+                onClick={() => void searchTypedAddress()}
+                disabled={!addressText.trim() || searching}
+                data-testid="measure-address-search"
+              >
+                {searching ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  "Go"
+                )}
+              </Button>
+            </div>
           </div>
         </div>
       </dl>
-
-      <div className="mt-2 flex gap-2">
-        <div className="relative flex-1">
-          <Search className="pointer-events-none absolute left-2 top-2 h-3.5 w-3.5 text-muted-foreground" />
-          <Input
-            ref={setInputEl}
-            value={addressText}
-            onChange={(e) => {
-              setAddressText(e.target.value);
-              setAddressNote(null);
-            }}
-            onKeyDown={(e) => {
-              // The editor can sit inside a <form>: Enter must never submit it.
-              if (e.key === "Enter") {
-                e.preventDefault();
-                // A highlighted suggestion is handled by Google; this is the
-                // fallback for typed text with nothing picked.
-                if (!document.querySelector(".pac-item-selected")) {
-                  void searchTypedAddress();
-                }
-              }
-            }}
-            placeholder="Search an address (Google suggestions)"
-            aria-label="Search an address"
-            autoComplete="off"
-            data-testid="measure-address-input"
-            className="h-8 pl-7 text-xs"
-          />
-        </div>
-        <Button
-          size="sm"
-          variant="secondary"
-          onClick={() => void searchTypedAddress()}
-          disabled={!addressText.trim() || searching}
-          data-testid="measure-address-search"
-        >
-          {searching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Go"}
-        </Button>
-      </div>
       {addressNote ? (
         <p
           role="alert"
-          className="mt-1 text-[11px] font-medium text-destructive"
+          className="mt-1 text-[10px] font-medium text-destructive"
           data-testid="measure-address-note"
         >
           {addressNote}
         </p>
       ) : (
-        <p className="mt-1 text-[11px] text-muted-foreground">
+        <p className="mt-1 text-[10px] text-muted-foreground">
           {to
             ? "Drag the pin on the map to fine-tune the spot."
             : "Pick a suggestion to drop a pin you can drag."}
@@ -452,25 +468,25 @@ export function DistanceMeasure({
 
       {straightKm !== null ? (
         <div
-          className="mt-3 rounded-md border bg-muted/40 p-2.5"
+          className="mt-1.5 rounded-md border bg-muted/40 px-2 py-1.5"
           data-testid="measure-result"
         >
           <div className="flex items-baseline justify-between gap-2">
             <span
-              className="text-2xl font-semibold tabular-nums"
+              className="text-lg font-semibold tabular-nums leading-tight"
               data-testid="measure-straight"
             >
               {formatKm(straightKm)}
             </span>
-            <span className="text-[11px] text-muted-foreground">
+            <span className="text-[10px] text-muted-foreground">
               straight line
             </span>
           </div>
           <div
-            className="mt-1.5 flex items-center gap-1.5 text-xs"
+            className="mt-0.5 flex items-center gap-1.5 text-[11px]"
             data-testid="measure-road"
           >
-            <Car className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <Car className="h-3 w-3 shrink-0 text-muted-foreground" />
             {road.status === "loading" ? (
               <span className="flex items-center gap-1 text-muted-foreground">
                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -497,10 +513,11 @@ export function DistanceMeasure({
         </div>
       ) : null}
 
-      <div className="mt-3 flex justify-end gap-2">
+      <div className="mt-1.5 flex justify-end gap-1.5">
         <Button
           size="sm"
           variant="ghost"
+          className="h-7 px-2 text-[11px]"
           onClick={() => {
             setAddressText("");
             setAddressNote(null);
@@ -512,7 +529,12 @@ export function DistanceMeasure({
         >
           Clear
         </Button>
-        <Button size="sm" variant="secondary" onClick={onClose}>
+        <Button
+          size="sm"
+          variant="secondary"
+          className="h-7 px-2 text-[11px]"
+          onClick={onClose}
+        >
           Done
         </Button>
       </div>

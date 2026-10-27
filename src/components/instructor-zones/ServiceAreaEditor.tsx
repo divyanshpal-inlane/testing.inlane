@@ -25,6 +25,7 @@ import {
   updateServiceAreaZone,
 } from "@/lib/sales-dashboard/zones-db";
 
+import { MAP_PANEL_CLASS } from "./mapPanel";
 import {
   pointInRing,
   ringSelfIntersects,
@@ -416,8 +417,7 @@ export function ServiceAreaEditor({
 
   if (!open) return null;
 
-  const panelClass =
-    "absolute left-1/2 top-3 z-20 max-h-[calc(100%-1.5rem)] w-[min(30rem,calc(100%-1.5rem))] -translate-x-1/2 overflow-y-auto rounded-md border bg-background p-3 shadow-md";
+  const panelClass = MAP_PANEL_CLASS;
 
   // ---------------------------------------------------------------- editing
   if (target) {
