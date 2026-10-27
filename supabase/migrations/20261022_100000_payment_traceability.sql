@@ -117,7 +117,57 @@ CREATE POLICY payment_link_log_admin_all ON public.payment_link_log
   USING (public.is_admin_or_team_member())
   WITH CHECK (public.is_admin_or_team_member());
 
+-- 4. Integrity for payment.enrollment_id WITHOUT a foreign key.
+-- (A real FK makes PostgREST reject every enrollment -> payment embed, see the
+-- note on the column above. Triggers are invisible to PostgREST.)
+
+-- 1. Deleting an order clears the pointer on its payments (what ON DELETE SET
+--    NULL would have done).
+CREATE OR REPLACE FUNCTION public.clear_payment_enrollment_on_delete()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $
+BEGIN
+  UPDATE public.payment
+     SET enrollment_id = NULL
+   WHERE enrollment_id = OLD.id;
+  RETURN OLD;
+END;
+$;
+
+DROP TRIGGER IF EXISTS trg_clear_payment_enrollment_on_delete ON public.enrollment;
+CREATE TRIGGER trg_clear_payment_enrollment_on_delete
+  BEFORE DELETE ON public.enrollment
+  FOR EACH ROW
+  EXECUTE FUNCTION public.clear_payment_enrollment_on_delete();
+
+-- 2. A payment can only point at an order that exists (what the FK check did).
+CREATE OR REPLACE FUNCTION public.check_payment_enrollment_exists()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $
+BEGIN
+  IF NEW.enrollment_id IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM public.enrollment WHERE id = NEW.enrollment_id) THEN
+    RAISE EXCEPTION 'payment.enrollment_id % does not match any enrollment', NEW.enrollment_id
+      USING ERRCODE = 'foreign_key_violation';
+  END IF;
+  RETURN NEW;
+END;
+$;
+
+DROP TRIGGER IF EXISTS trg_check_payment_enrollment_exists ON public.payment;
+CREATE TRIGGER trg_check_payment_enrollment_exists
+  BEFORE INSERT OR UPDATE OF enrollment_id ON public.payment
+  FOR EACH ROW
+  WHEN (NEW.enrollment_id IS NOT NULL)
+  EXECUTE FUNCTION public.check_payment_enrollment_exists();
+
 -- ROLLBACK (manual) -----------------------------------------------------------
+-- DROP TRIGGER IF EXISTS trg_check_payment_enrollment_exists ON public.payment;
+-- DROP TRIGGER IF EXISTS trg_clear_payment_enrollment_on_delete ON public.enrollment;
+-- DROP FUNCTION IF EXISTS public.check_payment_enrollment_exists();
+-- DROP FUNCTION IF EXISTS public.clear_payment_enrollment_on_delete();
 -- DROP TRIGGER IF EXISTS trg_link_payment_to_enrollment ON public.enrollment;
 -- DROP FUNCTION IF EXISTS public.link_payment_to_enrollment();
 -- DROP TABLE IF EXISTS public.payment_link_log;
