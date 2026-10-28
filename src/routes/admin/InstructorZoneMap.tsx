@@ -30,6 +30,7 @@ import {
   DistanceMeasure,
   type MeasureFrom,
 } from "@/components/instructor-zones/DistanceMeasure";
+import { MAP_PANEL_CLASS } from "@/components/instructor-zones/mapPanel";
 import { ServiceAreaEditor } from "@/components/instructor-zones/ServiceAreaEditor";
 import { drawServiceAreaMask } from "@/components/instructor-zones/serviceAreaMask";
 import type { ZoneCoordinate } from "@/components/instructor-zones/types";
@@ -2197,7 +2198,14 @@ export default function InstructorZoneMap() {
   measureOnRef.current = measureOn;
   startMeasureRef.current = startMeasure;
 
+  // Closing the tool takes its pin with it (the pin is shared with the location
+  // filter, so it stays when that filter is using it). Refs keep closeMeasure
+  // stable and make it a no-op for the pin when the tool was not actually open,
+  // so the "one tool at a time" effect below cannot clear a pin by accident.
+  const locationFilterActiveRef = useRef(false);
+  locationFilterActiveRef.current = locationFilter.active;
   const closeMeasure = useCallback(() => {
+    if (measureOnRef.current && !locationFilterActiveRef.current) setPin(null);
     setMeasureOn(false);
     setMeasureFrom(null);
   }, []);
@@ -2980,10 +2988,7 @@ export default function InstructorZoneMap() {
           />
 
           {editingId ? (
-            <div
-              className="absolute left-1/2 top-3 z-20 w-[min(30rem,calc(100%-1.5rem))] -translate-x-1/2 rounded-md border bg-background p-2 shadow-md"
-              data-testid="zone-edit-bar"
-            >
+            <div className={MAP_PANEL_CLASS} data-testid="zone-edit-bar">
               <p className="text-xs font-medium" data-testid="zone-edit-title">
                 Editing service area — {editingName}
               </p>
@@ -3345,59 +3350,66 @@ export default function InstructorZoneMap() {
             </div>
           </div>
 
-          {/* Right-hand control stack, My Maps order: fit all, refresh, fullscreen. */}
-          <div className="absolute right-3 top-3 z-10 flex flex-col gap-1.5">
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={fitAll}
-              // Distinctly named from the sidebar's "Fit all zones" so the two
-              // are never an ambiguous accessible-name pair — driving either by
-              // role+name would otherwise throw a strict-mode violation.
-              title="Fit map to all zones"
-              aria-label="Fit map to all zones"
-            >
-              <Maximize className="h-4 w-4" />
-            </Button>
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={() =>
-                void queryClient.invalidateQueries({ queryKey: zonesQueryKey })
-              }
-              // Must NOT contain the substring "service areas": the sidebar's
-              // "Service areas" switch is located with getByLabel(), which does
-              // case-insensitive SUBSTRING matching by default, so a longer name
-              // here makes that locator ambiguous.
-              title="Refresh map data"
-              aria-label="Refresh map data"
-            >
-              <RefreshCw className="h-4 w-4" />
-            </Button>
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={() => void toggleFullscreen()}
-              title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-              aria-label={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-              aria-pressed={isFullscreen}
-            >
-              {isFullscreen ? (
-                <Minimize className="h-4 w-4" />
-              ) : (
-                <Maximize2 className="h-4 w-4" />
-              )}
-            </Button>
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={exportGeoJson}
-              title="Export visible areas as GeoJSON"
-              aria-label="Export visible areas as GeoJSON"
-            >
-              <Download className="h-4 w-4" />
-            </Button>
-          </div>
+          {/* Right-hand control stack, My Maps order: fit all, refresh, fullscreen.
+              The three editor panels (instructor edit, service-area edit, measure
+              distance) take this corner, so the stack steps aside while one is
+              open and returns when it closes. */}
+          {!(editingId || measureOn || serviceEditorOpen) ? (
+            <div className="absolute right-3 top-3 z-10 flex flex-col gap-1.5">
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={fitAll}
+                // Distinctly named from the sidebar's "Fit all zones" so the two
+                // are never an ambiguous accessible-name pair — driving either by
+                // role+name would otherwise throw a strict-mode violation.
+                title="Fit map to all zones"
+                aria-label="Fit map to all zones"
+              >
+                <Maximize className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() =>
+                  void queryClient.invalidateQueries({
+                    queryKey: zonesQueryKey,
+                  })
+                }
+                // Must NOT contain the substring "service areas": the sidebar's
+                // "Service areas" switch is located with getByLabel(), which does
+                // case-insensitive SUBSTRING matching by default, so a longer name
+                // here makes that locator ambiguous.
+                title="Refresh map data"
+                aria-label="Refresh map data"
+              >
+                <RefreshCw className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => void toggleFullscreen()}
+                title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+                aria-label={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+                aria-pressed={isFullscreen}
+              >
+                {isFullscreen ? (
+                  <Minimize className="h-4 w-4" />
+                ) : (
+                  <Maximize2 className="h-4 w-4" />
+                )}
+              </Button>
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={exportGeoJson}
+                title="Export visible areas as GeoJSON"
+                aria-label="Export visible areas as GeoJSON"
+              >
+                <Download className="h-4 w-4" />
+              </Button>
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
