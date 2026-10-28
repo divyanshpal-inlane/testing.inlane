@@ -829,13 +829,27 @@ type LearnerWithIssueData = Database["public"]["Tables"]["Learner"]["Row"] & {
 
 const LEARNER_ISSUE_SELECT = "*, enrollment (*, Courses(*)), payment (*)";
 
+// Phones are stored in several formats (8922897499, 918922897499,
+// +918922897499), so a search typed as "+91 89228 97499" found nothing for a
+// learner stored as 8922897499. A phone-looking search is reduced to its digits
+// (a leading 91 on a 12-digit number is dropped) so every stored format
+// matches. Anything else (a name, an area) is returned unchanged.
+export function normalizeLearnerPhoneSearch(searchQuery: string): string {
+  const trimmed = searchQuery.trim();
+  if (!/^[+\d\s().-]+$/.test(trimmed)) return searchQuery;
+  let digits = trimmed.replace(/\D/g, "");
+  if (digits.length > 10 && digits.startsWith("91")) digits = digits.slice(-10);
+  return digits.length >= 4 ? digits : searchQuery;
+}
+
 // Quote PostgREST values and escape regex syntax to preserve literal substring
 // search, including commas, parentheses, quotes and wildcard characters.
 function learnerIssueSearchFilter(searchQuery: string) {
-  const pattern = JSON.stringify(
-    searchQuery.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&"),
-  );
-  return `name.imatch.${pattern},phone.match.${pattern},area.imatch.${pattern}`;
+  const quote = (value: string) =>
+    JSON.stringify(value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&"));
+  const pattern = quote(searchQuery);
+  const phonePattern = quote(normalizeLearnerPhoneSearch(searchQuery));
+  return `name.imatch.${pattern},phone.match.${phonePattern},area.imatch.${pattern}`;
 }
 
 // Filter in the database before requesting exactly one page of learners.
@@ -853,7 +867,10 @@ export function useLearnersWithIssues({
       return supabase
         .rpc(
           "get_learners_with_issues",
-          { search_term: searchQuery, issue_filter: issueFilter },
+          {
+            search_term: normalizeLearnerPhoneSearch(searchQuery),
+            issue_filter: issueFilter,
+          },
           { count: "exact", head },
         )
         .select(LEARNER_ISSUE_SELECT);
