@@ -729,12 +729,23 @@ export function useMutationRescheduleRequest() {
 export function useMutationCompleteRescheduleRequest() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async ({ requestId }: { requestId: string }) => {
-      const { data, error } = await supabase
+    mutationFn: async (
+      variables: { requestId: string } | { requestIds: string[] },
+    ) => {
+      if ("requestIds" in variables && variables.requestIds.length === 0) {
+        return [];
+      }
+      const update = supabase
         .from("reschedule_requests")
-        .update({ status: "completed" })
-        .eq("id", requestId)
-        .select();
+        .update({ status: "completed" });
+      const query =
+        "requestIds" in variables
+          ? update
+              .in("id", variables.requestIds)
+              .eq("type", "reschedule")
+              .eq("status", "pending")
+          : update.eq("id", variables.requestId);
+      const { data, error } = await query.select();
       if (error) throw error;
       return data;
     },

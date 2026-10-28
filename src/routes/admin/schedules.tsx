@@ -29,6 +29,7 @@ import CreateSchedule from "@/components/lesson/CreateSchedule";
 import CreateScheduleWithInstructor from "@/components/lesson/CreateSchedule";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -252,6 +253,10 @@ export default function AdminSchedules() {
 
   const completeRescheduleRequestMutation =
     useMutationCompleteRescheduleRequest();
+  const [isSelectingReschedules, setIsSelectingReschedules] = useState(false);
+  const [selectedRescheduleRequestIds, setSelectedRescheduleRequestIds] =
+    useState<Set<string>>(new Set());
+  const completingReschedulesRef = useRef(false);
 
   const createScheduleMutation = useMutation({
     mutationFn: async ({
@@ -648,6 +653,81 @@ export default function AdminSchedules() {
     }
   };
 
+  const handleMarkRescheduleCompleted = async () => {
+    if (
+      !isSelectingReschedules ||
+      selectedRescheduleRequests.length === 0 ||
+      completingReschedulesRef.current ||
+      completeRescheduleRequestMutation.isPending ||
+      createScheduleMutation.isPending
+    ) {
+      return;
+    }
+
+    completingReschedulesRef.current = true;
+    const requestIds = selectedRescheduleRequests.map((request) => request.id);
+
+    try {
+      const updatedRequests =
+        await completeRescheduleRequestMutation.mutateAsync({ requestIds });
+      // Only clear rows the backend confirms; RLS may allow a partial update.
+      const completedIds = new Set(
+        (updatedRequests ?? [])
+          .filter(
+            (updated) =>
+              requestIds.includes(updated.id) && updated.status === "completed",
+          )
+          .map((updated) => updated.id),
+      );
+      if (completedIds.size === 0) {
+        throw new Error(
+          "No requests were completed. Please refresh and try again.",
+        );
+      }
+
+      // This queue only shows pending requests, including its tab count.
+      queryClient.setQueryData<typeof requestsData>(
+        ["scheduling-requests-infinite"],
+        (previous) =>
+          previous && {
+            ...previous,
+            pages: previous.pages.map((page) => ({
+              ...page,
+              data: page.data.filter((item) => !completedIds.has(item.id)),
+            })),
+          },
+      );
+      setSelectedRescheduleRequestIds(
+        (current) =>
+          new Set([...current].filter((id) => !completedIds.has(id))),
+      );
+      setSelectedRequest((current) =>
+        current && completedIds.has(current.id) ? null : current,
+      );
+      const partiallyCompleted = completedIds.size < requestIds.length;
+      toast({
+        title: partiallyCompleted
+          ? "Some requests could not be completed"
+          : "Requests completed",
+        description: partiallyCompleted
+          ? `${completedIds.size} of ${requestIds.length} requests completed. The remaining requests are still selected. Please try again.`
+          : `${completedIds.size} reschedule request${completedIds.size === 1 ? "" : "s"} marked as completed.`,
+        variant: partiallyCompleted ? "destructive" : "default",
+      });
+    } catch (error) {
+      toast({
+        title: "Unable to complete requests",
+        description:
+          error instanceof Error
+            ? error.message
+            : "Please try again. The reschedule requests could not be completed.",
+        variant: "destructive",
+      });
+    } finally {
+      completingReschedulesRef.current = false;
+    }
+  };
+
   const newRequests = useMemo(
     () => requests?.filter((r) => (r.type as string) === "new"),
     [requests],
@@ -707,6 +787,31 @@ export default function AdminSchedules() {
     () => requests?.filter((r) => (r.type as string) === "reschedule"),
     [requests],
   );
+
+  const eligibleRescheduleRequests = useMemo(
+    () => rescheduleRequests.filter((request) => request.status === "pending"),
+    [rescheduleRequests],
+  );
+  const selectedRescheduleRequests = eligibleRescheduleRequests.filter(
+    (request) => selectedRescheduleRequestIds.has(request.id),
+  );
+  const allReschedulesSelected =
+    eligibleRescheduleRequests.length > 0 &&
+    selectedRescheduleRequests.length === eligibleRescheduleRequests.length;
+  const rescheduleSelectionDisabled =
+    completeRescheduleRequestMutation.isPending ||
+    createScheduleMutation.isPending;
+
+  // A request completed elsewhere must no longer be selected for bulk actions.
+  useEffect(() => {
+    const eligibleIds = new Set(
+      eligibleRescheduleRequests.map((request) => request.id),
+    );
+    setSelectedRescheduleRequestIds((current) => {
+      const next = new Set([...current].filter((id) => eligibleIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [eligibleRescheduleRequests]);
 
   const tenthLessonRequests = useMemo(
     () => requests?.filter((r) => (r.type as string) === "lesson10"),
@@ -1309,42 +1414,173 @@ export default function AdminSchedules() {
           <TabsContent value="reschedule" className="h-full">
             <div className="grid h-full grid-cols-12 gap-2 p-4">
               {/* Learners List */}
-              <Card className="md:col-span-2">
+              <Card className="col-span-12 min-w-0 md:col-span-3">
                 <CardHeader className="p-3">
-                  <CardTitle className="text-sm">Reschedule Requests</CardTitle>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <CardTitle className="text-sm">
+                      Reschedule Requests{" "}
+                      <span className="text-muted-foreground">
+                        ({rescheduleRequests.length})
+                      </span>
+                    </CardTitle>
+                    {isSelectingReschedules && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={
+                          selectedRescheduleRequests.length === 0 ||
+                          rescheduleSelectionDisabled
+                        }
+                        onClick={handleMarkRescheduleCompleted}
+                      >
+                        {completeRescheduleRequestMutation.isPending ? (
+                          <>
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            Completing...
+                          </>
+                        ) : (
+                          "Mark as Completed"
+                        )}
+                      </Button>
+                    )}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Select the requests you want to complete.
+                  </p>
                 </CardHeader>
                 <CardContent className="p-3 pt-0">
-                  <ScrollArea className="h-[calc(100vh-240px)]">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-t pt-3">
+                    {isSelectingReschedules ? (
+                      <>
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            id="select-all-reschedule-requests"
+                            className="rounded-full"
+                            checked={
+                              allReschedulesSelected
+                                ? true
+                                : selectedRescheduleRequests.length > 0
+                                  ? "indeterminate"
+                                  : false
+                            }
+                            disabled={
+                              eligibleRescheduleRequests.length === 0 ||
+                              rescheduleSelectionDisabled
+                            }
+                            onCheckedChange={(checked) =>
+                              setSelectedRescheduleRequestIds(
+                                new Set(
+                                  checked === true
+                                    ? eligibleRescheduleRequests.map(
+                                        (request) => request.id,
+                                      )
+                                    : [],
+                                ),
+                              )
+                            }
+                          />
+                          <label
+                            htmlFor="select-all-reschedule-requests"
+                            className="cursor-pointer text-xs font-medium"
+                          >
+                            Select all
+                          </label>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span
+                            aria-live="polite"
+                            className="text-xs text-muted-foreground"
+                          >
+                            {selectedRescheduleRequests.length} selected
+                          </span>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={rescheduleSelectionDisabled}
+                            onClick={() => {
+                              if (completingReschedulesRef.current) return;
+                              setIsSelectingReschedules(false);
+                              setSelectedRescheduleRequestIds(new Set());
+                            }}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      </>
+                    ) : (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={
+                          eligibleRescheduleRequests.length === 0 ||
+                          rescheduleSelectionDisabled
+                        }
+                        onClick={() => setIsSelectingReschedules(true)}
+                      >
+                        Select
+                      </Button>
+                    )}
+                  </div>
+                  <ScrollArea className="h-[calc(100vh-340px)]">
                     {rescheduleRequests?.map((request) => (
-                      <div key={request.id} className="mb-2">
-                        <LearnerInfoCard
-                          learner={{
-                            id: request.Learner?.id || "",
-                            name: request.Learner?.name || "",
-                            phone: request.Learner?.phone || "",
-                            email: request.Learner?.email || "",
-                            area: request.Learner?.area || "",
-                            pick_up_location: request.Learner?.pick_up_location,
-                            pincode: request.Learner?.pincode,
-                            signed_up: request.Learner?.signed_up,
-                            created_at: request.Learner?.created_at,
-                            address_lat: request.Learner?.address_lat,
-                            address_lng: request.Learner?.address_lng,
-                            preferred_start_date:
-                              request.Learner?.preferred_start_date,
-                            preferred_completion_days:
-                              request.Learner?.preferred_completion_days,
-                            prefers_two_hour_classes:
-                              request.Learner?.prefers_two_hour_classes,
-                            preferred_two_hour_days:
-                              request?.Learner?.two_hour_days,
-                            DL_test_date: request.Learner?.DL_test_date,
-                          }}
-                          compact={true}
-                          onClick={(learner) => {
-                            handleRequestSelect(request);
-                          }}
-                        />
+                      <div
+                        key={request.id}
+                        className={`mb-2 flex items-center gap-2 rounded-lg p-1 transition-colors ${selectedRescheduleRequestIds.has(request.id) ? "bg-primary/10" : ""}`}
+                      >
+                        {isSelectingReschedules && (
+                          <Checkbox
+                            aria-label={`Select reschedule request for ${request.Learner?.name || "learner"}`}
+                            className="rounded-full"
+                            checked={selectedRescheduleRequestIds.has(
+                              request.id,
+                            )}
+                            disabled={
+                              request.status !== "pending" ||
+                              rescheduleSelectionDisabled
+                            }
+                            onCheckedChange={(checked) =>
+                              setSelectedRescheduleRequestIds((current) => {
+                                const next = new Set(current);
+                                if (checked === true) next.add(request.id);
+                                else next.delete(request.id);
+                                return next;
+                              })
+                            }
+                          />
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <LearnerInfoCard
+                            learner={{
+                              id: request.Learner?.id || "",
+                              name: request.Learner?.name || "",
+                              phone: request.Learner?.phone || "",
+                              email: request.Learner?.email || "",
+                              area: request.Learner?.area || "",
+                              pick_up_location:
+                                request.Learner?.pick_up_location,
+                              pincode: request.Learner?.pincode,
+                              signed_up: request.Learner?.signed_up,
+                              created_at: request.Learner?.created_at,
+                              address_lat: request.Learner?.address_lat,
+                              address_lng: request.Learner?.address_lng,
+                              preferred_start_date:
+                                request.Learner?.preferred_start_date,
+                              preferred_completion_days:
+                                request.Learner?.preferred_completion_days,
+                              prefers_two_hour_classes:
+                                request.Learner?.prefers_two_hour_classes,
+                              preferred_two_hour_days:
+                                request?.Learner?.two_hour_days,
+                              DL_test_date: request.Learner?.DL_test_date,
+                            }}
+                            compact={true}
+                            onClick={(learner) => {
+                              handleRequestSelect(request);
+                            }}
+                          />
+                        </div>
                       </div>
                     ))}
                     {/* Infinite scroll sentinel */}
@@ -1361,7 +1597,7 @@ export default function AdminSchedules() {
               </Card>
 
               {/* Schedule Creation */}
-              <Card className="md:col-span-10">
+              <Card className="col-span-12 min-w-0 md:col-span-9">
                 <CardHeader className="p-3">
                   <CardTitle className="text-sm">
                     {selectedRequest
