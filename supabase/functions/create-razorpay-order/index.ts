@@ -1,6 +1,12 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.47.10";
 
+import {
+  assertLicencePayable,
+  isLicenceEnrollment,
+  type LicenceEnrollmentLike,
+} from "../_shared/licence.ts";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -159,6 +165,7 @@ serve(async (req) => {
       isDemoUpgrade,
       demoPaymentId,
       courseSelectionType,
+      enrollmentId,
     } = (await req.json()) as PaymentDetails;
 
     // 1. Find or create learner
@@ -223,6 +230,22 @@ serve(async (req) => {
       }
     }
 
+    // 1b. Licence service paid through its link: validate it BEFORE the payment
+    // row exists, so a bad request leaves no orphan pending payment.
+    let licenceEnrollment: LicenceEnrollmentLike | null = null;
+    if (paymentType === "course" && !courseId && enrollmentId) {
+      const { data: licenceRow, error: licenceError } = await supabaseClient
+        .from("enrollment")
+        .select("id, learner_id, case_type, payment_status, amount")
+        .eq("id", enrollmentId)
+        .maybeSingle();
+      if (licenceError) throw licenceError;
+      if (isLicenceEnrollment(licenceRow)) {
+        assertLicencePayable(licenceRow, learnerId, amount);
+        licenceEnrollment = licenceRow;
+      }
+    }
+
     // 2. Create payment record with gateway = 'razorpay'
     const { data: paymentRecord, error: dbError } = await supabaseClient
       .from("payment")
@@ -262,6 +285,16 @@ serve(async (req) => {
         .from("payment")
         .update({ status: "upgraded" })
         .eq("id", demoPaymentId);
+    }
+
+    // 2b. Licence service: attach this payment to its enrollment (the course
+    // path below needs a courseId, so it would otherwise skip it).
+    if (licenceEnrollment?.id) {
+      const { error: licenceLinkError } = await supabaseClient
+        .from("enrollment")
+        .update({ payment_id: paymentRecord.id })
+        .eq("id", licenceEnrollment.id);
+      if (licenceLinkError) throw licenceLinkError;
     }
 
     // 3. Handle enrollment records (same logic as process-payment)

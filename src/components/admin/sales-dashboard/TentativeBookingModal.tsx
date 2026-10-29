@@ -3,9 +3,21 @@ import React, { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { CrmLeadAutofill } from "@/components/admin/learner/CrmLeadAutofill";
+import { ExistingLearnerPicker } from "@/components/admin/sales-dashboard/ExistingLearnerPicker";
 import { useCanSeeCustomerPhone } from "@/hooks/useCanSeeCustomerPhone";
 import type { BulkType } from "@/lib/sales-dashboard/bulkSlots";
 import { generateBulkSlots } from "@/lib/sales-dashboard/bulkSlots";
+import {
+  type ClassBudget,
+  moreAllowed,
+  overBy,
+} from "@/lib/sales-dashboard/orderSlots";
+import {
+  defaultServiceFor,
+  paidInfoLabel,
+  paymentStatusOf,
+} from "@/lib/sales-dashboard/serviceBooking";
+import { getTentativePermissions } from "@/lib/sales-dashboard/tentativePermissions";
 import { minutesToTime, timeToMinutes } from "@/lib/sales-dashboard/validation";
 import { isValidPhone, normalizePhone } from "@/lib/sales-dashboard/validation";
 import { supabase } from "@/lib/supabaseClient";
@@ -13,6 +25,8 @@ import { checkInstructorAvailability } from "@/queries/instructor";
 import { maskPhoneNumber } from "@/utils/phoneMasking";
 
 import { AddressAutocomplete } from "./AddressAutocomplete";
+import { fetchOrderBudget } from "./orderBudget";
+import { useLearnerServicesByPhone } from "./useLearnerServicesByPhone";
 
 // One selected class in the batch. Task 19 (multiple-class booking): a
 // single customer form can carry N of these — one Schedule row gets
@@ -38,11 +52,19 @@ export interface CustomerFormValues {
   phoneFromCrm?: boolean;
   salesAgent: string;
   paymentStatus: "unpaid" | "half_paid" | "full_paid";
+  // True once the agent chose the payment status by hand. It is saved on the
+  // booking so the automatic "follow the linked service" re-sync leaves it be.
+  paymentManual?: boolean;
   customerAddress: string;
   course: string;
   // From the CRM autofill, when it had one. Not shown in the form; saved with
   // the booking so creating the learner later can start with it filled in.
   customerEmail?: string;
+  // The service (enrollment) these classes are for, when the booking was
+  // started from a learner's service. Saved on every class of the booking so
+  // each class can be traced to the order and payment it belongs to.
+  enrollmentId?: string;
+  serviceLabel?: string;
 }
 
 // "None" in the course dropdown (a booking that is not tied to a course yet).
@@ -106,6 +128,17 @@ interface TentativeBookingModalProps {
     baseDetails: Record<string, unknown> | null;
     rowIds: number[];
   } | null;
+  // Who is saving. Stamped on a NEW booking as created_by_id (so ownership
+  // does not hinge on a display name), and used to re-check edit rights
+  // against the database at save time. actorName is the logged-in user, NOT
+  // formData.salesAgent (which keeps the original creator while editing).
+  currentUserId?: string | null;
+  actorName?: string;
+  isSuperAdmin?: boolean;
+  // The class budget of the order this booking is linked to (null while unknown
+  // or when it is not linked): how many classes it has and how many are already
+  // booked elsewhere. Gates how many classes this booking may hold.
+  classBudget?: ClassBudget | null;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -194,6 +227,10 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
   formData,
   onFormDataChange,
   editContext = null,
+  currentUserId = null,
+  actorName = "",
+  isSuperAdmin = false,
+  classBudget = null,
 }) => {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [successMessage, setSuccessMessage] = useState("");
@@ -236,8 +273,49 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
   const maskCrmPhone = Boolean(formData.phoneFromCrm) && !canSeeFullPhone;
   const maskEditPhone = Boolean(editContext) && !canSeeFullPhone;
   const maskPhoneField = maskCrmPhone || maskEditPhone;
+
+  // A slot is linked to the customer's service by default, not saved as a
+  // course written in text. The learner is found by the form's phone number;
+  // if they have services the best one is chosen (the booking's course if it
+  // matches, else their only service) and the user may switch among them. If
+  // they have several and none matches, the user must choose: it is required.
+  // A customer with no learner yet is saved unlinked, and the slot links itself
+  // once the learner / service exists.
+  const formPhone10 = normalizePhone(formData.customerPhone);
+  const learnerLookup = useLearnerServicesByPhone(
+    formPhone10,
+    isOpen && !editContext,
+  );
+  const serviceChoices = learnerLookup.data?.services ?? [];
+  const selectedCourseText =
+    formData.course && formData.course !== NO_COURSE
+      ? (courseOptions.find((o) => o.id === formData.course)?.label ?? "")
+      : "";
+  useEffect(() => {
+    if (editContext || formData.enrollmentId || serviceChoices.length === 0) {
+      return;
+    }
+    const pick = defaultServiceFor(selectedCourseText, serviceChoices, {
+      allowSingle: true,
+    });
+    if (!pick) return;
+    onFormDataChange({
+      ...formData,
+      enrollmentId: pick.enrollment.id,
+      serviceLabel: pick.label,
+      paymentStatus: paymentStatusOf(pick.enrollment.payment_status),
+      paymentManual: false,
+    });
+    // formData / onFormDataChange are intentionally not dependencies: this runs
+    // when the services or the chosen course change, and the guard above stops
+    // it once a service is set.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editContext, serviceChoices, selectedCourseText, formData.enrollmentId]);
   // Bulk Add Schedules dialog state
   const [isBulkDialogOpen, setIsBulkDialogOpen] = useState(false);
+  // The service line shows the chosen service and no picker; "Change" opens
+  // the picker again for a learner who has more than one.
+  const [changingService, setChangingService] = useState(false);
   const [bulkType, setBulkType] = useState<BulkType>("single");
   const [bulkDate, setBulkDate] = useState("");
   const [bulkTimes, setBulkTimes] = useState({ start: "09:00", end: "10:00" });
@@ -421,6 +499,21 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
     mutationFn: async () => {
       if (slots.length === 0) throw new Error("No slot selected");
 
+      // Re-check the order's class budget against the live database: someone
+      // else may have booked classes on it since this form was opened.
+      if (formData.enrollmentId) {
+        const fresh = await fetchOrderBudget(
+          formData.enrollmentId,
+          editContext?.rowIds ?? [],
+        );
+        const over = overBy(fresh, slots.length);
+        if (over > 0) {
+          throw new Error(
+            `This order has only ${fresh.remaining} class${fresh.remaining === 1 ? "" : "es"} left (${fresh.bookedElsewhere} of ${fresh.total} already booked). Remove ${over} class${over === 1 ? "" : "es"} and try again.`,
+          );
+        }
+      }
+
       // When editing, the phone is never shown or editable: the booking keeps
       // whatever phone it already has (it stays in `baseDetails`).
       const normalizedPhone = normalizePhone(formData.customerPhone);
@@ -432,11 +525,22 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
         name: formData.customerName,
         phone: normalizedPhone,
         sales_agent: formData.salesAgent,
+        ...(currentUserId ? { created_by_id: currentUserId } : {}),
+        ...(formData.enrollmentId
+          ? {
+              enrollment_id: formData.enrollmentId,
+              service_label: formData.serviceLabel ?? null,
+            }
+          : {}),
         payment_status: formData.paymentStatus,
+        payment_manual: formData.paymentManual ? true : null,
+        paid_info: paidInfoLabel(formData.paymentStatus),
         address: formData.customerAddress,
         course: formData.course,
-        course_name:
-          courseOptions.find((c) => c.id === formData.course)?.label ?? null,
+        course_name: formData.enrollmentId
+          ? (formData.serviceLabel ?? null)
+          : (courseOptions.find((c) => c.id === formData.course)?.label ??
+            null),
         ...(formData.customerEmail ? { email: formData.customerEmail } : {}),
         // Groups every row written by one booking (a multi-class batch or a
         // single slot) so a later Edit can find all the rows booked together
@@ -452,18 +556,74 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
         const batchId = editContext.batchId ?? crypto.randomUUID();
         const editDetails: Record<string, unknown> = {
           ...(editContext.baseDetails ?? {}),
+          // An older booking has no created_by_id. When its real creator
+          // saves an edit, record their id so ownership stops depending on
+          // the display name.
+          ...(currentUserId &&
+          !editContext.baseDetails?.created_by_id &&
+          typeof editContext.baseDetails?.sales_agent === "string" &&
+          editContext.baseDetails.sales_agent.trim().toLowerCase() ===
+            actorName.trim().toLowerCase()
+            ? { created_by_id: currentUserId }
+            : {}),
+          enrollment_id: formData.enrollmentId ?? null,
+          service_label: formData.serviceLabel ?? null,
           name: formData.customerName,
           ...(normalizedPhone ? { phone: normalizedPhone } : {}),
           sales_agent: formData.salesAgent,
           payment_status: formData.paymentStatus,
+          payment_manual: formData.paymentManual ? true : null,
+          paid_info: paidInfoLabel(formData.paymentStatus),
           address: formData.customerAddress,
           course: formData.course,
-          course_name:
-            courseOptions.find((c) => c.id === formData.course)?.label ?? null,
+          course_name: formData.enrollmentId
+            ? (formData.serviceLabel ?? null)
+            : (courseOptions.find((c) => c.id === formData.course)?.label ??
+              null),
           ...(formData.customerEmail ? { email: formData.customerEmail } : {}),
           batch_id: batchId,
           updated_at: new Date().toISOString(),
         };
+
+        // Re-check the booking against the database BEFORE any write. The
+        // screen can be minutes old: Operations may have confirmed a class,
+        // someone may have deleted one, or its payment status / owner may
+        // have changed so this user no longer may edit it. The writes below
+        // are separate statements, so this must happen first.
+        const { data: fresh, error: freshError } = await sb
+          .from("Schedule")
+          .select("id, isTentative, tentative_details")
+          .in("id", editContext.rowIds);
+        if (freshError) throw freshError;
+        const freshRows = (fresh ?? []) as {
+          id: number;
+          isTentative: boolean | null;
+          tentative_details: Record<string, unknown> | null;
+        }[];
+        for (const r of freshRows) {
+          if (r.isTentative !== true) {
+            throw new Error(
+              "A class in this booking was confirmed by Operations since you opened it, so it can't be edited here. Close and reopen the booking.",
+            );
+          }
+          const p = getTentativePermissions(
+            { details: r.tentative_details, isTentative: true },
+            { name: actorName, id: currentUserId, isSuperAdmin },
+          );
+          if (!p.canEdit) {
+            throw new Error(
+              "You can no longer edit this booking: its payment status or owner changed. Close and reopen it.",
+            );
+          }
+        }
+        const present = new Set(freshRows.map((r) => r.id));
+        if (
+          slots.some((s) => s.scheduleId != null && !present.has(s.scheduleId))
+        ) {
+          throw new Error(
+            "A class in this booking was deleted by someone else. Close and reopen the booking.",
+          );
+        }
 
         // Check every NEW class (added, or moved -- a moved class loses its
         // scheduleId) against the live grid BEFORE any write. The deletes and
@@ -487,14 +647,20 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
           (id) => !slots.some((s) => s.scheduleId === id),
         );
         for (const id of removedIds) {
-          const { error } = await sb.from("Schedule").delete().eq("id", id);
+          // isTentative = true again so a class confirmed in the instant
+          // after the check above is never deleted by an edit.
+          const { error } = await sb
+            .from("Schedule")
+            .delete()
+            .eq("id", id)
+            .eq("isTentative", true);
           if (error) throw error;
         }
 
         // Changed classes: update the exact Schedule row each SlotPick maps to.
         for (const s of slots) {
           if (s.scheduleId == null) continue;
-          const { error } = await sb
+          const { data: updated, error } = await sb
             .from("Schedule")
             .update({
               date: s.date,
@@ -502,8 +668,15 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
               end_time: s.endTime,
               tentative_details: editDetails,
             })
-            .eq("id", s.scheduleId);
+            .eq("id", s.scheduleId)
+            .eq("isTentative", true)
+            .select("id");
           if (error) throw error;
+          if (!updated || updated.length === 0) {
+            throw new Error(
+              "A class in this booking changed while you were saving (it may have been confirmed or deleted). Close and reopen the booking.",
+            );
+          }
         }
 
         // Added classes: no scheduleId -> brand new rows in the same booking.
@@ -636,6 +809,20 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
     if (!formData.course) {
       newErrors.course = "Course selection is required";
     }
+    const overLimit = overBy(classBudget, slots.length);
+    if (overLimit > 0) {
+      newErrors.classes = `This order has only ${classBudget?.remaining} class${classBudget?.remaining === 1 ? "" : "es"} left. Remove ${overLimit} class${overLimit === 1 ? "" : "es"} from this booking.`;
+    }
+    if (!editContext && formPhone10 && learnerLookup.isLoading) {
+      newErrors.service =
+        "Checking this customer's services, try again in a moment.";
+    } else if (
+      !editContext &&
+      serviceChoices.length > 0 &&
+      !formData.enrollmentId
+    ) {
+      newErrors.service = "Choose which service these classes are for.";
+    }
     if (slots.length === 0) {
       newErrors.submit = "Select at least one slot";
     }
@@ -664,6 +851,39 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
   // -- the inner .modal stops propagation, and in panel mode it covers the
   // host completely, so there is no backdrop left to click-dismiss.
   const asPanel = variant === "panel";
+
+  // The Cancel / Save row. In the centred modal it follows the fields. In the
+  // side panel it is a SEPARATE row below the scrolling body (see
+  // .modal-panel-footer): the fields scroll, this row never overlays them, so
+  // it cannot cover the Address / Course labels the way a sticky row does.
+  const footer = (
+    <div className={asPanel ? "modal-panel-footer" : "flex gap-3 pt-4"}>
+      <button
+        type="button"
+        onClick={onClose}
+        disabled={createTentativeMutation.isPending}
+        className="flex min-h-10 flex-none items-center justify-center rounded-lg border border-input bg-background px-4 py-2 text-sm font-medium text-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+      >
+        Cancel
+      </button>
+      <button
+        type="button"
+        onClick={handleSubmit}
+        disabled={createTentativeMutation.isPending || hasAnyConflict}
+        className="flex min-h-10 flex-1 items-center justify-center rounded-lg bg-primary px-3 py-2 text-center text-sm font-medium leading-tight text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+      >
+        {createTentativeMutation.isPending
+          ? editContext
+            ? "Saving..."
+            : "Booking..."
+          : editContext
+            ? "Save Changes"
+            : slots.length > 1
+              ? `Create ${slots.length} Tentative Blocks`
+              : "Create Tentative Block"}
+      </button>
+    </div>
+  );
 
   return (
     // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
@@ -704,421 +924,565 @@ export const TentativeBookingModal: React.FC<TentativeBookingModalProps> = ({
           </div>
         )}
 
-        {/* Use div instead of <form> to avoid nested-form double-submit.
+        <div className={asPanel ? "modal-panel-body" : undefined}>
+          {/* Use div instead of <form> to avoid nested-form double-submit.
             The modal is rendered inside the admin instructor form, so a native
             <form onSubmit> would be nested and fire twice. */}
-        <div className="space-y-4">
-          {/* Selected Slots */}
-          <div className="rounded-lg border border-border bg-muted p-3">
-            {/* Title + status pills share one wrappable row; the two actions
+          <div className="space-y-4">
+            {/* Selected Slots */}
+            <div className="rounded-lg border border-border bg-muted p-3">
+              {/* Title + status pills share one wrappable row; the two actions
                 get their OWN full-width row below. They used to sit in the
                 same justify-between row as the title and the pills, which in
                 a ~400px side panel squeezed all four onto one line: the button
                 labels wrapped to two lines each, the pills shrank, and
                 nothing lined up. Two equal columns keep them one line tall and
                 identically sized. */}
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
-              <span className="text-sm font-medium text-foreground">
-                {editContext
-                  ? `Classes in this booking (${slots.length})`
-                  : `Selected Slots (${slots.length})`}
-              </span>
-              {
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {(() => {
-                    const statuses = slots.map((_, i) => getSlotStatus(i));
-                    const conflictCount = statuses.filter(
-                      (st) => st.conflict,
-                    ).length;
-                    const freeCount = statuses.filter(
-                      (st) => st.checked && !st.conflict,
-                    ).length;
-                    return (
-                      <>
-                        {freeCount > 0 && (
-                          <span className="inline-flex items-center whitespace-nowrap rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
-                            {freeCount} Free
-                          </span>
-                        )}
-                        {conflictCount > 0 && (
-                          <span className="inline-flex items-center whitespace-nowrap rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
-                            {conflictCount} Conflict
-                            {conflictCount > 1 ? "s" : ""}
-                          </span>
-                        )}
-                      </>
-                    );
-                  })()}
-                </div>
-              }
-            </div>
-            {/* Also offered while editing: classes can be added to (or
-                removed from, with the × on a row) an existing booking. New
-                rows are inserted into the same booking on Save. */}
-            <div className="mb-2 grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                className="whitespace-nowrap rounded-full bg-blue-100 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-200"
-                onClick={() => {
-                  onAddAnotherSlot();
-                }}
-              >
-                + Add another class
-              </button>
-              <button
-                type="button"
-                className="whitespace-nowrap rounded-full bg-purple-100 px-3 py-1.5 text-xs font-semibold text-purple-700 hover:bg-purple-200"
-                onClick={openBulkDialog}
-              >
-                ⚡ Bulk Add
-              </button>
-            </div>
-            {editContext && (
-              <p className="mb-2 text-xs text-muted-foreground">
-                Add or remove classes here — changes are saved when you click
-                Save.
-              </p>
-            )}
-            {bulkSkippedNotice && (
-              <div
-                role="status"
-                className="mb-2 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900"
-              >
-                <div className="mb-1 flex items-start justify-between gap-2">
-                  <p className="font-semibold">
-                    {bulkSkippedNotice.length} slot
-                    {bulkSkippedNotice.length === 1 ? "" : "s"} skipped:
-                  </p>
-                  <button
-                    type="button"
-                    aria-label="Dismiss"
-                    className="text-amber-900/70 hover:text-amber-900"
-                    onClick={() => setBulkSkippedNotice(null)}
-                  >
-                    ×
-                  </button>
-                </div>
-                <ul className="list-inside list-disc space-y-0.5">
-                  {bulkSkippedNotice.map((reason) => (
-                    <li key={reason}>{reason}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            <div className="space-y-1.5">
-              {slots.map((s, i) => {
-                const status = getSlotStatus(i);
-                return (
-                  <div
-                    key={`${s.instructorId}-${s.date}-${s.startTime}-${i}`}
-                    className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 rounded-md bg-background px-2 py-1.5 text-sm text-foreground"
-                  >
-                    {/* The label is allowed to wrap and take the full first
-                        line; the pills and buttons are one nowrap group that
-                        sits beside it (or drops below it when it is long). */}
-                    <span className="min-w-0 flex-1">
-                      Class {i + 1}: {s.date} •{" "}
-                      {formatSlotTime(s.startTime, s.endTime)} •{" "}
-                      {s.instructorName}
-                    </span>
-                    <span className="flex flex-none items-center gap-1.5">
-                      {status.conflict ? (
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
+                <span className="text-sm font-medium text-foreground">
+                  {editContext
+                    ? `Classes in this booking (${slots.length})`
+                    : `Selected Slots (${slots.length})`}
+                </span>
+                {
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {(() => {
+                      const statuses = slots.map((_, i) => getSlotStatus(i));
+                      const conflictCount = statuses.filter(
+                        (st) => st.conflict,
+                      ).length;
+                      const freeCount = statuses.filter(
+                        (st) => st.checked && !st.conflict,
+                      ).length;
+                      return (
                         <>
-                          {/* Just "Conflict": the reason is not spelled out
-                              in the row (kept as a hover tooltip only). */}
-                          <span
-                            className="inline-flex items-center whitespace-nowrap rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive"
-                            title={status.reason || undefined}
-                          >
-                            Conflict
-                          </span>
-                          {onChangeSlot && (
-                            <button
-                              type="button"
-                              className="whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 hover:bg-amber-200"
-                              aria-label={`Change slot for class ${i + 1}`}
-                              onClick={() => onChangeSlot(i)}
-                            >
-                              Change slot
-                            </button>
+                          {freeCount > 0 && (
+                            <span className="inline-flex items-center whitespace-nowrap rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                              {freeCount} Free
+                            </span>
+                          )}
+                          {conflictCount > 0 && (
+                            <span className="inline-flex items-center whitespace-nowrap rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
+                              {conflictCount} Conflict
+                              {conflictCount > 1 ? "s" : ""}
+                            </span>
                           )}
                         </>
-                      ) : (
-                        status.checked && (
+                      );
+                    })()}
+                  </div>
+                }
+              </div>
+              {/* Also offered while editing: classes can be added to (or
+                removed from, with the × on a row) an existing booking. New
+                rows are inserted into the same booking on Save. */}
+              {classBudget && classBudget.total !== null && (
+                <div
+                  className={`mb-2 rounded-md px-2.5 py-2 text-xs ${
+                    overBy(classBudget, slots.length) > 0
+                      ? "bg-red-50 text-red-800"
+                      : moreAllowed(classBudget, slots.length) === 0
+                        ? "bg-amber-50 text-amber-900"
+                        : "bg-blue-50 text-blue-900"
+                  }`}
+                >
+                  <b>{formData.serviceLabel ?? "This order"}</b>:{" "}
+                  {classBudget.total} class
+                  {classBudget.total === 1 ? "" : "es"} ·{" "}
+                  {classBudget.bookedElsewhere} already booked ·{" "}
+                  <b>{classBudget.remaining} left</b>.{" "}
+                  {overBy(classBudget, slots.length) > 0
+                    ? `You have ${slots.length} selected: remove ${overBy(classBudget, slots.length)}.`
+                    : moreAllowed(classBudget, slots.length) === 0
+                      ? "This booking uses all of them."
+                      : `${slots.length} selected, ${moreAllowed(classBudget, slots.length)} more can be added.`}
+                </div>
+              )}
+              {errors.classes && (
+                <p className="mb-2 text-xs text-destructive">
+                  {errors.classes}
+                </p>
+              )}
+              <div className="mb-2 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  disabled={moreAllowed(classBudget, slots.length) === 0}
+                  title={
+                    moreAllowed(classBudget, slots.length) === 0
+                      ? "This order has no classes left to add"
+                      : undefined
+                  }
+                  className="whitespace-nowrap rounded-full bg-blue-100 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-200 disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={() => {
+                    onAddAnotherSlot();
+                  }}
+                >
+                  + Add another class
+                </button>
+                <button
+                  type="button"
+                  disabled={moreAllowed(classBudget, slots.length) === 0}
+                  title={
+                    moreAllowed(classBudget, slots.length) === 0
+                      ? "This order has no classes left to add"
+                      : undefined
+                  }
+                  className="whitespace-nowrap rounded-full bg-purple-100 px-3 py-1.5 text-xs font-semibold text-purple-700 hover:bg-purple-200 disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={openBulkDialog}
+                >
+                  ⚡ Bulk Add
+                </button>
+              </div>
+              {editContext && (
+                <p className="mb-2 text-xs text-muted-foreground">
+                  Add or remove classes here — changes are saved when you click
+                  Save.
+                </p>
+              )}
+              {bulkSkippedNotice && (
+                <div
+                  role="status"
+                  className="mb-2 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900"
+                >
+                  <div className="mb-1 flex items-start justify-between gap-2">
+                    <p className="font-semibold">
+                      {bulkSkippedNotice.length} slot
+                      {bulkSkippedNotice.length === 1 ? "" : "s"} skipped:
+                    </p>
+                    <button
+                      type="button"
+                      aria-label="Dismiss"
+                      className="text-amber-900/70 hover:text-amber-900"
+                      onClick={() => setBulkSkippedNotice(null)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <ul className="list-inside list-disc space-y-0.5">
+                    {bulkSkippedNotice.map((reason) => (
+                      <li key={reason}>{reason}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <div className="space-y-1.5">
+                {slots.map((s, i) => {
+                  const status = getSlotStatus(i);
+                  return (
+                    <div
+                      key={`${s.instructorId}-${s.date}-${s.startTime}-${i}`}
+                      className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 rounded-md bg-background px-2 py-1.5 text-sm text-foreground"
+                    >
+                      {/* The label is allowed to wrap and take the full first
+                        line; the pills and buttons are one nowrap group that
+                        sits beside it (or drops below it when it is long). */}
+                      <span className="min-w-0 flex-1">
+                        Class {i + 1}: {s.date} •{" "}
+                        {formatSlotTime(s.startTime, s.endTime)} •{" "}
+                        {s.instructorName}
+                      </span>
+                      <span className="flex flex-none items-center gap-1.5">
+                        {status.conflict ? (
                           <>
-                            <span className="inline-flex items-center whitespace-nowrap rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
-                              {s.scheduleId != null ? "Saved" : "Free"}
+                            {/* Just "Conflict": the reason is not spelled out
+                              in the row (kept as a hover tooltip only). */}
+                            <span
+                              className="inline-flex items-center whitespace-nowrap rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive"
+                              title={status.reason || undefined}
+                            >
+                              Conflict
                             </span>
-                            {/* Edit mode: every class's date/time is editable,
-                                so offer "Change time" even on a row that is not
-                                in conflict (its own hold is why the DB check
-                                would call it busy). */}
-                            {editContext && onChangeSlot && (
+                            {onChangeSlot && (
                               <button
                                 type="button"
                                 className="whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 hover:bg-amber-200"
-                                aria-label={`Change time for class ${i + 1}`}
+                                aria-label={`Change slot for class ${i + 1}`}
                                 onClick={() => onChangeSlot(i)}
                               >
-                                Change time
+                                Change slot
                               </button>
                             )}
                           </>
-                        )
-                      )}
-                      {slots.length > 1 && (
-                        <button
-                          type="button"
-                          className="flex-none rounded-full px-1.5 text-red-600 hover:bg-red-100"
-                          aria-label={`Remove class ${i + 1}`}
-                          onClick={() => {
-                            onRemoveSlot(i);
-                          }}
-                        >
-                          &times;
-                        </button>
-                      )}
-                    </span>
-                  </div>
-                );
-              })}
+                        ) : (
+                          status.checked && (
+                            <>
+                              <span className="inline-flex items-center whitespace-nowrap rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                                {s.scheduleId != null ? "Saved" : "Free"}
+                              </span>
+                              {/* Edit mode: every class's date/time is editable,
+                                so offer "Change time" even on a row that is not
+                                in conflict (its own hold is why the DB check
+                                would call it busy). */}
+                              {editContext && onChangeSlot && (
+                                <button
+                                  type="button"
+                                  className="whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 hover:bg-amber-200"
+                                  aria-label={`Change time for class ${i + 1}`}
+                                  onClick={() => onChangeSlot(i)}
+                                >
+                                  Change time
+                                </button>
+                              )}
+                            </>
+                          )
+                        )}
+                        {slots.length > 1 && (
+                          <button
+                            type="button"
+                            className="flex-none rounded-full px-1.5 text-red-600 hover:bg-red-100"
+                            aria-label={`Remove class ${i + 1}`}
+                            onClick={() => {
+                              onRemoveSlot(i);
+                            }}
+                          >
+                            &times;
+                          </button>
+                        )}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-          </div>
 
-          {/* CRM autofill (new bookings only): fills name, phone, address and
+            {/* CRM autofill (new bookings only): fills name, phone, address and
               payment status; every field stays editable. */}
-          {!editContext && (
-            <CrmLeadAutofill
-              target="sales"
-              onFill={(fill) => {
-                const payment =
-                  fill.payment === "Half paid"
-                    ? "half_paid"
-                    : fill.payment === "Full paid"
-                      ? "full_paid"
-                      : fill.payment === "Unpaid"
-                        ? "unpaid"
-                        : undefined;
-                onFormDataChange({
-                  ...formData,
-                  customerName: fill.name ?? formData.customerName,
-                  customerPhone: fill.phone ?? formData.customerPhone,
-                  customerAddress: fill.address ?? formData.customerAddress,
-                  paymentStatus: payment ?? formData.paymentStatus,
-                  phoneFromCrm: fill.phone ? true : formData.phoneFromCrm,
-                  customerEmail: fill.email ?? formData.customerEmail,
-                });
-              }}
-            />
-          )}
-
-          {/* Customer Name */}
-          <div>
-            <label
-              htmlFor="customerName"
-              className="block text-sm font-medium text-foreground"
-            >
-              Customer Name *
-            </label>
-            <input
-              id="customerName"
-              type="text"
-              value={formData.customerName}
-              onChange={(e) => set("customerName", e.target.value)}
-              placeholder="Enter customer name"
-              className={`mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
-                errors.customerName ? "border-destructive" : "border-input"
-              }`}
-            />
-            {errors.customerName && (
-              <p className="mt-1 text-xs text-destructive">
-                {errors.customerName}
-              </p>
-            )}
-          </div>
-
-          {/* Phone -- masked unless the account may see customer phones. */}
-          <div>
-            <label
-              htmlFor="customerPhone"
-              className="block text-sm font-medium text-foreground"
-            >
-              Phone Number *
-            </label>
-            <input
-              id="customerPhone"
-              type="tel"
-              inputMode="numeric"
-              maxLength={10}
-              value={
-                maskPhoneField
-                  ? maskPhoneNumber(formData.customerPhone)
-                  : formData.customerPhone
-              }
-              readOnly={maskPhoneField}
-              onChange={(e) =>
-                set(
-                  "customerPhone",
-                  e.target.value.replace(/\D/g, "").slice(0, 10),
-                )
-              }
-              placeholder="10-digit phone number"
-              className={`mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
-                errors.customerPhone ? "border-destructive" : "border-input"
-              }`}
-            />
-            {maskCrmPhone && !editContext && (
-              <button
-                type="button"
-                className="mt-1 text-xs text-muted-foreground underline"
-                onClick={() =>
+            {!editContext && (
+              <CrmLeadAutofill
+                target="sales"
+                onFill={(fill) => {
                   onFormDataChange({
                     ...formData,
-                    customerPhone: "",
-                    phoneFromCrm: false,
-                  })
-                }
-              >
-                Enter a different number
-              </button>
+                    customerName: fill.name ?? formData.customerName,
+                    customerPhone: fill.phone ?? formData.customerPhone,
+                    customerAddress: fill.address ?? formData.customerAddress,
+                    phoneFromCrm: fill.phone ? true : formData.phoneFromCrm,
+                    customerEmail: fill.email ?? formData.customerEmail,
+                  });
+                }}
+              />
             )}
-            {errors.customerPhone && (
-              <p className="mt-1 text-xs text-destructive">
-                {errors.customerPhone}
-              </p>
-            )}
-          </div>
 
-          {/* Sales Agent -- read-only, set to whoever is actually logged in
+            {/* Existing learner: fills the customer fields and lets Sales pick
+              which of the learner's services this slot is for. */}
+            {/* Hidden once the learner is known (opened from Find learner /
+              "Book classes", or found by the phone number): their details and
+              service are already filled in, so there is nothing to search. */}
+            {!editContext &&
+              !formData.enrollmentId &&
+              !learnerLookup.data &&
+              !learnerLookup.isLoading && (
+                <ExistingLearnerPicker
+                  onFill={(fill) =>
+                    onFormDataChange({
+                      ...formData,
+                      customerName: fill.name ?? formData.customerName,
+                      customerPhone: fill.phone ?? formData.customerPhone,
+                      phoneFromCrm: fill.phone ? true : formData.phoneFromCrm,
+                      customerEmail: fill.email ?? formData.customerEmail,
+                      customerAddress:
+                        formData.customerAddress || fill.address || "",
+                      paymentStatus:
+                        fill.service?.paymentStatus ?? formData.paymentStatus,
+                      paymentManual: fill.service
+                        ? false
+                        : formData.paymentManual,
+                      enrollmentId: fill.service?.enrollmentId,
+                      serviceLabel: fill.service?.serviceLabel,
+                    })
+                  }
+                />
+              )}
+
+            {/* The service these classes belong to. Chosen by default from the
+              customer's own services (found by phone); required when they
+              have any. "Book classes" and the existing-learner picker above
+              also set it. */}
+            {!editContext &&
+            serviceChoices.length > 0 &&
+            (!formData.enrollmentId || changingService) ? (
+              <div>
+                <label
+                  htmlFor="serviceFor"
+                  className="block text-sm font-medium text-foreground"
+                >
+                  Service for these classes *
+                </label>
+                <select
+                  id="serviceFor"
+                  value={formData.enrollmentId ?? ""}
+                  onChange={(e) => {
+                    setChangingService(false);
+                    const pick = serviceChoices.find(
+                      (s) => s.enrollment.id === e.target.value,
+                    );
+                    onFormDataChange({
+                      ...formData,
+                      enrollmentId: pick?.enrollment.id,
+                      serviceLabel: pick?.label,
+                      paymentStatus: pick
+                        ? paymentStatusOf(pick.enrollment.payment_status)
+                        : formData.paymentStatus,
+                      paymentManual: pick ? false : formData.paymentManual,
+                    });
+                  }}
+                  className={`mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+                    errors.service ? "border-destructive" : "border-input"
+                  }`}
+                >
+                  <option value="" disabled>
+                    Choose a service…
+                  </option>
+                  {serviceChoices.map((s) => (
+                    <option key={s.enrollment.id} value={s.enrollment.id}>
+                      {s.label} ·{" "}
+                      {s.enrollment.payment_status === "full_paid"
+                        ? "Paid"
+                        : s.enrollment.payment_status === "half_paid"
+                          ? "Half paid"
+                          : "Unpaid"}
+                    </option>
+                  ))}
+                </select>
+                {errors.service ? (
+                  <p className="mt-1 text-xs text-destructive">
+                    {errors.service}
+                  </p>
+                ) : (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    The classes are linked to this order, not saved as text
+                    only.
+                  </p>
+                )}
+              </div>
+            ) : formData.enrollmentId ? (
+              <div className="flex items-center justify-between gap-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+                <span className="min-w-0">
+                  For service: <b>{formData.serviceLabel ?? "Service"}</b>
+                </span>
+                {!editContext && serviceChoices.length > 1 && (
+                  <button
+                    type="button"
+                    className="shrink-0 text-blue-700 underline"
+                    onClick={() => setChangingService(true)}
+                  >
+                    Change
+                  </button>
+                )}
+              </div>
+            ) : !editContext &&
+              formPhone10 &&
+              learnerLookup.isSuccess &&
+              serviceChoices.length === 0 ? (
+              <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                {learnerLookup.data
+                  ? "This learner has no service yet. The slot is saved now and links itself once a service is sold."
+                  : "No learner has this number yet. The slot is saved now and links itself once the learner and their service are created."}
+              </p>
+            ) : null}
+
+            {/* Customer Name */}
+            <div>
+              <label
+                htmlFor="customerName"
+                className="block text-sm font-medium text-foreground"
+              >
+                Customer Name *
+              </label>
+              <input
+                id="customerName"
+                type="text"
+                value={formData.customerName}
+                onChange={(e) => set("customerName", e.target.value)}
+                placeholder="Enter customer name"
+                className={`mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+                  errors.customerName ? "border-destructive" : "border-input"
+                }`}
+              />
+              {errors.customerName && (
+                <p className="mt-1 text-xs text-destructive">
+                  {errors.customerName}
+                </p>
+              )}
+            </div>
+
+            {/* Phone -- masked unless the account may see customer phones. */}
+            <div>
+              <label
+                htmlFor="customerPhone"
+                className="block text-sm font-medium text-foreground"
+              >
+                Phone Number *
+              </label>
+              <input
+                id="customerPhone"
+                type="tel"
+                inputMode="numeric"
+                maxLength={10}
+                value={
+                  maskPhoneField
+                    ? maskPhoneNumber(formData.customerPhone)
+                    : formData.customerPhone
+                }
+                readOnly={maskPhoneField}
+                onChange={(e) =>
+                  set(
+                    "customerPhone",
+                    e.target.value.replace(/\D/g, "").slice(0, 10),
+                  )
+                }
+                placeholder="10-digit phone number"
+                className={`mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+                  errors.customerPhone ? "border-destructive" : "border-input"
+                }`}
+              />
+              {maskCrmPhone && !editContext && (
+                <button
+                  type="button"
+                  className="mt-1 text-xs text-muted-foreground underline"
+                  onClick={() =>
+                    onFormDataChange({
+                      ...formData,
+                      customerPhone: "",
+                      phoneFromCrm: false,
+                    })
+                  }
+                >
+                  Enter a different number
+                </button>
+              )}
+              {errors.customerPhone && (
+                <p className="mt-1 text-xs text-destructive">
+                  {errors.customerPhone}
+                </p>
+              )}
+            </div>
+
+            {/* Sales Agent -- read-only, set to whoever is actually logged in
               (see currentUserName in SalesDashboard.tsx). This used to be
               free text nobody was required to fill in accurately, so there
               was no reliable way to trace who created a given booking;
               locking it to the real account closes that gap. */}
-          <div>
-            <label
-              htmlFor="salesAgent"
-              className="block text-sm font-medium text-foreground"
-            >
-              Sales Agent
-            </label>
-            <input
-              id="salesAgent"
-              type="text"
-              readOnly
-              value={formData.salesAgent}
-              placeholder="Loading…"
-              className={`mt-1 w-full rounded-lg border border-input bg-muted px-3 py-2 text-sm text-muted-foreground ${
-                errors.salesAgent ? "border-destructive" : "border-input"
-              }`}
-            />
-            {errors.salesAgent && (
-              <p className="mt-1 text-xs text-destructive">
-                {errors.salesAgent}
+            <div>
+              <label
+                htmlFor="salesAgent"
+                className="block text-sm font-medium text-foreground"
+              >
+                Sales Agent
+              </label>
+              <input
+                id="salesAgent"
+                type="text"
+                readOnly
+                value={formData.salesAgent}
+                placeholder="Loading…"
+                className={`mt-1 w-full rounded-lg border border-input bg-muted px-3 py-2 text-sm text-muted-foreground ${
+                  errors.salesAgent ? "border-destructive" : "border-input"
+                }`}
+              />
+              {errors.salesAgent && (
+                <p className="mt-1 text-xs text-destructive">
+                  {errors.salesAgent}
+                </p>
+              )}
+            </div>
+
+            {/* Payment status. Starts from the linked service's status, and
+              the agent can change it by hand. A hand-set value is flagged
+              (payment_manual) so the automatic re-sync does not undo it. */}
+            <div>
+              <label
+                htmlFor="paymentStatus"
+                className="block text-sm font-medium text-foreground"
+              >
+                Payment
+              </label>
+              <select
+                id="paymentStatus"
+                value={formData.paymentStatus}
+                onChange={(ev) =>
+                  onFormDataChange({
+                    ...formData,
+                    paymentStatus: ev.target
+                      .value as CustomerFormValues["paymentStatus"],
+                    paymentManual: true,
+                  })
+                }
+                className="mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
+              >
+                <option value="unpaid">Unpaid</option>
+                <option value="half_paid">Half paid</option>
+                <option value="full_paid">Paid</option>
+              </select>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {formData.paymentManual
+                  ? "Set by hand."
+                  : formData.serviceLabel
+                    ? `From ${formData.serviceLabel}.`
+                    : "Unpaid until a service is linked."}{" "}
+                This label is only a note: the customer still pays through a
+                payment link.
               </p>
+            </div>
+
+            {/* Address with Google Places Autocomplete */}
+            <div>
+              <label
+                htmlFor="customerAddress"
+                className="block text-sm font-medium text-foreground"
+              >
+                Customer Address *
+              </label>
+              <AddressAutocomplete
+                id="customerAddress"
+                value={formData.customerAddress}
+                onChange={(address) => set("customerAddress", address)}
+                placeholder="Search address..."
+              />
+              {errors.customerAddress && (
+                <p className="mt-1 text-xs text-destructive">
+                  {errors.customerAddress}
+                </p>
+              )}
+            </div>
+
+            {/* Course: only while the slot is not linked to a service (a customer
+              with no learner / service yet). A linked slot takes its course
+              from the service, so there is nothing to type or pick. */}
+            {!formData.enrollmentId && (
+              <div>
+                <label
+                  htmlFor="course"
+                  className="block text-sm font-medium text-foreground"
+                >
+                  Course *
+                </label>
+                <select
+                  id="course"
+                  value={formData.course}
+                  onChange={(e) => set("course", e.target.value)}
+                  className={`mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+                    errors.course ? "border-destructive" : "border-input"
+                  }`}
+                >
+                  {courseOptions.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.label}
+                    </option>
+                  ))}
+                </select>
+                {errors.course && (
+                  <p className="mt-1 text-xs text-destructive">
+                    {errors.course}
+                  </p>
+                )}
+              </div>
             )}
-          </div>
 
-          {/* Payment Status */}
-          <div>
-            <label
-              htmlFor="paymentStatus"
-              className="block text-sm font-medium text-foreground"
-            >
-              Payment Status
-            </label>
-            <select
-              id="paymentStatus"
-              value={formData.paymentStatus}
-              onChange={(e) =>
-                set(
-                  "paymentStatus",
-                  e.target.value as "unpaid" | "half_paid" | "full_paid",
-                )
-              }
-              className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            >
-              <option value="unpaid">Unpaid</option>
-              <option value="half_paid">Half Paid</option>
-              <option value="full_paid">Full Paid</option>
-            </select>
-          </div>
-
-          {/* Address with Google Places Autocomplete */}
-          <div>
-            <label
-              htmlFor="customerAddress"
-              className="block text-sm font-medium text-foreground"
-            >
-              Customer Address *
-            </label>
-            <AddressAutocomplete
-              id="customerAddress"
-              value={formData.customerAddress}
-              onChange={(address) => set("customerAddress", address)}
-              placeholder="Search address..."
-            />
-            {errors.customerAddress && (
-              <p className="mt-1 text-xs text-destructive">
-                {errors.customerAddress}
-              </p>
-            )}
-          </div>
-
-          {/* Course */}
-          <div>
-            <label
-              htmlFor="course"
-              className="block text-sm font-medium text-foreground"
-            >
-              Course *
-            </label>
-            <select
-              id="course"
-              value={formData.course}
-              onChange={(e) => set("course", e.target.value)}
-              className={`mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
-                errors.course ? "border-destructive" : "border-input"
-              }`}
-            >
-              {courseOptions.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
-            {errors.course && (
-              <p className="mt-1 text-xs text-destructive">{errors.course}</p>
-            )}
-          </div>
-
-          {/* Buttons */}
-          <div className="flex gap-3 pt-4">
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={createTentativeMutation.isPending}
-              className="flex-1 rounded-lg border border-input bg-background px-4 py-2 text-sm font-medium text-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={handleSubmit}
-              disabled={createTentativeMutation.isPending || hasAnyConflict}
-              className="flex-1 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-            >
-              {createTentativeMutation.isPending
-                ? editContext
-                  ? "Saving..."
-                  : "Booking..."
-                : editContext
-                  ? "Save Changes"
-                  : slots.length > 1
-                    ? `Create ${slots.length} Tentative Blocks`
-                    : "Create Tentative Block"}
-            </button>
+            {!asPanel && footer}
           </div>
         </div>
+        {asPanel && footer}
       </div>
 
       {/* Bulk Add Schedules. Deliberately NOT the shared Radix <Dialog>: that

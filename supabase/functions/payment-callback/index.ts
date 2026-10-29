@@ -1,6 +1,8 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+import { isLicenceEnrollment } from "../_shared/licence.ts";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
@@ -270,7 +272,36 @@ serve(async (req) => {
     // If payment is successful, update related records
     if (isSuccess) {
       try {
+        // A licence service (rto_only) has no course and no lessons: mark it
+        // paid and stop. The course branch would unlock phantom lessons and
+        // rewrite `progress`. Mirrors _shared/complete-payment.ts.
+        let licenceHandled = false;
         if (paymentType === "course") {
+          const { data: licenceRow, error: licenceQueryError } =
+            await supabaseClient
+              .from("enrollment")
+              .select("id, case_type")
+              .eq("payment_id", paymentId)
+              .maybeSingle();
+          // Never let this lookup break an ordinary course payment: on any
+          // error fall through to the unchanged course branch below.
+          if (licenceQueryError) {
+            console.error("Licence enrollment lookup failed:", licenceQueryError);
+          }
+          if (!licenceQueryError && isLicenceEnrollment(licenceRow)) {
+            const { error: licenceUpdateError } = await supabaseClient
+              .from("enrollment")
+              .update({ payment_status: "full_paid", status: "active" })
+              .eq("id", licenceRow.id);
+            if (licenceUpdateError) throw licenceUpdateError;
+            licenceHandled = true;
+            recordTiming("licence-enrollment-updated");
+          }
+        }
+
+        if (licenceHandled) {
+          // Handled above.
+        } else if (paymentType === "course") {
           // Get enrollment record with existing unlocked lessons
           const { data: enrollment, error: enrollmentQueryError } =
             await supabaseClient

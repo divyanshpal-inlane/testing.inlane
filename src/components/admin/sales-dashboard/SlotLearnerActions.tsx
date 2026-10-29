@@ -3,12 +3,17 @@ import {
   ArrowBigLeft,
   Delete,
   Pencil,
+  PlusCircle,
   RefreshCcw,
-  Send,
   UserPlus,
 } from "lucide-react";
 import { useState } from "react";
 
+import { AdditionalServiceDialog } from "@/components/admin/learner/AdditionalServiceDialog";
+import {
+  listLearnerServices,
+  serviceLabel,
+} from "@/components/admin/learner/additionalServices";
 import {
   CreatedLearnerInfo,
   CreateLearnerDialog,
@@ -18,14 +23,21 @@ import {
   deleteLearnerCascade,
   ENROLLMENT_SELECT,
   EnrollmentRecord,
-  sendEnrollmentPaymentLink,
 } from "@/components/admin/learner/enrollmentActions";
-import { PaidInfoDialog } from "@/components/admin/learner/PaidInfoDialog";
+import { LearnerHistory } from "@/components/admin/learner/LearnerHistory";
+import { LearnerNameSearch } from "@/components/admin/learner/LearnerNameSearch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/use-toast";
+import type { OrderSlot } from "@/lib/sales-dashboard/orderSlots";
+import {
+  type BookingIntent,
+  paymentStatusOf,
+} from "@/lib/sales-dashboard/serviceBooking";
 import { normalizePhone } from "@/lib/sales-dashboard/validation";
 import { supabase } from "@/lib/supabaseClient";
+
+import { type ServiceChoice, SlotServiceLink } from "./SlotServiceLink";
 
 export interface SlotCustomer {
   name: string;
@@ -38,6 +50,23 @@ export interface SlotCustomer {
   /** Course label saved on the booking, if any. */
   course: string;
   paymentStatus: "unpaid" | "half_paid" | "full_paid";
+  // Present for a saved tentative slot (not for the "Booking saved" card):
+  // what is needed to link the slot to one of the learner's services.
+  scheduleId?: number;
+  instructorId?: string;
+  /** May this viewer edit the slot (so also link it to a service)? */
+  canEdit?: boolean;
+  /**
+   * The slot is a class Operations has confirmed (booked / completed / paused),
+   * not a tentative hold. Its learner section is for looking things up and
+   * selling, so "Delete" (which wipes the learner and every order) is not shown.
+   */
+  confirmedClass?: boolean;
+  /** The payment label was set by hand: do not re-sync it from the service. */
+  paymentManual?: boolean;
+  /** The service (enrollment) the slot is already linked to, if any. */
+  enrollmentId?: string;
+  serviceLabel?: string;
 }
 
 interface LearnerLookup {
@@ -53,7 +82,23 @@ interface LearnerLookup {
  * info or delete the learner -- all through the same dialogs and calls the
  * Learner Management page uses.
  */
-export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
+export function SlotLearnerActions({
+  customer,
+  onBookClasses,
+  onLinkService,
+  onEditSlots,
+}: {
+  customer: SlotCustomer;
+  /** Open an order's booked classes for editing (History & orders). */
+  onEditSlots?: (slots: OrderSlot[]) => void;
+  /** Start booking classes for a service (closes dialogs, arms the grid). */
+  onBookClasses?: (intent: BookingIntent) => void;
+  /** Link this slot (and the classes booked with it) to a service. */
+  onLinkService?: (
+    customer: SlotCustomer,
+    choice: ServiceChoice,
+  ) => Promise<void>;
+}) {
   // The learner is matched by PHONE NUMBER only. A booking made in Instructor
   // Management carries no phone, so Sales can type one to check.
   const savedPhone10 = normalizePhone(customer.phone);
@@ -69,8 +114,8 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
   // hides the payment link for RTO-only cases, which have no payable course).
   const [created, setCreated] = useState<CreatedLearnerInfo | null>(null);
   const [editOpen, setEditOpen] = useState(false);
-  const [paidInfoOpen, setPaidInfoOpen] = useState(false);
-  const [isSending, setIsSending] = useState(false);
+  const [serviceOpen, setServiceOpen] = useState(false);
+  const [serviceTab, setServiceTab] = useState<"sell" | "services">("sell");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
 
@@ -109,26 +154,30 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: lookupKey });
 
+  // Slots are linked to a service by default: when this slot's learner is
+  // created, or a service is sold, with the slot open, link the slot to it.
+  const canAutoLink =
+    customer.scheduleId != null &&
+    !customer.enrollmentId &&
+    Boolean(customer.canEdit) &&
+    Boolean(onLinkService);
+  const linkSlotTo = async (e: EnrollmentRecord) => {
+    if (!canAutoLink || !onLinkService || e.case_type === "rto_only") return;
+    await onLinkService(customer, {
+      enrollmentId: e.id,
+      serviceLabel: serviceLabel(e),
+      paymentStatus: paymentStatusOf(e.payment_status),
+    });
+  };
+  const linkNewService = async (info: CreatedLearnerInfo) => {
+    if (!canAutoLink || !info.enrollmentId) return;
+    const list = await listLearnerServices(info.learnerId);
+    const created = list.find((x) => x.id === info.enrollmentId);
+    if (created) await linkSlotTo(created);
+  };
+
   const found = lookup.data ?? null;
   const enrollment = found?.enrollment ?? null;
-
-  const handleSend = async () => {
-    if (!enrollment) return;
-    setIsSending(true);
-    try {
-      await sendEnrollmentPaymentLink(enrollment, toast);
-    } catch (err) {
-      toast({
-        title: "Error",
-        description:
-          (err as { message?: string } | null)?.message ||
-          "Failed to send payment link",
-        variant: "destructive",
-      });
-    } finally {
-      setIsSending(false);
-    }
-  };
 
   const handleDelete = async () => {
     if (!found) return;
@@ -207,7 +256,14 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
           {customer.phone
             ? "The phone number on this booking isn't valid."
             : "This booking has no phone number."}{" "}
-          Enter one to check for a learner.
+          Search the learner by name to check:
+        </p>
+        <LearnerNameSearch
+          onPick={(l) => setCheckedPhone(l.phone ?? "")}
+          placeholder="Learner name or e-mail"
+        />
+        <p className="slot-panel-learner-note">
+          Or, if you have the number, enter it:
         </p>
         <form
           className="slot-panel-learner-phone"
@@ -261,76 +317,82 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
     );
   } else if (found) {
     const { learner } = found;
-    const fullyPaid = enrollment?.payment_status === "full_paid";
-    // RTO-only learners created here have no payable course enrollment.
-    const noLink =
-      created !== null &&
-      (created.caseType !== "classes_only" || !created.enrollmentId);
     body = (
       <>
-        <p className="slot-panel-learner-status ok">
-          {created ? "✓ Learner created" : "✓ Learner already created"}
-          {learner.name ? ` (${learner.name})` : ""}
-        </p>
+        {/* Learner: who they are and what can be done now. */}
+        <>
+          <p className="slot-panel-learner-status ok">
+            {created ? "✓ Learner created" : "✓ Learner already created"}
+            {learner.name ? ` (${learner.name})` : ""}
+          </p>
 
-        {enrollment ? (
-          <p className="slot-panel-learner-note">
-            Payment: {enrollment.payment_status ?? "pending"}
-            {fullyPaid ? " — already fully paid." : ""}
-          </p>
-        ) : (
-          <p className="slot-panel-learner-note">
-            No enrollment found, so there is no payment to send or edit.
-          </p>
-        )}
+          {!enrollment && (
+            <p className="slot-panel-learner-note">
+              No enrollment found, so there is no payment to send or edit.
+            </p>
+          )}
 
-        <div className="slot-panel-learner-actions">
-          {enrollment && !noLink && (
+          {customer.scheduleId != null && onLinkService && (
+            <SlotServiceLink
+              learnerId={learner.id}
+              courseText={customer.course || undefined}
+              linkedLabel={customer.serviceLabel}
+              linkedEnrollmentId={customer.enrollmentId}
+              storedPaymentStatus={customer.paymentStatus}
+              paymentManual={customer.paymentManual}
+              canEdit={Boolean(customer.canEdit)}
+              onLink={(choice) => onLinkService(customer, choice)}
+            />
+          )}
+
+          <div className="slot-panel-learner-actions">
+            {enrollment && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setEditOpen(true)}
+                className="whitespace-nowrap"
+              >
+                <Pencil size={14} className="mr-1" />
+                Edit
+              </Button>
+            )}
             <Button
               variant="outline"
               size="sm"
-              disabled={isSending}
-              onClick={() => void handleSend()}
+              onClick={() => {
+                setServiceTab("sell");
+                setServiceOpen(true);
+              }}
               className="whitespace-nowrap"
             >
-              {isSending ? (
-                <RefreshCcw size={14} className="mr-1 animate-spin" />
-              ) : (
-                <Send size={14} className="mr-1" />
-              )}
-              Send Payment Link
+              <PlusCircle size={14} className="mr-1" />
+              Additional service
             </Button>
+            {!customer.confirmedClass && deleteControls}
+          </div>
+          {!customer.confirmedClass && confirmingDelete && (
+            <p className="slot-panel-learner-note">
+              This permanently deletes the learner and all of their enrollments
+              and payments.
+            </p>
           )}
-          {enrollment && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setEditOpen(true)}
-              className="whitespace-nowrap"
-            >
-              <Pencil size={14} className="mr-1" />
-              Edit
-            </Button>
-          )}
-          {enrollment && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setPaidInfoOpen(true)}
-              className="whitespace-nowrap"
-            >
-              <Send size={14} className="mr-1" />
-              Add paid info
-            </Button>
-          )}
-          {deleteControls}
-        </div>
-        {confirmingDelete && (
-          <p className="slot-panel-learner-note">
-            This permanently deletes the learner and all of their enrollments
-            and payments.
-          </p>
-        )}
+        </>
+
+        {/* History & orders: always visible below, no click needed. */}
+        <section className="mt-4 border-t pt-3">
+          <h3 className="slot-panel-learner-title">History &amp; orders</h3>
+          <LearnerHistory
+            learner={{
+              id: learner.id,
+              name: learner.name,
+              phone: learner.phone,
+              email: enrollment?.Learner?.email ?? customer.email ?? null,
+            }}
+            onBookClasses={onBookClasses}
+            onEditSlots={onEditSlots}
+          />
+        </section>
       </>
     );
   } else {
@@ -365,6 +427,7 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
         onCreated={(info) => {
           setCreated(info);
           void refresh();
+          void linkNewService(info);
         }}
       />
       <EditPlanDialog
@@ -373,11 +436,30 @@ export function SlotLearnerActions({ customer }: { customer: SlotCustomer }) {
         enrollment={enrollment}
         onSaved={() => void refresh()}
       />
-      <PaidInfoDialog
-        open={paidInfoOpen}
-        onOpenChange={setPaidInfoOpen}
-        enrollment={enrollment}
-        onSaved={() => void refresh()}
+      <AdditionalServiceDialog
+        open={serviceOpen}
+        onOpenChange={setServiceOpen}
+        learner={
+          found
+            ? {
+                id: found.learner.id,
+                name: found.learner.name,
+                phone: found.learner.phone,
+                email: enrollment?.Learner?.email ?? customer.email ?? null,
+              }
+            : null
+        }
+        onDone={() => void refresh()}
+        initialTab={serviceTab}
+        onServiceCreated={(e) => void linkSlotTo(e)}
+        onBookClasses={
+          onBookClasses
+            ? (intent) => {
+                setServiceOpen(false);
+                onBookClasses(intent);
+              }
+            : undefined
+        }
       />
     </div>
   );
