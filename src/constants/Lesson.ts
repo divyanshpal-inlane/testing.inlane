@@ -35,6 +35,12 @@ export type LessonContent = Record<
         color: string;
         video_path: string;
       }[];
+      links?: {
+        title: string;
+        icon: string;
+        color: string;
+        url: string;
+      }[];
       signature?: { title: string; icon: string; color: string };
     };
   }
@@ -65,6 +71,14 @@ export const LESSON_CONTENT: LessonContent = {
           color: "bg-[#6257FF]",
           video_path:
             "https://inlane-lesson-content.s3.ap-south-1.amazonaws.com/2-1.mp4",
+        },
+      ],
+      links: [
+        {
+          title: "Lane rules",
+          icon: "🛣️",
+          color: "bg-[#D9FF7A]",
+          url: "https://drive.google.com/file/d/1N51L3HlrZ6SmH6opOVT8RUgoq9b5xcYW/view?usp=drive_link",
         },
       ],
     },
@@ -327,6 +341,14 @@ export const LESSON_CONTENT: LessonContent = {
           color: "bg-[#00CE84]",
           video_path:
             "https://inlane-lesson-content.s3.ap-south-1.amazonaws.com/5.mp4",
+        },
+      ],
+      links: [
+        {
+          title: "Lane rules",
+          icon: "🛣️",
+          color: "bg-[#D9FF7A]",
+          url: "https://drive.google.com/file/d/1C1m47sbeW3Jnnu_HZ1Ty_woj3nvGvIru/view?usp=drive_link",
         },
       ],
     },

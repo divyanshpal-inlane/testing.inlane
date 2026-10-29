@@ -152,7 +152,7 @@ export function LessonPlan({
     setSelectedCard(null);
   }, []);
 
-  const { trivia, video: videos, signature } = menu ?? {};
+  const { trivia, video: videos, links, signature } = menu ?? {};
   const {
     title: triviaTitle,
     icon: triviaIcon,
@@ -186,6 +186,15 @@ export function LessonPlan({
             ),
           }))
         : []),
+      ...(links && links.length > 0
+        ? links.map((link) => ({
+            title: link.title,
+            icon: link.icon,
+            color: link.color,
+            externalUrl: link.url,
+            content: null,
+          }))
+        : []),
       ...(trivia && game
         ? [
             {
@@ -209,6 +218,7 @@ export function LessonPlan({
     ],
     [
       videos,
+      links,
       trivia,
       game,
       finishGame,
@@ -532,7 +542,17 @@ export function LessonPlan({
                   animate={{ opacity: 1, y: -index * 20 }}
                   transition={{ delay: index * 0.1 }}
                   className={`${item.color} flex cursor-pointer items-center justify-between rounded-lg p-4 py-8 ${index === menuItems.length - 1 ? "mb-8" : ""}`}
-                  onClick={() => handleCardClick(index)}
+                  onClick={() => {
+                    if (item.externalUrl) {
+                      window.open(
+                        item.externalUrl,
+                        "_blank",
+                        "noopener,noreferrer",
+                      );
+                      return;
+                    }
+                    handleCardClick(index);
+                  }}
                 >
                   <span className="text-3xl font-medium">{item.title}</span>
                   <span className="text-5xl">{item.icon}</span>
