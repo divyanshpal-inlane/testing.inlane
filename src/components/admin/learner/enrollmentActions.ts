@@ -1,8 +1,6 @@
 import type { useToast } from "@/components/ui/use-toast";
 import { supabase } from "@/lib/supabaseClient";
 
-import { logPaymentLink } from "./paymentTrace";
-
 // Enrollment-level actions shared by Learner Management's "Incomplete
 // Payments" card and the Sales Dashboard's slot panel. The bodies were moved
 // out of IncompletePaymentsCard.tsx unchanged, so both places hit the same
@@ -21,13 +19,6 @@ export interface EnrollmentRecord {
   installment2_amount: number | null;
   payment_status: string | null;
   payment_id: string | null;
-  /** e.g. { type: "topup", total_hours: 4 }; selected by ENROLLMENT_SELECT. */
-  progress?: { type?: string; total_hours?: number } | null;
-  /** classes_only | rto_only | lessons_with_rto (licence services are rto_only). */
-  case_type?: string | null;
-  vehicle_type?: string | null;
-  two_wheeler_requirement?: string | null;
-  four_wheeler_requirement?: string | null;
   Learner: {
     id: string;
     name: string | null;
@@ -58,11 +49,6 @@ export const ENROLLMENT_SELECT = `
   installment2_amount,
   payment_status,
   payment_id,
-  progress,
-  case_type,
-  vehicle_type,
-  two_wheeler_requirement,
-  four_wheeler_requirement,
   created_at,
   Learner (id, name, phone, email),
   Courses (id, name, duration),
@@ -145,17 +131,9 @@ export async function sendEnrollmentPaymentLink(
     );
     typeParam = `&type=topup&hours=${topupHours}`;
   }
-  const paymentLink = `https://inlane-web-app.vercel.app/payment?phone=${learner.phone}${typeParam}&enrollment=${enrollment.id}`;
+  const paymentLink = `https://inlane-web-app.vercel.app/payment?phone=${learner.phone}${typeParam}`;
 
   const courseName = getCourseName(enrollment);
-  void logPaymentLink({
-    learnerId: learner.id,
-    enrollmentId: enrollment.id,
-    serviceType: paymentType === "topup" ? "topup" : "course",
-    serviceLabel: courseName,
-    amount: paymentAmount,
-    url: paymentLink,
-  });
   const { error: invokeError } = await supabase.functions.invoke(
     "send-payment-link-email",
     {
@@ -208,6 +186,83 @@ export async function sendEnrollmentPaymentLink(
     title: "Success",
     description: `Payment link sent to ${learner.name} successfully!`,
   });
+}
+
+/**
+ * Records the installments an admin marks as paid: inserts a completed
+ * `payment` row, activates the enrollment and notifies the learner. Same steps
+ * as process-payment (see the card's handleUpdatePaidInfoSave).
+ */
+export async function saveManualPaidInfo(
+  enrollment: EnrollmentRecord,
+  installment1: number | null,
+  installment2: number | null,
+): Promise<"full_paid" | "half_paid"> {
+  // Determine payment status based on which installments are paid
+  // If both installments paid OR if it's full payment mode -> full_paid
+  // If only first installment paid -> half_paid
+  const isFullPayment = enrollment.installment_mode === "full";
+  const bothInstallmentsPaid = installment1 && installment2;
+  const paymentStatus =
+    isFullPayment || bothInstallmentsPaid ? "full_paid" : "half_paid";
+
+  // Calculate the amount being paid
+  const paidAmount = (installment1 || 0) + (installment2 || 0);
+
+  // Determine installment_type for payment record
+  let installmentType = "full";
+  if (!isFullPayment) {
+    if (installment1 && !installment2) {
+      installmentType = "first_half";
+    } else if (installment1 && installment2) {
+      installmentType = "full";
+    }
+  }
+
+  // 1. Make payment record with "completed" status to match automatic payment flow
+  // The enrollment.payment_status tracks full_paid vs half_paid for installments
+  const { data: paymentRecord, error: dbError } = await supabase
+    .from("payment")
+    .insert([
+      {
+        learner_id: enrollment.Learner?.id ?? enrollment.learner_id,
+        amount: paidAmount,
+        total_amount: enrollment.amount || paidAmount,
+        email: enrollment.Learner?.email,
+        phone: enrollment.Learner?.phone,
+        payment_type: "course",
+        status: "completed",
+        name: enrollment.Learner?.name,
+        installment_type: installmentType,
+        installment1_amount: enrollment.installment1_amount,
+        installment2_amount: enrollment.installment2_amount,
+      },
+    ])
+    .select()
+    .single();
+
+  if (dbError) throw new Error("Failed to record payment.");
+
+  // 2. Update Enrollment status - IMPORTANT: Also update payment_status
+  await updateEnrollment(enrollment.id, {
+    amount: enrollment.amount || paidAmount,
+    payment_id: paymentRecord.id,
+    status: "active",
+    payment_status: paymentStatus,
+    installment_mode: paymentStatus === "full_paid" ? "full" : "first_half",
+    installment1_amount: enrollment.installment1_amount,
+    installment2_amount: enrollment.installment2_amount,
+  });
+
+  // 3. Send message
+  await supabase.functions.invoke("send-message", {
+    body: {
+      message_type: "LL_APPLICATION_UPDATE",
+      learner_id: enrollment.Learner?.id,
+    },
+  });
+
+  return paymentStatus;
 }
 
 /**

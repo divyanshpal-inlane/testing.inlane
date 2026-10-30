@@ -9,14 +9,12 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
-import { AdditionalServiceDialog } from "@/components/admin/learner/AdditionalServiceDialog";
 import {
   listLearnerServices,
   serviceLabel,
 } from "@/components/admin/learner/additionalServices";
 import {
   CreatedLearnerInfo,
-  CreateLearnerDialog,
 } from "@/components/admin/learner/CreateLearnerDialog";
 import { EditPlanDialog } from "@/components/admin/learner/EditPlanDialog";
 import {
@@ -436,28 +434,6 @@ export function SlotLearnerActions({
         enrollment={enrollment}
         onSaved={() => void refresh()}
       />
-      <AdditionalServiceDialog
-        open={serviceOpen}
-        onOpenChange={setServiceOpen}
-        learner={
-          found
-            ? {
-                id: found.learner.id,
-                name: found.learner.name,
-                phone: found.learner.phone,
-                email: enrollment?.Learner?.email ?? customer.email ?? null,
-              }
-            : null
-        }
-        onDone={() => void refresh()}
-        initialTab={serviceTab}
-        onServiceCreated={(e) => void linkSlotTo(e)}
-        onBookClasses={
-          onBookClasses
-            ? (intent) => {
-                setServiceOpen(false);
-                onBookClasses(intent);
-              }
             : undefined
         }
       />

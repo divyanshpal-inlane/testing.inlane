@@ -2,7 +2,6 @@ import { useMutation } from "@tanstack/react-query";
 import { ArrowBigLeft, Delete, Pencil, RefreshCcw, Send } from "lucide-react";
 import React, { useEffect, useState } from "react";
 
-import { AdditionalServiceDialog } from "@/components/admin/learner/AdditionalServiceDialog";
 import { EditPlanDialog } from "@/components/admin/learner/EditPlanDialog";
 import {
   deleteLearnerCascade,
@@ -10,10 +9,7 @@ import {
   getPayableAmount,
   sendEnrollmentPaymentLink,
 } from "@/components/admin/learner/enrollmentActions";
-import {
-  CopyableId,
-  displayPaymentId,
-} from "@/components/admin/learner/paymentTrace";
+import { PaidInfoDialog } from "@/components/admin/learner/PaidInfoDialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -42,6 +38,8 @@ export function IncompletePaymentsCard() {
   const [deleteLearnerProcessingList, setDeleteLearnerProcessingList] =
     useState<Record<string, boolean>>({});
   // Dialogs shared with the Sales Dashboard (see components/admin/learner).
+  const [paidInfoDialogOpen, setPaidInfoDialogOpen] = useState(false);
+  const [paidInfoDialogData, setPaidInfoDialogData] = useState<any>(null);
   // const installmentType = manualInstallment1 && manualInstallment2 ? "full"
 
   // Search and pagination state
@@ -66,10 +64,6 @@ export function IncompletePaymentsCard() {
 
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editDialogData, setEditDialogData] = useState<any>(null);
-
-  // --- Additional service / top-up for the row's customer ---
-  const [serviceDialogOpen, setServiceDialogOpen] = useState(false);
-  const [serviceDialogLearner, setServiceDialogLearner] = useState<any>(null);
 
   const { toast } = useToast();
 
@@ -430,13 +424,6 @@ export function IncompletePaymentsCard() {
                               >
                                 {getPaymentStatus(enrollment)}
                               </span>
-                              {enrollment.payment?.id && (
-                                <div className="mt-1">
-                                  <CopyableId
-                                    value={displayPaymentId(enrollment.payment)}
-                                  />
-                                </div>
-                              )}
                             </td>
                             <td className="whitespace-nowrap px-2 py-2 text-right">
                               {/* Show date with tooltip explaining what it represents */}
@@ -583,13 +570,13 @@ export function IncompletePaymentsCard() {
                                 variant="outline"
                                 size="sm"
                                 onClick={() => {
-                                  setServiceDialogLearner(enrollment.Learner);
-                                  setServiceDialogOpen(true);
+                                  setPaidInfoDialogData(enrollment);
+                                  setPaidInfoDialogOpen(true);
                                 }}
                                 className="whitespace-nowrap"
                               >
                                 <Send size={14} className="mr-1" />
-                                Additional service
+                                Add paid info
                               </Button>
                             </td>
                           </tr>
@@ -636,11 +623,11 @@ export function IncompletePaymentsCard() {
             )}
           </>
         )}
-        <AdditionalServiceDialog
-          open={serviceDialogOpen}
-          onOpenChange={setServiceDialogOpen}
-          learner={serviceDialogLearner}
-          onDone={fetchIncompletePayments}
+        <PaidInfoDialog
+          open={paidInfoDialogOpen}
+          onOpenChange={setPaidInfoDialogOpen}
+          enrollment={paidInfoDialogData}
+          onSaved={fetchIncompletePayments}
         />
 
         {/* Edit plan + regenerate link */}

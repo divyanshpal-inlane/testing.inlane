@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
-import { LearnerServicesList } from "@/components/admin/learner/LearnerServicesList";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -777,12 +776,6 @@ export const LearnerInfoDialog = ({
             </div>
 
             <div className="space-y-6">
-              <div className="rounded-lg bg-gray-50 p-5 shadow-sm transition-shadow hover:shadow-md">
-                <h3 className="mb-3 border-b pb-2 text-lg font-semibold text-primary">
-                  Courses &amp; services
-                </h3>
-                <LearnerServicesList learnerId={learner.id} />
-              </div>
               {courseInfo && (
                 <div className="rounded-lg bg-gray-50 p-5 shadow-sm transition-shadow hover:shadow-md">
                   <h3 className="mb-4 border-b pb-2 text-lg font-semibold text-primary">
