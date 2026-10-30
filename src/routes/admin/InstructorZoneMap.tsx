@@ -252,9 +252,12 @@ export default function InstructorZoneMap() {
    * and customer booking by the availability engine, independent of anything
    * toggled here.
    */
+  // Active shows by default; On Break and Inactive start off (so the map isn't
+  // cluttered with instructors who can't be booked), but the admin can switch
+  // either back on at any time via the sidebar toggles.
   const [statusFilter, setStatusFilter] = useState<
     Record<InstructorStatus, boolean>
-  >({ active: true, on_break: true, inactive: true });
+  >({ active: true, on_break: false, inactive: false });
 
   /** True when this instructor's status is currently visible to the admin. */
   const statusVisible = useCallback(
